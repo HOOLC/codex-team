@@ -1,0 +1,25 @@
+{
+  "name": "codex-team",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "codexm": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "rslib build",
+    "dev": "rslib build --watch",
+    "test": "rstest run",
+    "test:watch": "rstest watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@rslib/core": "^0.20.0",
+    "@rstest/core": "^0.9.3",
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}
