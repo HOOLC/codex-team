@@ -15,6 +15,7 @@ After install, use the `codexm` command.
 ## Commands
 
 ```bash
+codexm --version
 codexm current
 codexm list [name]
 codexm save <name>
@@ -28,6 +29,24 @@ codexm doctor
 ```
 
 Use `--json` on query and mutation commands when you need machine-readable output.
+
+## CI And Release
+
+GitHub Actions will run tests, typecheck, and build on pushes to `master`, pull requests targeting `master`, and manual runs.
+
+Publishing to npm happens automatically when you push a tag like `v0.0.5`, as long as the tag matches the `package.json` version.
+
+Before enabling auto publish, add an Actions secret named `NPM_TOKEN` with your npm publish token.
+
+```bash
+git switch master
+git pull --ff-only
+npm version 0.0.5 --no-git-tag-version
+git commit -am "chore: bump version to 0.0.5"
+git push origin master
+git tag v0.0.5
+git push origin v0.0.5
+```
 
 ## Typical flow
 
