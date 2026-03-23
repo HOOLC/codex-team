@@ -418,13 +418,19 @@ async function confirmRemoval(
   streams.stdout.write(`Remove saved account "${name}"? [y/N] `);
 
   return await new Promise<boolean>((resolve) => {
+    const cleanup = () => {
+      streams.stdin.off("data", onData);
+      streams.stdin.pause();
+    };
+
     const onData = (buffer: Buffer) => {
       const answer = buffer.toString("utf8").trim().toLowerCase();
-      streams.stdin.off("data", onData);
+      cleanup();
       streams.stdout.write("\n");
       resolve(answer === "y" || answer === "yes");
     };
 
+    streams.stdin.resume();
     streams.stdin.on("data", onData);
   });
 }
