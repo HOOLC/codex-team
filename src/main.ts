@@ -2,6 +2,7 @@ import { stdin as defaultStdin, stdout as defaultStdout, stderr as defaultStderr
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
+import packageJson from "../package.json";
 
 import { maskAccountId } from "./auth-snapshot.js";
 import {
@@ -98,6 +99,8 @@ function printHelp(stream: NodeJS.WriteStream): void {
   stream.write(`codexm - manage multiple Codex ChatGPT auth snapshots
 
 Usage:
+  codexm --version
+  codexm --help
   codexm current [--json]
   codexm list [name] [--json]
   codexm save <name> [--force] [--json]
@@ -449,6 +452,11 @@ export async function runCli(
   const json = parsed.flags.has("--json");
 
   try {
+    if (parsed.flags.has("--version")) {
+      streams.stdout.write(`${packageJson.version}\n`);
+      return 0;
+    }
+
     if (!parsed.command || parsed.flags.has("--help")) {
       printHelp(streams.stdout);
       return 0;

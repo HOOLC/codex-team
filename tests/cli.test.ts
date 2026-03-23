@@ -4,6 +4,7 @@ import { describe, expect, test } from "@rstest/core";
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
+import packageJson from "../package.json";
 
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store.js";
@@ -70,6 +71,34 @@ function createInteractiveStdin(): NodeJS.ReadStream & {
 }
 
 describe("CLI", () => {
+  test("prints version from --version", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["--version"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout.read()).toBe(`${packageJson.version}\n`);
+    expect(stderr.read()).toBe("");
+  });
+
+  test("includes version flag in help output", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["--help"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout.read()).toContain("codexm --version");
+    expect(stderr.read()).toBe("");
+  });
+
   test("supports save and current in json mode", async () => {
     const homeDir = await createTempHome();
 

@@ -15,6 +15,7 @@ After install, use the `codexm` command.
 ## Commands
 
 ```bash
+codexm --version
 codexm current
 codexm list [name]
 codexm save <name>
