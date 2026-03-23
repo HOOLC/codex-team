@@ -35,6 +35,40 @@ function captureWritable(): {
   };
 }
 
+function createInteractiveStdin(): NodeJS.ReadStream & {
+  emitInput: (value: string) => void;
+  pauseCalls: number;
+  resumeCalls: number;
+} {
+  const stream = new PassThrough() as unknown as NodeJS.ReadStream & {
+    emitInput: (value: string) => void;
+    pauseCalls: number;
+    resumeCalls: number;
+  };
+
+  stream.isTTY = true;
+  stream.pauseCalls = 0;
+  stream.resumeCalls = 0;
+
+  const originalPause = stream.pause.bind(stream);
+  stream.pause = (() => {
+    stream.pauseCalls += 1;
+    return originalPause();
+  }) as typeof stream.pause;
+
+  const originalResume = stream.resume.bind(stream);
+  stream.resume = (() => {
+    stream.resumeCalls += 1;
+    return originalResume();
+  }) as typeof stream.resume;
+
+  stream.emitInput = (value: string) => {
+    stream.write(value);
+  };
+
+  return stream;
+}
+
 describe("CLI", () => {
   test("supports save and current in json mode", async () => {
     const homeDir = await createTempHome();
@@ -158,6 +192,44 @@ describe("CLI", () => {
         ok: false,
         error: "Current account is not managed.",
       });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("supports interactive remove without leaving stdin active", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-cli-remove");
+      await runCli(["save", "remove-me", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdin = createInteractiveStdin();
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const removePromise = runCli(["remove", "remove-me"], {
+        store,
+        stdin,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      stdin.emitInput("y\n");
+
+      const removeCode = await removePromise;
+      expect(removeCode).toBe(0);
+      expect(stdout.read()).toBe('Remove saved account "remove-me"? [y/N] \nRemoved account "remove-me".\n');
+      expect(stderr.read()).toBe("");
+      expect(stdin.resumeCalls).toBeGreaterThanOrEqual(1);
+      expect(stdin.pauseCalls).toBeGreaterThanOrEqual(1);
+
+      const accounts = await store.listAccounts();
+      expect(accounts.accounts).toHaveLength(0);
     } finally {
       await cleanupTempHome(homeDir);
     }
