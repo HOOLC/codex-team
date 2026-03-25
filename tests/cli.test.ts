@@ -14,6 +14,7 @@ import {
   jsonResponse,
   readCurrentAuth,
   textResponse,
+  writeCurrentApiKeyAuth,
   writeCurrentAuth,
 } from "./test-helpers.js";
 
@@ -129,6 +130,62 @@ describe("CLI", () => {
         exists: true,
         managed: true,
         matched_accounts: ["cli-main"],
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("supports current and list for apikey auth snapshots", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentApiKeyAuth(homeDir, "sk-cli-primary");
+
+      const saveCode = await runCli(["save", "cli-key", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      expect(saveCode).toBe(0);
+
+      const currentStdout = captureWritable();
+      const currentCode = await runCli(["current", "--json"], {
+        store,
+        stdout: currentStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(currentCode).toBe(0);
+      expect(JSON.parse(currentStdout.read())).toMatchObject({
+        exists: true,
+        auth_mode: "apikey",
+        managed: true,
+        matched_accounts: ["cli-key"],
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list", "--json"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+      expect(JSON.parse(listStdout.read())).toMatchObject({
+        successes: [
+          {
+            name: "cli-key",
+            refresh_status: "unsupported",
+            available: null,
+            plan_type: null,
+            credits_balance: null,
+            five_hour: null,
+            one_week: null,
+          },
+        ],
+        failures: [],
       });
     } finally {
       await cleanupTempHome(homeDir);
@@ -760,7 +817,7 @@ describe("CLI", () => {
         },
       });
 
-      expect((await readCurrentAuth(homeDir)).tokens.account_id).toBe("acct-auto-gamma");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-gamma");
 
       const switchStdout = captureWritable();
       const switchCode = await runCli(["switch", "--auto", "--json"], {
@@ -794,7 +851,7 @@ describe("CLI", () => {
         },
       });
 
-      expect((await readCurrentAuth(homeDir)).tokens.account_id).toBe("acct-auto-beta");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-beta");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -904,7 +961,7 @@ describe("CLI", () => {
         },
       });
 
-      expect((await readCurrentAuth(homeDir)).tokens.account_id).toBe("acct-best-current");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-best-current");
     } finally {
       await cleanupTempHome(homeDir);
     }

@@ -124,7 +124,7 @@ function describeCurrentStatus(status: Awaited<ReturnType<AccountStore["getCurre
   } else {
     lines.push("Current auth: present");
     lines.push(`Auth mode: ${status.auth_mode}`);
-    lines.push(`Account ID: ${maskAccountId(status.account_id ?? "")}`);
+    lines.push(`Identity: ${maskAccountId(status.account_id ?? "")}`);
     if (status.matched_accounts.length === 0) {
       lines.push("Managed account: no (unmanaged)");
     } else if (status.matched_accounts.length === 1) {
@@ -369,7 +369,7 @@ function describeQuotaAccounts(
     })),
     [
       { key: "name", label: "NAME" },
-      { key: "account_id", label: "ACCOUNT ID" },
+      { key: "account_id", label: "IDENTITY" },
       { key: "plan_type", label: "PLAN TYPE" },
       { key: "available", label: "AVAILABLE" },
       { key: "five_hour", label: "5H USED" },

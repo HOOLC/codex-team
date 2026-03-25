@@ -60,6 +60,13 @@ export function createAuthPayload(
   };
 }
 
+export function createApiKeyPayload(apiKey: string): AuthSnapshot {
+  return {
+    auth_mode: "apikey",
+    OPENAI_API_KEY: apiKey,
+  };
+}
+
 export async function writeCurrentAuth(
   homeDir: string,
   accountId: string,
@@ -71,6 +78,19 @@ export async function writeCurrentAuth(
   await writeFile(
     join(codexDir, "auth.json"),
     `${JSON.stringify(createAuthPayload(accountId, authMode, planType), null, 2)}\n`,
+    { mode: 0o600 },
+  );
+}
+
+export async function writeCurrentApiKeyAuth(
+  homeDir: string,
+  apiKey: string,
+): Promise<void> {
+  const codexDir = join(homeDir, ".codex");
+  await mkdir(codexDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(codexDir, "auth.json"),
+    `${JSON.stringify(createApiKeyPayload(apiKey), null, 2)}\n`,
     { mode: 0o600 },
   );
 }

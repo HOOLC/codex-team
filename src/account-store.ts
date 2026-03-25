@@ -21,6 +21,7 @@ import {
   QuotaWindowSnapshot,
   SnapshotMeta,
   createSnapshotMeta,
+  getSnapshotIdentity,
   parseAuthSnapshot,
   parseSnapshotMeta,
   readAuthSnapshotFile,
@@ -268,7 +269,7 @@ export class AccountStore {
 
     try {
       const currentSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
-      if (currentSnapshot.tokens.account_id !== snapshot.tokens.account_id) {
+      if (getSnapshotIdentity(currentSnapshot) !== getSnapshotIdentity(snapshot)) {
         return;
       }
 
@@ -348,7 +349,7 @@ export class AccountStore {
       throw new Error(`Account metadata name mismatch for "${name}".`);
     }
 
-    if (meta.account_id !== snapshot.tokens.account_id) {
+    if (meta.account_id !== getSnapshotIdentity(snapshot)) {
       throw new Error(`Account metadata account_id mismatch for "${name}".`);
     }
 
@@ -413,14 +414,15 @@ export class AccountStore {
     }
 
     const snapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
+    const currentIdentity = getSnapshotIdentity(snapshot);
     const matchedAccounts = accounts
-      .filter((account) => account.account_id === snapshot.tokens.account_id)
+      .filter((account) => account.account_id === currentIdentity)
       .map((account) => account.name);
 
     return {
       exists: true,
       auth_mode: snapshot.auth_mode,
-      account_id: snapshot.tokens.account_id,
+      account_id: currentIdentity,
       matched_accounts: matchedAccounts,
       managed: matchedAccounts.length > 0,
       duplicate_match: matchedAccounts.length > 1,
@@ -538,7 +540,7 @@ export class AccountStore {
     await atomicWriteFile(this.paths.currentAuthPath, `${rawAuth.trimEnd()}\n`);
     const writtenSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
 
-    if (writtenSnapshot.tokens.account_id !== account.account_id) {
+    if (getSnapshotIdentity(writtenSnapshot) !== account.account_id) {
       throw new Error(`Switch verification failed for account "${name}".`);
     }
 
@@ -604,7 +606,7 @@ export class AccountStore {
       }
 
       meta.auth_mode = result.authSnapshot.auth_mode;
-      meta.account_id = result.authSnapshot.tokens.account_id;
+      meta.account_id = getSnapshotIdentity(result.authSnapshot);
       meta.updated_at = now.toISOString();
       meta.quota = result.quota;
       await this.writeAccountMeta(name, meta);
@@ -780,7 +782,7 @@ export class AccountStore {
       }
       if (account.duplicateAccountId) {
         warnings.push(
-          `Account "${account.name}" shares account_id ${account.account_id} with another saved account.`,
+          `Account "${account.name}" shares identity ${account.account_id} with another saved account.`,
         );
       }
     }

@@ -12,6 +12,7 @@ import {
   jsonResponse,
   readCurrentAuth,
   textResponse,
+  writeCurrentApiKeyAuth,
   writeCurrentAuth,
 } from "./test-helpers.js";
 
@@ -62,7 +63,7 @@ describe("AccountStore", () => {
       expect(switchResult.backup_path).toBe(join(homeDir, ".codex-team", "backups", "last-active-auth.json"));
 
       const current = await readCurrentAuth(homeDir);
-      expect(current.tokens.account_id).toBe("acct-alpha");
+      expect(current.tokens?.account_id).toBe("acct-alpha");
 
       const backupRaw = await readFile(
         join(homeDir, ".codex-team", "backups", "last-active-auth.json"),
@@ -125,6 +126,34 @@ describe("AccountStore", () => {
       );
       const savedAuth = parseAuthSnapshot(savedAuthRaw);
       expect(extractChatGPTAuth(savedAuth).planType).toBe("pro");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("saves and switches apikey-managed accounts", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentApiKeyAuth(homeDir, "sk-alpha");
+      const alpha = await store.saveCurrentAccount("alpha");
+
+      await writeCurrentApiKeyAuth(homeDir, "sk-beta");
+      await store.saveCurrentAccount("beta");
+
+      const current = await store.getCurrentStatus();
+      expect(current.exists).toBe(true);
+      expect(current.auth_mode).toBe("apikey");
+      expect(current.account_id).toMatch(/^key_[0-9a-f]{16}$/);
+      expect(current.matched_accounts).toEqual(["beta"]);
+
+      const switchResult = await store.switchAccount("alpha");
+      expect(switchResult.account.account_id).toBe(alpha.account_id);
+
+      const switched = await readCurrentAuth(homeDir);
+      expect(switched.auth_mode).toBe("apikey");
+      expect(switched.OPENAI_API_KEY).toBe("sk-alpha");
     } finally {
       await cleanupTempHome(homeDir);
     }

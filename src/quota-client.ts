@@ -6,6 +6,7 @@ import {
   type QuotaSnapshot,
   type QuotaWindowSnapshot,
   decodeJwtPayload,
+  isSupportedChatGPTAuthMode,
 } from "./auth-snapshot.js";
 
 const DEFAULT_CHATGPT_BASE_URL = "https://chatgpt.com";
@@ -84,14 +85,11 @@ function extractStringClaim(
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
-function isSupportedChatGPTMode(authMode: string): boolean {
-  const normalized = authMode.trim().toLowerCase();
-  return normalized === "chatgpt" || normalized === "chatgpt_auth_tokens";
-}
-
 function parsePlanType(snapshot: AuthSnapshot): string | undefined {
+  const tokens = snapshot.tokens ?? {};
+
   for (const tokenName of ["id_token", "access_token"]) {
-    const token = snapshot.tokens[tokenName];
+    const token = tokens[tokenName];
     if (typeof token !== "string" || token.trim() === "") {
       continue;
     }
@@ -113,10 +111,11 @@ function parsePlanType(snapshot: AuthSnapshot): string | undefined {
 
 export function extractChatGPTAuth(snapshot: AuthSnapshot): ExtractedChatGPTAuth {
   const authMode = snapshot.auth_mode ?? "";
-  const supported = isSupportedChatGPTMode(authMode);
-  const accessTokenValue = snapshot.tokens.access_token;
-  const refreshTokenValue = snapshot.tokens.refresh_token;
-  const directAccountId = snapshot.tokens.account_id;
+  const supported = isSupportedChatGPTAuthMode(authMode);
+  const tokens = snapshot.tokens ?? {};
+  const accessTokenValue = tokens.access_token;
+  const refreshTokenValue = tokens.refresh_token;
+  const directAccountId = tokens.account_id;
 
   let accountId =
     typeof directAccountId === "string" && directAccountId.trim() !== ""
@@ -127,7 +126,7 @@ export function extractChatGPTAuth(snapshot: AuthSnapshot): ExtractedChatGPTAuth
   let clientId: string | undefined;
 
   for (const tokenName of ["id_token", "access_token"]) {
-    const token = snapshot.tokens[tokenName];
+    const token = tokens[tokenName];
     if (typeof token !== "string" || token.trim() === "") {
       continue;
     }
@@ -441,7 +440,7 @@ async function refreshChatGPTAuthTokens(
     ...snapshot,
     last_refresh: (options.now ?? new Date()).toISOString(),
     tokens: {
-      ...snapshot.tokens,
+      ...(snapshot.tokens ?? {}),
       access_token: payload.access_token,
       id_token: payload.id_token,
       refresh_token: payload.refresh_token ?? extracted.refreshToken,
