@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import { extractChatGPTAuth, fetchQuotaSnapshot } from "../src/quota-client.js";
 import {
+  createApiKeyPayload,
   createAuthPayload,
   installFetchMock,
   jsonResponse,
@@ -72,7 +73,7 @@ describe("quota client", () => {
           reset_at: "2026-03-19T03:14:00.000Z",
         },
       });
-      expect(result.authSnapshot.tokens.account_id).toBe("acct-primary");
+      expect(result.authSnapshot.tokens?.account_id).toBe("acct-primary");
     } finally {
       restoreFetch();
     }
@@ -105,7 +106,7 @@ describe("quota client", () => {
         expect(init?.method).toBe("POST");
         return jsonResponse({
           access_token: "refreshed-access-token",
-          id_token: snapshot.tokens.id_token,
+          id_token: snapshot.tokens?.id_token,
           refresh_token: "refreshed-refresh-token",
         });
       }
@@ -120,8 +121,8 @@ describe("quota client", () => {
 
       expect(usageAttempts).toBe(2);
       expect(result.quota.credits_balance).toBe(9);
-      expect(result.authSnapshot.tokens.access_token).toBe("refreshed-access-token");
-      expect(result.authSnapshot.tokens.refresh_token).toBe("refreshed-refresh-token");
+      expect(result.authSnapshot.tokens?.access_token).toBe("refreshed-access-token");
+      expect(result.authSnapshot.tokens?.refresh_token).toBe("refreshed-refresh-token");
     } finally {
       restoreFetch();
     }
@@ -159,5 +160,19 @@ describe("quota client", () => {
     } finally {
       restoreFetch();
     }
+  });
+
+  test("marks apikey auth snapshots as unsupported for quota refresh", async () => {
+    const snapshot = createApiKeyPayload("sk-test-primary");
+
+    const result = await fetchQuotaSnapshot(snapshot, {
+      homeDir: "/tmp/codex-team-test-home",
+    });
+
+    expect(result.quota).toMatchObject({
+      status: "unsupported",
+      plan_type: undefined,
+    });
+    expect(result.authSnapshot.OPENAI_API_KEY).toBe("sk-test-primary");
   });
 });

@@ -1,14 +1,15 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 export interface AuthSnapshotTokens {
-  account_id: string;
+  account_id?: string;
   [key: string]: unknown;
 }
 
 export interface AuthSnapshot {
   auth_mode: string;
   OPENAI_API_KEY?: string | null;
-  tokens: AuthSnapshotTokens;
+  tokens?: AuthSnapshotTokens;
   last_refresh?: string;
   [key: string]: unknown;
 }
@@ -85,6 +86,41 @@ function asOptionalNumber(value: unknown, fieldName: string): number | undefined
   }
 
   return value;
+}
+
+function normalizeAuthMode(authMode: string): string {
+  return authMode.trim().toLowerCase();
+}
+
+export function isApiKeyAuthMode(authMode: string): boolean {
+  return normalizeAuthMode(authMode) === "apikey";
+}
+
+export function isSupportedChatGPTAuthMode(authMode: string): boolean {
+  const normalized = normalizeAuthMode(authMode);
+  return normalized === "chatgpt" || normalized === "chatgpt_auth_tokens";
+}
+
+function fingerprintApiKey(apiKey: string): string {
+  return createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
+}
+
+export function getSnapshotIdentity(snapshot: AuthSnapshot): string {
+  if (isApiKeyAuthMode(snapshot.auth_mode)) {
+    const apiKey = snapshot.OPENAI_API_KEY;
+    if (typeof apiKey !== "string" || apiKey.trim() === "") {
+      throw new Error('Field "OPENAI_API_KEY" must be a non-empty string for apikey auth.');
+    }
+
+    return `key_${fingerprintApiKey(apiKey)}`;
+  }
+
+  const accountId = snapshot.tokens?.account_id;
+  if (typeof accountId !== "string" || accountId.trim() === "") {
+    throw new Error('Field "tokens.account_id" must be a non-empty string.');
+  }
+
+  return accountId;
 }
 
 export function defaultQuotaSnapshot(): QuotaSnapshot {
@@ -168,20 +204,43 @@ export function parseAuthSnapshot(raw: string): AuthSnapshot {
   }
 
   const authMode = asNonEmptyString(parsed.auth_mode, "auth_mode");
+  const tokens = parsed.tokens;
 
-  if (!isRecord(parsed.tokens)) {
+  if (tokens !== undefined && tokens !== null && !isRecord(tokens)) {
     throw new Error('Field "tokens" must be an object.');
   }
+  const apiKeyMode = isApiKeyAuthMode(authMode);
+  const normalizedApiKey =
+    parsed.OPENAI_API_KEY === null || parsed.OPENAI_API_KEY === undefined
+      ? parsed.OPENAI_API_KEY
+      : asNonEmptyString(parsed.OPENAI_API_KEY, "OPENAI_API_KEY");
 
-  const accountId = asNonEmptyString(parsed.tokens.account_id, "tokens.account_id");
+  if (apiKeyMode) {
+    if (typeof normalizedApiKey !== "string" || normalizedApiKey.trim() === "") {
+      throw new Error('Field "OPENAI_API_KEY" must be a non-empty string for apikey auth.');
+    }
+  } else {
+    if (!isRecord(tokens)) {
+      throw new Error('Field "tokens" must be an object.');
+    }
+
+    asNonEmptyString(tokens.account_id, "tokens.account_id");
+  }
 
   return {
     ...parsed,
     auth_mode: authMode,
-    tokens: {
-      ...parsed.tokens,
-      account_id: accountId,
-    },
+    OPENAI_API_KEY: normalizedApiKey,
+    ...(isRecord(tokens)
+      ? {
+          tokens: {
+            ...tokens,
+            ...(typeof tokens.account_id === "string" && tokens.account_id.trim() !== ""
+              ? { account_id: tokens.account_id }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -201,7 +260,7 @@ export function createSnapshotMeta(
   return {
     name,
     auth_mode: snapshot.auth_mode,
-    account_id: snapshot.tokens.account_id,
+    account_id: getSnapshotIdentity(snapshot),
     created_at: existingCreatedAt ?? timestamp,
     updated_at: timestamp,
     last_switched_at: null,
