@@ -95,6 +95,23 @@ export async function writeCurrentApiKeyAuth(
   );
 }
 
+export async function writeCurrentConfig(
+  homeDir: string,
+  rawConfig: string,
+): Promise<void> {
+  const codexDir = join(homeDir, ".codex");
+  await mkdir(codexDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(codexDir, "config.toml"),
+    rawConfig.endsWith("\n") ? rawConfig : `${rawConfig}\n`,
+    { mode: 0o600 },
+  );
+}
+
+export async function readCurrentConfig(homeDir: string): Promise<string> {
+  return readFile(join(homeDir, ".codex", "config.toml"), "utf8");
+}
+
 export async function readCurrentAuth(homeDir: string): Promise<AuthSnapshot> {
   const raw = await readFile(join(homeDir, ".codex", "auth.json"), "utf8");
   return parseAuthSnapshot(raw);

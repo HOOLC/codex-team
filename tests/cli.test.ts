@@ -14,6 +14,7 @@ import {
   jsonResponse,
   readCurrentAuth,
   textResponse,
+  writeCurrentConfig,
   writeCurrentApiKeyAuth,
   writeCurrentAuth,
 } from "./test-helpers.js";
@@ -142,6 +143,15 @@ describe("CLI", () => {
     try {
       const store = createAccountStore(homeDir);
       await writeCurrentApiKeyAuth(homeDir, "sk-cli-primary");
+      await writeCurrentConfig(
+        homeDir,
+        `model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://proxy-cli.example/v1"
+wire_api = "responses"
+`,
+      );
 
       const saveCode = await runCli(["save", "cli-key", "--json"], {
         store,

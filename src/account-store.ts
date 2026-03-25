@@ -44,6 +44,7 @@ export interface StorePaths {
   codexDir: string;
   codexTeamDir: string;
   currentAuthPath: string;
+  currentConfigPath: string;
   accountsDir: string;
   backupsDir: string;
   statePath: string;
@@ -58,6 +59,7 @@ export interface StoreState {
 export interface ManagedAccount extends SnapshotMeta {
   authPath: string;
   metaPath: string;
+  configPath: string | null;
   duplicateAccountId: boolean;
 }
 
@@ -122,6 +124,7 @@ function defaultPaths(homeDir = homedir()): StorePaths {
     codexDir,
     codexTeamDir,
     currentAuthPath: join(codexDir, "auth.json"),
+    currentConfigPath: join(codexDir, "config.toml"),
     accountsDir: join(codexTeamDir, "accounts"),
     backupsDir: join(codexTeamDir, "backups"),
     statePath: join(codexTeamDir, "state.json"),
@@ -248,6 +251,10 @@ export class AccountStore {
     return join(this.accountDirectory(name), "meta.json");
   }
 
+  private accountConfigPath(name: string): string {
+    return join(this.accountDirectory(name), "config.toml");
+  }
+
   private async writeAccountAuthSnapshot(
     name: string,
     snapshot: AuthSnapshot,
@@ -260,6 +267,63 @@ export class AccountStore {
 
   private async writeAccountMeta(name: string, meta: SnapshotMeta): Promise<void> {
     await atomicWriteFile(this.accountMetaPath(name), stringifyJson(meta));
+  }
+
+  private validateConfigSnapshot(name: string, snapshot: AuthSnapshot, rawConfig: string | null): void {
+    if (snapshot.auth_mode !== "apikey") {
+      return;
+    }
+
+    if (!rawConfig) {
+      throw new Error(`Current ~/.codex/config.toml is required to save apikey account "${name}".`);
+    }
+
+    if (!/^\s*model_provider\s*=\s*["'][^"']+["']/mu.test(rawConfig)) {
+      throw new Error(`Current ~/.codex/config.toml is missing model_provider for apikey account "${name}".`);
+    }
+
+    if (!/^\s*base_url\s*=\s*["'][^"']+["']/mu.test(rawConfig)) {
+      throw new Error(`Current ~/.codex/config.toml is missing base_url for apikey account "${name}".`);
+    }
+  }
+
+  private sanitizeConfigForAccountAuth(rawConfig: string): string {
+    const lines = rawConfig.split(/\r?\n/u);
+    const result: string[] = [];
+    let skippingProviderSection = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+        skippingProviderSection = /^\[model_providers\.[^\]]+\]$/u.test(trimmed);
+        if (skippingProviderSection) {
+          continue;
+        }
+      }
+
+      if (skippingProviderSection) {
+        continue;
+      }
+
+      if (/^\s*model_provider\s*=/u.test(line)) {
+        continue;
+      }
+
+      if (/^\s*preferred_auth_method\s*=\s*["']apikey["']\s*$/u.test(line)) {
+        continue;
+      }
+
+      result.push(line);
+    }
+
+    return `${result.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
+  }
+
+  private async ensureEmptyAccountConfigSnapshot(name: string): Promise<string> {
+    const configPath = this.accountConfigPath(name);
+    await atomicWriteFile(configPath, "");
+    return configPath;
   }
 
   private async syncCurrentAuthIfMatching(snapshot: AuthSnapshot): Promise<void> {
@@ -357,6 +421,7 @@ export class AccountStore {
       ...meta,
       authPath,
       metaPath,
+      configPath: (await pathExists(this.accountConfigPath(name))) ? this.accountConfigPath(name) : null,
       duplicateAccountId: false,
     };
   }
@@ -440,9 +505,14 @@ export class AccountStore {
 
     const rawSnapshot = await readJsonFile(this.paths.currentAuthPath);
     const snapshot = parseAuthSnapshot(rawSnapshot);
+    const rawConfig =
+      (await pathExists(this.paths.currentConfigPath))
+        ? await readJsonFile(this.paths.currentConfigPath)
+        : null;
     const accountDir = this.accountDirectory(name);
     const authPath = this.accountAuthPath(name);
     const metaPath = this.accountMetaPath(name);
+    const configPath = this.accountConfigPath(name);
     const accountExists = await pathExists(accountDir);
     const existingMeta =
       accountExists && (await pathExists(metaPath))
@@ -453,8 +523,14 @@ export class AccountStore {
       throw new Error(`Account "${name}" already exists. Use --force to overwrite it.`);
     }
 
+    this.validateConfigSnapshot(name, snapshot, rawConfig);
     await ensureDirectory(accountDir, DIRECTORY_MODE);
     await atomicWriteFile(authPath, `${rawSnapshot.trimEnd()}\n`);
+    if (snapshot.auth_mode === "apikey" && rawConfig) {
+      await atomicWriteFile(configPath, rawConfig.endsWith("\n") ? rawConfig : `${rawConfig}\n`);
+    } else if (await pathExists(configPath)) {
+      await rm(configPath, { force: true });
+    }
     const meta = createSnapshotMeta(
       name,
       snapshot,
@@ -492,13 +568,26 @@ export class AccountStore {
     const name = current.matched_accounts[0];
     const currentRawSnapshot = await readJsonFile(this.paths.currentAuthPath);
     const currentSnapshot = parseAuthSnapshot(currentRawSnapshot);
+    const currentRawConfig =
+      (await pathExists(this.paths.currentConfigPath))
+        ? await readJsonFile(this.paths.currentConfigPath)
+        : null;
     const metaPath = this.accountMetaPath(name);
     const existingMeta = parseSnapshotMeta(await readJsonFile(metaPath));
 
+    this.validateConfigSnapshot(name, currentSnapshot, currentRawConfig);
     await atomicWriteFile(
       this.accountAuthPath(name),
       `${currentRawSnapshot.trimEnd()}\n`,
     );
+    if (currentSnapshot.auth_mode === "apikey" && currentRawConfig) {
+      await atomicWriteFile(
+        this.accountConfigPath(name),
+        currentRawConfig.endsWith("\n") ? currentRawConfig : `${currentRawConfig}\n`,
+      );
+    } else if (await pathExists(this.accountConfigPath(name))) {
+      await rm(this.accountConfigPath(name), { force: true });
+    }
     await atomicWriteFile(
       metaPath,
       stringifyJson(
@@ -535,9 +624,32 @@ export class AccountStore {
       await copyFile(this.paths.currentAuthPath, backupPath);
       await chmodIfPossible(backupPath, FILE_MODE);
     }
+    if (await pathExists(this.paths.currentConfigPath)) {
+      const configBackupPath = join(this.paths.backupsDir, "last-active-config.toml");
+      await copyFile(this.paths.currentConfigPath, configBackupPath);
+      await chmodIfPossible(configBackupPath, FILE_MODE);
+    }
 
     const rawAuth = await readJsonFile(account.authPath);
     await atomicWriteFile(this.paths.currentAuthPath, `${rawAuth.trimEnd()}\n`);
+    if (account.auth_mode === "apikey" && account.configPath) {
+      const rawConfig = await readJsonFile(account.configPath);
+      await atomicWriteFile(
+        this.paths.currentConfigPath,
+        rawConfig.endsWith("\n") ? rawConfig : `${rawConfig}\n`,
+      );
+    } else if (account.auth_mode === "apikey") {
+      await this.ensureEmptyAccountConfigSnapshot(name);
+      warnings.push(
+        `Saved apikey account "${name}" was missing config.toml snapshot. Created an empty snapshot; configure baseUrl manually if needed.`,
+      );
+    } else if (await pathExists(this.paths.currentConfigPath)) {
+      const currentRawConfig = await readJsonFile(this.paths.currentConfigPath);
+      await atomicWriteFile(
+        this.paths.currentConfigPath,
+        this.sanitizeConfigForAccountAuth(currentRawConfig),
+      );
+    }
     const writtenSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
 
     if (getSnapshotIdentity(writtenSnapshot) !== account.account_id) {
@@ -779,6 +891,9 @@ export class AccountStore {
       }
       if ((metaStat.mode & 0o777) !== FILE_MODE) {
         issues.push(`Account "${account.name}" metadata permissions must be 600.`);
+      }
+      if (account.auth_mode === "apikey" && !account.configPath) {
+        issues.push(`Account "${account.name}" is missing config.toml snapshot required for apikey auth.`);
       }
       if (account.duplicateAccountId) {
         warnings.push(

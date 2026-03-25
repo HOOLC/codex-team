@@ -1,4 +1,4 @@
-import { chmod, readFile, stat } from "node:fs/promises";
+import { chmod, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -11,7 +11,9 @@ import {
   createTempHome,
   jsonResponse,
   readCurrentAuth,
+  readCurrentConfig,
   textResponse,
+  writeCurrentConfig,
   writeCurrentApiKeyAuth,
   writeCurrentAuth,
 } from "./test-helpers.js";
@@ -133,13 +135,27 @@ describe("AccountStore", () => {
 
   test("saves and switches apikey-managed accounts", async () => {
     const homeDir = await createTempHome();
+    const alphaConfig = `model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://proxy-alpha.example/v1"
+wire_api = "responses"
+`;
+    const betaConfig = `model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://proxy-beta.example/v1"
+wire_api = "responses"
+`;
 
     try {
       const store = createAccountStore(homeDir);
       await writeCurrentApiKeyAuth(homeDir, "sk-alpha");
+      await writeCurrentConfig(homeDir, alphaConfig);
       const alpha = await store.saveCurrentAccount("alpha");
 
       await writeCurrentApiKeyAuth(homeDir, "sk-beta");
+      await writeCurrentConfig(homeDir, betaConfig);
       await store.saveCurrentAccount("beta");
 
       const current = await store.getCurrentStatus();
@@ -154,6 +170,106 @@ describe("AccountStore", () => {
       const switched = await readCurrentAuth(homeDir);
       expect(switched.auth_mode).toBe("apikey");
       expect(switched.OPENAI_API_KEY).toBe("sk-alpha");
+      expect(await readCurrentConfig(homeDir)).toContain('base_url = "https://proxy-alpha.example/v1"');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("requires config.toml with base_url for apikey accounts", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentApiKeyAuth(homeDir, "sk-alpha");
+      await writeCurrentConfig(homeDir, 'model_provider = "custom"\n');
+
+      await expect(store.saveCurrentAccount("alpha")).rejects.toThrow(/missing base_url/);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("creates an empty config snapshot when switching a legacy apikey account without config", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentApiKeyAuth(homeDir, "sk-alpha");
+      await writeCurrentConfig(
+        homeDir,
+        `model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://proxy-alpha.example/v1"
+wire_api = "responses"
+`,
+      );
+      await store.saveCurrentAccount("alpha");
+      await readFile(join(homeDir, ".codex-team", "accounts", "alpha", "config.toml"), "utf8");
+      await rm(join(homeDir, ".codex-team", "accounts", "alpha", "config.toml"));
+
+      const result = await store.switchAccount("alpha");
+      expect(result.warnings).toContain(
+        'Saved apikey account "alpha" was missing config.toml snapshot. Created an empty snapshot; configure baseUrl manually if needed.',
+      );
+      expect(
+        await readFile(join(homeDir, ".codex-team", "accounts", "alpha", "config.toml"), "utf8"),
+      ).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("does not require or persist config snapshots for chatgpt accounts", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-chatgpt");
+      await writeCurrentConfig(homeDir, 'model_provider = "custom"\n');
+
+      await store.saveCurrentAccount("main");
+
+      await expect(
+        readFile(join(homeDir, ".codex-team", "accounts", "main", "config.toml"), "utf8"),
+      ).rejects.toThrow();
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("removes apikey provider config when switching back to chatgpt auth", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-chatgpt");
+      await store.saveCurrentAccount("main");
+
+      await writeCurrentApiKeyAuth(homeDir, "sk-alpha");
+      await writeCurrentConfig(
+        homeDir,
+        `model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://proxy-alpha.example/v1"
+wire_api = "responses"
+
+[projects."/Users/bytedance/.codex"]
+preferred_auth_method = "apikey"
+`,
+      );
+
+      await store.switchAccount("main");
+
+      const current = await readCurrentAuth(homeDir);
+      expect(current.auth_mode).toBe("chatgpt");
+      const currentConfig = await readCurrentConfig(homeDir);
+      expect(currentConfig).not.toContain("base_url");
+      expect(currentConfig).not.toContain('[model_providers.custom]');
+      expect(currentConfig).not.toContain('model_provider = "custom"');
+      expect(currentConfig).not.toContain('preferred_auth_method = "apikey"');
     } finally {
       await cleanupTempHome(homeDir);
     }
