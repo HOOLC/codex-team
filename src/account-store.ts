@@ -513,6 +513,7 @@ export class AccountStore {
     const authPath = this.accountAuthPath(name);
     const metaPath = this.accountMetaPath(name);
     const configPath = this.accountConfigPath(name);
+    const identity = getSnapshotIdentity(snapshot);
     const accountExists = await pathExists(accountDir);
     const existingMeta =
       accountExists && (await pathExists(metaPath))
@@ -521,6 +522,17 @@ export class AccountStore {
 
     if (accountExists && !force) {
       throw new Error(`Account "${name}" already exists. Use --force to overwrite it.`);
+    }
+
+    const { accounts } = await this.listAccounts();
+    const duplicateIdentityAccounts = accounts.filter(
+      (account) => account.name !== name && account.account_id === identity,
+    );
+    if (duplicateIdentityAccounts.length > 0) {
+      const joinedNames = duplicateIdentityAccounts.map((account) => `"${account.name}"`).join(", ");
+      throw new Error(
+        `Identity ${identity} is already managed by ${joinedNames}.`,
+      );
     }
 
     this.validateConfigSnapshot(name, snapshot, rawConfig);

@@ -24,8 +24,6 @@ codexm switch <name>
 codexm switch --auto --dry-run
 codexm remove <name> --yes
 codexm rename <old> <new>
-codexm quota refresh [name]
-codexm doctor
 ```
 
 Use `--json` on query and mutation commands when you need machine-readable output.
@@ -36,7 +34,7 @@ Use `--json` on query and mutation commands when you need machine-readable outpu
 2. Save the current auth snapshot with `codexm save <name>`.
 3. Repeat for other accounts.
 4. Switch between saved accounts with `codexm switch <name>` or let the tool choose with `codexm switch --auto`.
-5. Refresh and inspect quota usage with `codexm list` or `codexm quota refresh`.
+5. Refresh and inspect quota usage with `codexm list`.
 
 ## Development
 
