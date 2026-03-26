@@ -8,7 +8,6 @@ import { maskAccountId } from "./auth-snapshot.js";
 import {
   AccountStore,
   type AccountQuotaSummary,
-  type DoctorReport,
   createAccountStore,
 } from "./account-store.js";
 
@@ -105,12 +104,10 @@ Usage:
   codexm list [name] [--json]
   codexm save <name> [--force] [--json]
   codexm update [--json]
-  codexm quota refresh [name] [--json]
   codexm switch <name> [--json]
   codexm switch --auto [--dry-run] [--json]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
-  codexm doctor [--json]
 
 Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
 `);
@@ -135,24 +132,6 @@ function describeCurrentStatus(status: Awaited<ReturnType<AccountStore["getCurre
   }
 
   for (const warning of status.warnings) {
-    lines.push(`Warning: ${warning}`);
-  }
-
-  return lines.join("\n");
-}
-
-function describeDoctor(report: DoctorReport): string {
-  const lines = [
-    report.healthy ? "Doctor checks passed." : "Doctor checks found issues.",
-    `Saved accounts: ${report.account_count}`,
-    `Current auth present: ${report.current_auth_present ? "yes" : "no"}`,
-  ];
-
-  for (const issue of report.issues) {
-    lines.push(`Issue: ${issue}`);
-  }
-
-  for (const warning of report.warnings) {
     lines.push(`Warning: ${warning}`);
   }
 
@@ -552,23 +531,6 @@ export async function runCli(
         return 0;
       }
 
-      case "quota": {
-        const quotaCommand = parsed.positionals[0];
-
-        if (quotaCommand === "refresh") {
-          const targetName = parsed.positionals[1];
-          const result = await store.refreshAllQuotas(targetName);
-          if (json) {
-            writeJson(streams.stdout, toCliQuotaRefreshResult(result));
-          } else {
-            streams.stdout.write(`${describeQuotaRefresh(result)}\n`);
-          }
-          return result.failures.length === 0 ? 0 : 1;
-        }
-
-        throw new Error("Usage: codexm quota refresh [name] [--json]");
-      }
-
       case "switch": {
         const auto = parsed.flags.has("--auto");
         const dryRun = parsed.flags.has("--dry-run");
@@ -774,16 +736,6 @@ export async function runCli(
           streams.stdout.write(`Renamed "${oldName}" to "${newName}".\n`);
         }
         return 0;
-      }
-
-      case "doctor": {
-        const report = await store.doctor();
-        if (json) {
-          writeJson(streams.stdout, report);
-        } else {
-          streams.stdout.write(`${describeDoctor(report)}\n`);
-        }
-        return report.healthy ? 0 : 1;
       }
 
       default:

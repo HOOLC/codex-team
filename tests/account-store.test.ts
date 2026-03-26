@@ -27,16 +27,17 @@ describe("AccountStore", () => {
       await writeCurrentAuth(homeDir, "acct-one");
 
       await store.saveCurrentAccount("main");
-      await store.saveCurrentAccount("shadow", true);
+      await writeCurrentAuth(homeDir, "acct-two");
+      await store.saveCurrentAccount("shadow");
       const listBeforeRename = await store.listAccounts();
 
       expect(listBeforeRename.accounts).toHaveLength(2);
-      expect(listBeforeRename.accounts.every((account) => account.duplicateAccountId)).toBe(true);
+      expect(listBeforeRename.accounts.every((account) => !account.duplicateAccountId)).toBe(true);
 
       const current = await store.getCurrentStatus();
       expect(current.exists).toBe(true);
-      expect(current.duplicate_match).toBe(true);
-      expect(current.matched_accounts).toEqual(["main", "shadow"]);
+      expect(current.duplicate_match).toBe(false);
+      expect(current.matched_accounts).toEqual(["shadow"]);
 
       const renamed = await store.renameAccount("shadow", "backup");
       expect(renamed.name).toBe("backup");
@@ -44,6 +45,23 @@ describe("AccountStore", () => {
       await store.removeAccount("backup");
       const listAfterRemove = await store.listAccounts();
       expect(listAfterRemove.accounts.map((account) => account.name)).toEqual(["main"]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("rejects saving a different account name with a duplicate identity", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-one");
+      await store.saveCurrentAccount("main");
+
+      await writeCurrentAuth(homeDir, "acct-one");
+      await expect(store.saveCurrentAccount("shadow")).rejects.toThrow(
+        'Identity acct-one is already managed by "main".',
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }

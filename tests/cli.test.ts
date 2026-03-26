@@ -373,31 +373,6 @@ wire_api = "responses"
         stderr: captureWritable().stream,
       });
 
-      const refreshStdout = captureWritable();
-      const refreshCode = await runCli(["quota", "refresh", "--json"], {
-        store,
-        stdout: refreshStdout.stream,
-        stderr: captureWritable().stream,
-      });
-      expect(refreshCode).toBe(0);
-      expect(JSON.parse(refreshStdout.read())).toMatchObject({
-        successes: [
-          {
-            name: "quota-main",
-            available: "available",
-            credits_balance: 11,
-            refresh_status: "ok",
-            five_hour: {
-              used_percent: 15,
-            },
-            one_week: {
-              used_percent: 45,
-            },
-          },
-        ],
-        failures: [],
-      });
-
       const listStdout = captureWritable();
       const listCode = await runCli(["list", "--json"], {
         store,
@@ -425,7 +400,7 @@ wire_api = "responses"
 
       const removedStdout = captureWritable();
       const removedStderr = captureWritable();
-      const removedCode = await runCli(["quota", "list", "--json"], {
+      const removedCode = await runCli(["quota", "refresh", "--json"], {
         store,
         stdout: removedStdout.stream,
         stderr: removedStderr.stream,
@@ -433,7 +408,7 @@ wire_api = "responses"
       expect(removedCode).toBe(1);
       expect(JSON.parse(removedStderr.read())).toMatchObject({
         ok: false,
-        error: "Usage: codexm quota refresh [name] [--json]",
+        error: 'Unknown command "quota".',
       });
     } finally {
       await cleanupTempHome(homeDir);
@@ -481,7 +456,7 @@ wire_api = "responses"
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
       });
-      await runCli(["quota", "refresh", "--json"], {
+      await runCli(["list", "--json"], {
         store,
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
