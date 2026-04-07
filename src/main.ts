@@ -17,6 +17,7 @@ import {
   type CodexDesktopLauncher,
   type ManagedCodexDesktopState,
   type RunningCodexDesktop,
+  DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
 } from "./codex-desktop-launch.js";
 
@@ -115,8 +116,8 @@ Usage:
   codexm list [name] [--json]
   codexm save <name> [--force] [--json]
   codexm update [--json]
-  codexm switch <name> [--json]
-  codexm switch --auto [--dry-run] [--json]
+  codexm switch <name> [--force] [--json]
+  codexm switch --auto [--dry-run] [--force] [--json]
   codexm launch [name] [--json]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
@@ -136,9 +137,17 @@ function stripManagedDesktopWarning(warnings: string[]): string[] {
 async function refreshManagedDesktopAfterSwitch(
   warnings: string[],
   desktopLauncher: CodexDesktopLauncher,
+  options: {
+    force?: boolean;
+  } = {},
 ): Promise<void> {
   try {
-    if (await desktopLauncher.restartManagedAppServer()) {
+    if (
+      await desktopLauncher.applyManagedSwitch({
+        force: options.force === true,
+        timeoutMs: DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
+      })
+    ) {
       return;
     }
   } catch (error) {
@@ -696,15 +705,16 @@ export async function runCli(
       case "switch": {
         const auto = parsed.flags.has("--auto");
         const dryRun = parsed.flags.has("--dry-run");
+        const force = parsed.flags.has("--force");
         const name = parsed.positionals[0];
 
         if (dryRun && !auto) {
-          throw new Error("Usage: codexm switch --auto [--dry-run] [--json]");
+          throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
         }
 
         if (auto) {
           if (name) {
-            throw new Error("Usage: codexm switch --auto [--dry-run] [--json]");
+            throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
           }
 
           const refreshResult = await store.refreshAllQuotas();
@@ -777,7 +787,7 @@ export async function runCli(
           }
           result.warnings = stripManagedDesktopWarning(result.warnings);
 
-          await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher);
+          await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, { force });
 
           const payload = {
             ok: true,
@@ -808,12 +818,12 @@ export async function runCli(
         }
 
         if (!name) {
-          throw new Error("Usage: codexm switch <name>");
+          throw new Error("Usage: codexm switch <name> [--force]");
         }
 
         const result = await store.switchAccount(name);
         result.warnings = stripManagedDesktopWarning(result.warnings);
-        await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher);
+        await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, { force });
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         try {
           await store.refreshQuotaForAccount(result.account.name);
