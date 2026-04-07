@@ -22,11 +22,13 @@ codexm save <name>
 codexm update
 codexm switch <name>
 codexm switch --auto --dry-run
+codexm launch [name] [--json]
 codexm remove <name> --yes
 codexm rename <old> <new>
 ```
 
 Use `--json` on query and mutation commands when you need machine-readable output.
+`codexm launch` starts Codex Desktop with the current auth, or switches to a saved account first when you pass a name. If Codex Desktop is already running, `codexm launch` asks before relaunching it. If the running Desktop was started by `codexm launch`, later `codexm switch` attempts to refresh that session automatically; if it was started outside `codexm`, `codexm switch` still warns that existing sessions may keep the previous login state. This refresh works by restarting the Codex app server, so any in-progress thread in that Desktop session will be interrupted.
 
 ## Typical flow
 
