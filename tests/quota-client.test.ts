@@ -79,6 +79,63 @@ describe("quota client", () => {
     }
   });
 
+  test("retries transient usage fetch failures", async () => {
+    const snapshot = createAuthPayload("acct-transient", "chatgpt", "plus");
+    let attempts = 0;
+    const restoreFetch = installFetchMock(async (input) => {
+      const url = String(input);
+      if (!url.endsWith("/backend-api/wham/usage")) {
+        return textResponse("not found", 404);
+      }
+
+      attempts += 1;
+      if (attempts === 1) {
+        throw new TypeError("fetch failed");
+      }
+
+      return jsonResponse({
+        plan_type: "plus",
+        credits: {
+          has_credits: true,
+          unlimited: false,
+          balance: "12",
+        },
+      });
+    });
+
+    try {
+      const result = await fetchQuotaSnapshot(snapshot, {
+        homeDir: "/tmp/codex-team-test-home",
+      });
+
+      expect(attempts).toBe(2);
+      expect(result.quota.credits_balance).toBe(12);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("does not try obsolete usage fallback urls", async () => {
+    const snapshot = createAuthPayload("acct-no-fallback", "chatgpt", "plus");
+    const urls: string[] = [];
+    const restoreFetch = installFetchMock(async (input) => {
+      urls.push(String(input));
+      return textResponse("not found", 404);
+    });
+
+    try {
+      await expect(
+        fetchQuotaSnapshot(snapshot, {
+          homeDir: "/tmp/codex-team-test-home",
+        }),
+      ).rejects.toThrow(/backend-api\/wham\/usage/);
+
+      expect(urls).toEqual(["https://chatgpt.com/backend-api/wham/usage"]);
+    } finally {
+      restoreFetch();
+    }
+  });
+
   test("refreshes tokens and retries on unauthorized usage fetch", async () => {
     const snapshot = createAuthPayload("acct-primary", "chatgpt", "plus");
     let usageAttempts = 0;
