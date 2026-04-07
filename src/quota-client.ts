@@ -11,6 +11,9 @@ import {
 
 const DEFAULT_CHATGPT_BASE_URL = "https://chatgpt.com";
 const USER_AGENT = "codexm/0.1";
+const USAGE_FETCH_ATTEMPTS = 3;
+const USAGE_FETCH_RETRY_DELAY_MS = 250;
+const USAGE_FETCH_TIMEOUT_MS = 15_000;
 
 interface ExtractedChatGPTAuth {
   accessToken: string;
@@ -227,8 +230,6 @@ async function resolveUsageUrls(homeDir?: string): Promise<string[]> {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/u, "");
   const candidates = [
     `${normalizedBaseUrl}/backend-api/wham/usage`,
-    `${normalizedBaseUrl}/wham/usage`,
-    `${normalizedBaseUrl}/api/codex/usage`,
     "https://chatgpt.com/backend-api/wham/usage",
   ];
 
@@ -237,6 +238,24 @@ async function resolveUsageUrls(homeDir?: string): Promise<string[]> {
 
 function normalizeFetchError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function isTransientUsageStatus(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+function isLastAttempt(attempt: number): boolean {
+  return attempt >= USAGE_FETCH_ATTEMPTS;
+}
+
+function formatUsageAttemptError(url: string, attempt: number, message: string): string {
+  const retryContext =
+    USAGE_FETCH_ATTEMPTS > 1 ? ` attempt ${attempt}/${USAGE_FETCH_ATTEMPTS}` : "";
+  return `${url}${retryContext} -> ${message}`;
 }
 
 function shouldRetryWithTokenRefresh(message: string): boolean {
@@ -355,40 +374,73 @@ async function requestUsage(
   const errors: string[] = [];
 
   for (const url of urls) {
-    let response: Response;
+    for (let attempt = 1; attempt <= USAGE_FETCH_ATTEMPTS; attempt += 1) {
+      const abortController = new AbortController();
+      const timeout = setTimeout(() => abortController.abort(), USAGE_FETCH_TIMEOUT_MS);
+      let response: Response;
 
-    try {
-      response = await fetchImpl(url, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${extracted.accessToken}`,
-          "ChatGPT-Account-Id": extracted.accountId,
-          Accept: "application/json",
-          "User-Agent": USER_AGENT,
-        },
-      });
-    } catch (error) {
-      errors.push(`${url} -> ${normalizeFetchError(error)}`);
-      continue;
+      try {
+        response = await fetchImpl(url, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${extracted.accessToken}`,
+            "ChatGPT-Account-Id": extracted.accountId,
+            Accept: "application/json",
+            "User-Agent": USER_AGENT,
+          },
+          signal: abortController.signal,
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        const message = abortController.signal.aborted
+          ? `timed out after ${USAGE_FETCH_TIMEOUT_MS}ms`
+          : normalizeFetchError(error);
+        errors.push(formatUsageAttemptError(url, attempt, message));
+
+        if (!isLastAttempt(attempt)) {
+          await delay(USAGE_FETCH_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+
+        break;
+      }
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const body = await response.text();
+        errors.push(
+          formatUsageAttemptError(
+            url,
+            attempt,
+            `${response.status}: ${body.slice(0, 140).replace(/\s+/gu, " ").trim()}`,
+          ),
+        );
+
+        if (isTransientUsageStatus(response.status) && !isLastAttempt(attempt)) {
+          await delay(USAGE_FETCH_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+
+        break;
+      }
+
+      let payload: UsageApiResponse;
+      try {
+        payload = (await response.json()) as UsageApiResponse;
+      } catch (error) {
+        errors.push(
+          formatUsageAttemptError(
+            url,
+            attempt,
+            `failed to parse JSON: ${normalizeFetchError(error)}`,
+          ),
+        );
+        break;
+      }
+
+      return mapUsagePayload(payload, extracted.planType, now);
     }
-
-    if (!response.ok) {
-      const body = await response.text();
-      errors.push(
-        `${url} -> ${response.status}: ${body.slice(0, 140).replace(/\s+/gu, " ").trim()}`,
-      );
-      continue;
-    }
-
-    let payload: UsageApiResponse;
-    try {
-      payload = (await response.json()) as UsageApiResponse;
-    } catch (error) {
-      errors.push(`${url} -> failed to parse JSON: ${normalizeFetchError(error)}`);
-      continue;
-    }
-
-    return mapUsagePayload(payload, extracted.planType, now);
   }
 
   throw new Error(
