@@ -33,6 +33,7 @@ interface ParsedArgs {
 interface AutoSwitchCandidate {
   name: string;
   account_id: string;
+  identity: string;
   plan_type: string | null;
   available: string | null;
   refresh_status: "ok";
@@ -121,7 +122,7 @@ function describeCurrentStatus(status: Awaited<ReturnType<AccountStore["getCurre
   } else {
     lines.push("Current auth: present");
     lines.push(`Auth mode: ${status.auth_mode}`);
-    lines.push(`Identity: ${maskAccountId(status.account_id ?? "")}`);
+    lines.push(`Identity: ${maskAccountId(status.identity ?? "")}`);
     if (status.matched_accounts.length === 0) {
       lines.push("Managed account: no (unmanaged)");
     } else if (status.matched_accounts.length === 1) {
@@ -223,6 +224,7 @@ function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchCandidat
   return {
     name: account.name,
     account_id: account.account_id,
+    identity: account.identity,
     plan_type: account.plan_type,
     available: computeAvailability(account),
     refresh_status: "ok",
@@ -292,8 +294,8 @@ function describeAutoSwitchSelection(
 ): string {
   const lines = [
     dryRun
-      ? `Best account: "${candidate.name}" (${maskAccountId(candidate.account_id)}).`
-      : `Auto-switched to "${candidate.name}" (${maskAccountId(candidate.account_id)}).`,
+      ? `Best account: "${candidate.name}" (${maskAccountId(candidate.identity)}).`
+      : `Auto-switched to "${candidate.name}" (${maskAccountId(candidate.identity)}).`,
     `Score: ${candidate.effective_score}`,
     `5H remaining: ${candidate.remain_5h}%`,
     `1W remaining (5H-equivalent): ${candidate.remain_1w_eq_5h}%`,
@@ -311,7 +313,7 @@ function describeAutoSwitchSelection(
 
 function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings: string[]): string {
   const lines = [
-    `Current account "${candidate.name}" (${maskAccountId(candidate.account_id)}) is already the best available account.`,
+    `Current account "${candidate.name}" (${maskAccountId(candidate.identity)}) is already the best available account.`,
     `Score: ${candidate.effective_score}`,
     `5H remaining: ${candidate.remain_5h}%`,
     `1W remaining (5H-equivalent): ${candidate.remain_1w_eq_5h}%`,
@@ -337,7 +339,7 @@ function describeQuotaAccounts(
   const table = formatTable(
     accounts.map((account) => ({
       name: account.name,
-      account_id: maskAccountId(account.account_id),
+      account_id: maskAccountId(account.identity),
       plan_type: account.plan_type ?? "-",
       available: computeAvailability(account) ?? "-",
       five_hour: formatUsagePercent(account.five_hour),
@@ -476,6 +478,8 @@ export async function runCli(
           account: {
             name: account.name,
             account_id: account.account_id,
+            user_id: account.user_id ?? null,
+            identity: account.identity,
             auth_mode: account.auth_mode,
           },
         };
@@ -484,7 +488,7 @@ export async function runCli(
           writeJson(streams.stdout, payload);
         } else {
           streams.stdout.write(
-            `Saved account "${account.name}" (${maskAccountId(account.account_id)}).\n`,
+            `Saved account "${account.name}" (${maskAccountId(account.identity)}).\n`,
           );
         }
         return 0;
@@ -512,6 +516,8 @@ export async function runCli(
           account: {
             name: result.account.name,
             account_id: result.account.account_id,
+            user_id: result.account.user_id ?? null,
+            identity: result.account.identity,
             auth_mode: result.account.auth_mode,
           },
           quota,
@@ -522,7 +528,7 @@ export async function runCli(
           writeJson(streams.stdout, payload);
         } else {
           streams.stdout.write(
-            `Updated managed account "${result.account.name}" (${maskAccountId(result.account.account_id)}).\n`,
+            `Updated managed account "${result.account.name}" (${maskAccountId(result.account.identity)}).\n`,
           );
           for (const warning of warnings) {
             streams.stdout.write(`Warning: ${warning}\n`);
@@ -593,6 +599,7 @@ export async function runCli(
               account: {
                 name: selected.name,
                 account_id: selected.account_id,
+                identity: selected.identity,
               },
               selected,
               candidates,
@@ -620,6 +627,8 @@ export async function runCli(
             account: {
               name: result.account.name,
               account_id: result.account.account_id,
+              user_id: result.account.user_id ?? null,
+              identity: result.account.identity,
               auth_mode: result.account.auth_mode,
             },
             selected,
@@ -660,6 +669,8 @@ export async function runCli(
           account: {
             name: result.account.name,
             account_id: result.account.account_id,
+            user_id: result.account.user_id ?? null,
+            identity: result.account.identity,
             auth_mode: result.account.auth_mode,
           },
           quota,
@@ -671,7 +682,7 @@ export async function runCli(
           writeJson(streams.stdout, payload);
         } else {
           streams.stdout.write(
-            `Switched to "${result.account.name}" (${maskAccountId(result.account.account_id)}).\n`,
+            `Switched to "${result.account.name}" (${maskAccountId(result.account.identity)}).\n`,
           );
           if (result.backup_path) {
             streams.stdout.write(`Backup: ${result.backup_path}\n`);
@@ -729,6 +740,8 @@ export async function runCli(
             account: {
               name: account.name,
               account_id: account.account_id,
+              user_id: account.user_id ?? null,
+              identity: account.identity,
               auth_mode: account.auth_mode,
             },
           });

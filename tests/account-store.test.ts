@@ -1,4 +1,4 @@
-import { chmod, readFile, rm, stat } from "node:fs/promises";
+import { chmod, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -62,6 +62,74 @@ describe("AccountStore", () => {
       await expect(store.saveCurrentAccount("shadow")).rejects.toThrow(
         'Identity acct-one is already managed by "main".',
       );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("allows saving different chatgpt users under the same account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-shared", "chatgpt", "plus", "user-alpha");
+      await store.saveCurrentAccount("alpha");
+
+      await writeCurrentAuth(homeDir, "acct-shared", "chatgpt", "plus", "user-beta");
+      await store.saveCurrentAccount("beta");
+
+      const listed = await store.listAccounts();
+      expect(listed.accounts.map((account) => ({
+        account_id: account.account_id,
+        user_id: account.user_id,
+        identity: account.identity,
+      }))).toEqual([
+        {
+          account_id: "acct-shared",
+          user_id: "user-alpha",
+          identity: "acct-shared:user-alpha",
+        },
+        {
+          account_id: "acct-shared",
+          user_id: "user-beta",
+          identity: "acct-shared:user-beta",
+        },
+      ]);
+
+      const current = await store.getCurrentStatus();
+      expect(current.account_id).toBe("acct-shared");
+      expect(current.user_id).toBe("user-beta");
+      expect(current.identity).toBe("acct-shared:user-beta");
+      expect(current.matched_accounts).toEqual(["beta"]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("auto-migrates legacy chatgpt metadata to composite identity", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-legacy", "chatgpt", "plus", "user-legacy");
+      await store.saveCurrentAccount("legacy");
+
+      const metaPath = join(homeDir, ".codex-team", "accounts", "legacy", "meta.json");
+      const legacyMeta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+      legacyMeta.account_id = "acct-legacy";
+      await writeFile(metaPath, `${JSON.stringify(legacyMeta, null, 2)}\n`);
+
+      const listed = await store.listAccounts();
+      expect(listed.warnings).toEqual([]);
+      expect(listed.accounts).toHaveLength(1);
+      expect(listed.accounts[0]?.account_id).toBe("acct-legacy");
+      expect(listed.accounts[0]?.user_id).toBe("user-legacy");
+      expect(listed.accounts[0]?.identity).toBe("acct-legacy:user-legacy");
+
+      const migratedMeta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+      expect(migratedMeta.account_id).toBe("acct-legacy");
+      expect(migratedMeta.user_id).toBe("user-legacy");
+      expect(migratedMeta.created_at).toBe(legacyMeta.created_at);
     } finally {
       await cleanupTempHome(homeDir);
     }

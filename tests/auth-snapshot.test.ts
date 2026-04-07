@@ -36,8 +36,53 @@ describe("auth snapshot parsing", () => {
     expect(getSnapshotIdentity(snapshot)).toBe(getSnapshotIdentity(reparsed));
   });
 
-  test("creates metadata with a preserved created_at on overwrite", () => {
+  test("derives a composite identity for chatgpt auth with account and user", () => {
+    const payload = createAuthPayload("acct-primary", "chatgpt", "plus", "user-primary");
+    const snapshot = parseAuthSnapshot(JSON.stringify(payload));
+
+    expect(getSnapshotIdentity(snapshot)).toBe("acct-primary:user-primary");
+  });
+
+  test("falls back to account identity when chatgpt user claim is missing", () => {
     const payload = createAuthPayload("acct-primary");
+    const snapshot = parseAuthSnapshot(JSON.stringify(payload));
+
+    expect(getSnapshotIdentity(snapshot)).toBe("acct-primary");
+  });
+
+  test("falls back to user_id when chatgpt_user_id is missing", () => {
+    const payload = createAuthPayload("acct-primary");
+    const idTokenPayload = {
+      iss: "https://auth.openai.com",
+      aud: "app_codexm_tests",
+      client_id: "app_codexm_tests",
+      user_id: "user-fallback",
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct-primary",
+        chatgpt_plan_type: "plus",
+      },
+    };
+    const accessTokenPayload = {
+      iss: "https://auth.openai.com",
+      aud: "app_codexm_tests",
+      client_id: "app_codexm_tests",
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct-primary",
+        chatgpt_plan_type: "plus",
+      },
+    };
+    payload.tokens = {
+      ...payload.tokens,
+      id_token: `${Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" }), "utf8").toString("base64url")}.${Buffer.from(JSON.stringify(idTokenPayload), "utf8").toString("base64url")}.sig`,
+      access_token: `${Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" }), "utf8").toString("base64url")}.${Buffer.from(JSON.stringify(accessTokenPayload), "utf8").toString("base64url")}.sig`,
+    };
+    const snapshot = parseAuthSnapshot(JSON.stringify(payload));
+
+    expect(getSnapshotIdentity(snapshot)).toBe("acct-primary:user-fallback");
+  });
+
+  test("creates metadata with a preserved created_at on overwrite", () => {
+    const payload = createAuthPayload("acct-primary", "chatgpt", "plus", "user-primary");
     const created = createSnapshotMeta("main", payload, new Date("2026-03-18T00:00:00.000Z"));
     const overwritten = createSnapshotMeta(
       "main",
@@ -49,6 +94,8 @@ describe("auth snapshot parsing", () => {
     expect(overwritten.created_at).toBe(created.created_at);
     expect(overwritten.updated_at).toBe("2026-03-19T00:00:00.000Z");
     expect(overwritten.last_switched_at).toBe(null);
+    expect(overwritten.account_id).toBe("acct-primary");
+    expect(overwritten.user_id).toBe("user-primary");
     expect(overwritten.quota.status).toBe("stale");
   });
 
@@ -58,6 +105,7 @@ describe("auth snapshot parsing", () => {
         name: "main",
         auth_mode: "chatgpt",
         account_id: "acct-primary",
+        user_id: "user-primary",
         created_at: "2026-03-18T00:00:00.000Z",
         updated_at: "2026-03-18T00:00:00.000Z",
         last_switched_at: null,
@@ -65,5 +113,7 @@ describe("auth snapshot parsing", () => {
     );
 
     expect(parsed.quota.status).toBe("stale");
+    expect(parsed.account_id).toBe("acct-primary");
+    expect(parsed.user_id).toBe("user-primary");
   });
 });

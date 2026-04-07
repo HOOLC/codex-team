@@ -21,7 +21,11 @@ import {
   QuotaWindowSnapshot,
   SnapshotMeta,
   createSnapshotMeta,
+  getMetaIdentity,
+  getSnapshotAccountId,
   getSnapshotIdentity,
+  getSnapshotUserId,
+  isSupportedChatGPTAuthMode,
   parseAuthSnapshot,
   parseSnapshotMeta,
   readAuthSnapshotFile,
@@ -57,6 +61,7 @@ export interface StoreState {
 }
 
 export interface ManagedAccount extends SnapshotMeta {
+  identity: string;
   authPath: string;
   metaPath: string;
   configPath: string | null;
@@ -66,6 +71,8 @@ export interface ManagedAccount extends SnapshotMeta {
 export interface AccountQuotaSummary {
   name: string;
   account_id: string;
+  user_id: string | null;
+  identity: string;
   plan_type: string | null;
   credits_balance: number | null;
   status: QuotaStatus;
@@ -80,6 +87,8 @@ export interface CurrentAccountStatus {
   exists: boolean;
   auth_mode: string | null;
   account_id: string | null;
+  user_id: string | null;
+  identity: string | null;
   matched_accounts: string[];
   managed: boolean;
   duplicate_match: boolean;
@@ -193,6 +202,26 @@ async function pathExists(path: string): Promise<boolean> {
 
 async function readJsonFile(path: string): Promise<string> {
   return readFile(path, "utf8");
+}
+
+function canAutoMigrateLegacyChatGPTMeta(
+  meta: SnapshotMeta,
+  snapshot: AuthSnapshot,
+): boolean {
+  if (!isSupportedChatGPTAuthMode(meta.auth_mode) || !isSupportedChatGPTAuthMode(snapshot.auth_mode)) {
+    return false;
+  }
+
+  if (typeof meta.user_id === "string" && meta.user_id.trim() !== "") {
+    return false;
+  }
+
+  const snapshotUserId = getSnapshotUserId(snapshot);
+  if (!snapshotUserId) {
+    return false;
+  }
+
+  return meta.account_id === getSnapshotAccountId(snapshot);
 }
 
 async function detectRunningCodexProcesses(): Promise<number[]> {
@@ -359,6 +388,8 @@ export class AccountStore {
     return {
       name: account.name,
       account_id: account.account_id,
+      user_id: account.user_id ?? null,
+      identity: account.identity,
       plan_type: planType,
       credits_balance: account.quota.credits_balance ?? null,
       status: account.quota.status,
@@ -407,18 +438,33 @@ export class AccountStore {
       readJsonFile(metaPath),
       readAuthSnapshotFile(authPath),
     ]);
-    const meta = parseSnapshotMeta(rawMeta);
+    let meta = parseSnapshotMeta(rawMeta);
 
     if (meta.name !== name) {
       throw new Error(`Account metadata name mismatch for "${name}".`);
     }
 
-    if (meta.account_id !== getSnapshotIdentity(snapshot)) {
+    const snapshotIdentity = getSnapshotIdentity(snapshot);
+    if (getMetaIdentity(meta) !== snapshotIdentity) {
+      if (canAutoMigrateLegacyChatGPTMeta(meta, snapshot)) {
+        meta = {
+          ...meta,
+          account_id: getSnapshotAccountId(snapshot),
+          user_id: getSnapshotUserId(snapshot),
+        };
+        await this.writeAccountMeta(name, meta);
+      } else {
+        throw new Error(`Account metadata account_id mismatch for "${name}".`);
+      }
+    }
+
+    if (getMetaIdentity(meta) !== snapshotIdentity) {
       throw new Error(`Account metadata account_id mismatch for "${name}".`);
     }
 
     return {
       ...meta,
+      identity: getMetaIdentity(meta),
       authPath,
       metaPath,
       configPath: (await pathExists(this.accountConfigPath(name))) ? this.accountConfigPath(name) : null,
@@ -449,7 +495,7 @@ export class AccountStore {
 
     const counts = new Map<string, number>();
     for (const account of accounts) {
-      counts.set(account.account_id, (counts.get(account.account_id) ?? 0) + 1);
+      counts.set(account.identity, (counts.get(account.identity) ?? 0) + 1);
     }
 
     accounts.sort((left, right) => left.name.localeCompare(right.name));
@@ -457,7 +503,7 @@ export class AccountStore {
     return {
       accounts: accounts.map((account) => ({
         ...account,
-        duplicateAccountId: (counts.get(account.account_id) ?? 0) > 1,
+        duplicateAccountId: (counts.get(account.identity) ?? 0) > 1,
       })),
       warnings,
     };
@@ -471,6 +517,8 @@ export class AccountStore {
         exists: false,
         auth_mode: null,
         account_id: null,
+        user_id: null,
+        identity: null,
         matched_accounts: [],
         managed: false,
         duplicate_match: false,
@@ -480,14 +528,18 @@ export class AccountStore {
 
     const snapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
     const currentIdentity = getSnapshotIdentity(snapshot);
+    const currentAccountId = getSnapshotAccountId(snapshot);
+    const currentUserId = getSnapshotUserId(snapshot) ?? null;
     const matchedAccounts = accounts
-      .filter((account) => account.account_id === currentIdentity)
+      .filter((account) => account.identity === currentIdentity)
       .map((account) => account.name);
 
     return {
       exists: true,
       auth_mode: snapshot.auth_mode,
-      account_id: currentIdentity,
+      account_id: currentAccountId,
+      user_id: currentUserId,
+      identity: currentIdentity,
       matched_accounts: matchedAccounts,
       managed: matchedAccounts.length > 0,
       duplicate_match: matchedAccounts.length > 1,
@@ -526,7 +578,7 @@ export class AccountStore {
 
     const { accounts } = await this.listAccounts();
     const duplicateIdentityAccounts = accounts.filter(
-      (account) => account.name !== name && account.account_id === identity,
+      (account) => account.name !== name && account.identity === identity,
     );
     if (duplicateIdentityAccounts.length > 0) {
       const joinedNames = duplicateIdentityAccounts.map((account) => `"${account.name}"`).join(", ");
@@ -664,7 +716,7 @@ export class AccountStore {
     }
     const writtenSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
 
-    if (getSnapshotIdentity(writtenSnapshot) !== account.account_id) {
+    if (getSnapshotIdentity(writtenSnapshot) !== account.identity) {
       throw new Error(`Switch verification failed for account "${name}".`);
     }
 
@@ -730,7 +782,8 @@ export class AccountStore {
       }
 
       meta.auth_mode = result.authSnapshot.auth_mode;
-      meta.account_id = getSnapshotIdentity(result.authSnapshot);
+      meta.account_id = getSnapshotAccountId(result.authSnapshot);
+      meta.user_id = getSnapshotUserId(result.authSnapshot);
       meta.updated_at = now.toISOString();
       meta.quota = result.quota;
       await this.writeAccountMeta(name, meta);
@@ -909,7 +962,7 @@ export class AccountStore {
       }
       if (account.duplicateAccountId) {
         warnings.push(
-          `Account "${account.name}" shares identity ${account.account_id} with another saved account.`,
+          `Account "${account.name}" shares identity ${account.identity} with another saved account.`,
         );
       }
     }

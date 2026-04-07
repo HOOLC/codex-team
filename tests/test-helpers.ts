@@ -25,10 +25,17 @@ export function createAuthPayload(
   accountId: string,
   authMode = "chatgpt",
   planType = "plus",
+  userId?: string,
 ): AuthSnapshot {
   const authClaim = {
     chatgpt_account_id: accountId,
     chatgpt_plan_type: planType,
+    ...(typeof userId === "string" && userId.trim() !== ""
+      ? {
+          chatgpt_user_id: userId,
+          user_id: userId,
+        }
+      : {}),
   };
   const issuedAt = 1_773_850_555;
 
@@ -72,12 +79,13 @@ export async function writeCurrentAuth(
   accountId: string,
   authMode = "chatgpt",
   planType = "plus",
+  userId?: string,
 ): Promise<void> {
   const codexDir = join(homeDir, ".codex");
   await mkdir(codexDir, { recursive: true, mode: 0o700 });
   await writeFile(
     join(codexDir, "auth.json"),
-    `${JSON.stringify(createAuthPayload(accountId, authMode, planType), null, 2)}\n`,
+    `${JSON.stringify(createAuthPayload(accountId, authMode, planType, userId), null, 2)}\n`,
     { mode: 0o600 },
   );
 }
