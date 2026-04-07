@@ -751,6 +751,54 @@ wire_api = "responses"
     }
   });
 
+  test("switch reports wait progress while refreshing a managed Desktop session", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-progress");
+      await runCli(["save", "switch-progress", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "switch-progress", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 5,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          applyManagedSwitch: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        ok: true,
+        action: "switch",
+        account: {
+          name: "switch-progress",
+        },
+      });
+      expect(stderr.read()).toContain(
+        "Waiting for the current Codex Desktop thread to finish before applying the switch...",
+      );
+      expect(stderr.read()).toContain("Still waiting for the current Codex Desktop thread to finish");
+      expect(stderr.read()).toContain("Applied the switch to the managed Codex Desktop session.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("switch warns when refreshing the running codexm-managed Desktop session fails", async () => {
     const homeDir = await createTempHome();
 

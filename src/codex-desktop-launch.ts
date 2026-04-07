@@ -19,6 +19,7 @@ export const DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS = 120_000;
 const CODEX_APP_SERVER_RESTART_EXPRESSION =
   'window.electronBridge.sendMessageFromView({ type: "codex-app-server-restart", hostId: "local" })';
 const DEVTOOLS_REQUEST_TIMEOUT_MS = 5_000;
+const DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS = 10_000;
 
 export interface ExecFileLike {
   (
@@ -225,6 +226,7 @@ async function evaluateDevtoolsExpression(
   createWebSocketImpl: CreateWebSocketLike,
   webSocketDebuggerUrl: string,
   expression: string,
+  timeoutMs: number,
 ): Promise<void> {
   const socket = createWebSocketImpl(webSocketDebuggerUrl);
 
@@ -233,7 +235,7 @@ async function evaluateDevtoolsExpression(
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for Codex Desktop devtools response."));
-    }, DEVTOOLS_REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
 
     const cleanup = () => {
       clearTimeout(timeout);
@@ -313,8 +315,8 @@ function buildManagedSwitchExpression(options?: {
   const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
   const force = ${JSON.stringify(force)};
   const timeoutMs = ${JSON.stringify(timeoutMs)};
-  const requestTimeoutMs = 5000;
-  let requestCounter = 0;
+  const fallbackPollIntervalMs = 2000;
+  const mutationDebounceMs = 50;
 
   const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
   const toError = (value, fallback) => {
@@ -331,97 +333,32 @@ function buildManagedSwitchExpression(options?: {
     return new Error(message);
   };
 
+  const getRootContainer = () => {
+    const root = document.getElementById("root");
+    if (!root) {
+      throw new Error("Codex Desktop root container is unavailable.");
+    }
+
+    return root;
+  };
+
+  const getRootFiber = () => {
+    const root = getRootContainer();
+
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith("__reactContainer$"));
+    if (!fiberKey) {
+      throw new Error("Could not locate the Codex Desktop React container.");
+    }
+
+    return root[fiberKey];
+  };
+
   const postMessage = async (message) => {
     if (!window.electronBridge || typeof window.electronBridge.sendMessageFromView !== "function") {
       throw new Error("Codex Desktop bridge is unavailable.");
     }
 
     await window.electronBridge.sendMessageFromView(message);
-  };
-
-  const extractResponse = (data) => {
-    if (!isRecord(data) || data.type !== "mcp-response") {
-      return null;
-    }
-
-    if (isRecord(data.response)) {
-      return data.response;
-    }
-
-    if (isRecord(data.result)) {
-      return data.result;
-    }
-
-    return null;
-  };
-
-  const extractNotification = (data) => {
-    if (isRecord(data) && data.type === "mcp-notification") {
-      if (isRecord(data.notification)) {
-        return data.notification;
-      }
-
-      if (isRecord(data.request)) {
-        return data.request;
-      }
-    }
-
-    if (isRecord(data) && typeof data.method === "string") {
-      return data;
-    }
-
-    return null;
-  };
-
-  const request = async (method, params) => {
-    const id = \`codexm-managed-switch-\${Date.now()}-\${++requestCounter}\`;
-
-    return await new Promise(async (resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        cleanup();
-        reject(new Error(\`Timed out waiting for \${method}.\`));
-      }, requestTimeoutMs);
-
-      const cleanup = () => {
-        window.clearTimeout(timeout);
-        window.removeEventListener("message", onMessage);
-      };
-
-      const onMessage = (event) => {
-        const response = extractResponse(event.data);
-        if (!isRecord(response) || String(response.id) !== id) {
-          return;
-        }
-
-        cleanup();
-
-        if (isRecord(response.error)) {
-          reject(
-            new Error(
-              typeof response.error.message === "string"
-                ? response.error.message
-                : \`\${method} failed.\`,
-            ),
-          );
-          return;
-        }
-
-        resolve(isRecord(response.result) ? response.result : {});
-      };
-
-      window.addEventListener("message", onMessage);
-
-      try {
-        await postMessage({
-          type: "mcp-request",
-          hostId,
-          request: params === undefined ? { id, method } : { id, method, params },
-        });
-      } catch (error) {
-        cleanup();
-        reject(toError(error, \`\${method} failed.\`));
-      }
-    });
   };
 
   const restart = async () => {
@@ -431,26 +368,43 @@ function buildManagedSwitchExpression(options?: {
     });
   };
 
-  const isActiveStatus = (status) => isRecord(status) && status.type === "active";
+  const collectActiveThreadIds = () => {
+    const conversations = new Map();
 
-  const listActiveLoadedThreadIds = async () => {
-    const loadedResult = await request("thread/loaded/list");
-    const loadedThreadIds = Array.isArray(loadedResult.data)
-      ? loadedResult.data.filter((value) => typeof value === "string" && value.length > 0)
-      : [];
-
-    const activeThreadIds = [];
-    for (const threadId of loadedThreadIds) {
-      const threadResult = await request("thread/read", { threadId });
-      const thread = isRecord(threadResult.thread) ? threadResult.thread : null;
-      const status = thread && isRecord(thread.status) ? thread.status : null;
-
-      if (isActiveStatus(status)) {
-        activeThreadIds.push(threadId);
+    const visit = (fiber) => {
+      if (!fiber) {
+        return;
       }
-    }
 
-    return activeThreadIds;
+      const props = fiber.memoizedProps;
+      if (isRecord(props) && isRecord(props.conversation)) {
+        const conversation = props.conversation;
+        const id = typeof conversation.id === "string" ? conversation.id : null;
+        const status =
+          isRecord(conversation.threadRuntimeStatus) &&
+          typeof conversation.threadRuntimeStatus.type === "string"
+            ? conversation.threadRuntimeStatus.type
+            : null;
+
+        if (id && status) {
+          conversations.set(id, status);
+        }
+      }
+
+      if (fiber.child) {
+        visit(fiber.child);
+      }
+
+      if (fiber.sibling) {
+        visit(fiber.sibling);
+      }
+    };
+
+    visit(getRootFiber());
+
+    return Array.from(conversations.entries())
+      .filter(([, status]) => status === "active")
+      .map(([threadId]) => threadId);
   };
 
   if (force) {
@@ -458,7 +412,7 @@ function buildManagedSwitchExpression(options?: {
     return { mode: "force" };
   }
 
-  let activeThreadIds = await listActiveLoadedThreadIds();
+  let activeThreadIds = collectActiveThreadIds();
   if (activeThreadIds.length === 0) {
     await restart();
     return { mode: "immediate" };
@@ -466,11 +420,19 @@ function buildManagedSwitchExpression(options?: {
 
   await new Promise((resolve, reject) => {
     let settled = false;
-    let checking = false;
+    let mutationHandle = null;
+    let fallbackHandle = null;
+    let observer = null;
 
     const cleanup = () => {
       window.clearTimeout(timeoutHandle);
-      window.removeEventListener("message", onMessage);
+      if (mutationHandle !== null) {
+        window.clearTimeout(mutationHandle);
+      }
+      if (fallbackHandle !== null) {
+        window.clearInterval(fallbackHandle);
+      }
+      observer?.disconnect();
     };
 
     const finishWithError = (error) => {
@@ -499,21 +461,19 @@ function buildManagedSwitchExpression(options?: {
       }
     };
 
-    const maybeRestart = async () => {
-      if (settled || checking) {
+    const checkThreads = async () => {
+      if (settled) {
         return;
       }
 
-      checking = true;
       try {
-        activeThreadIds = await listActiveLoadedThreadIds();
+        activeThreadIds = collectActiveThreadIds();
         if (activeThreadIds.length === 0) {
           await finishWithRestart();
+          return;
         }
       } catch (error) {
         finishWithError(toError(error, "Failed to refresh active thread state."));
-      } finally {
-        checking = false;
       }
     };
 
@@ -523,32 +483,32 @@ function buildManagedSwitchExpression(options?: {
       );
     }, timeoutMs);
 
-    const onMessage = (event) => {
-      const notification = extractNotification(event.data);
-      if (!isRecord(notification) || typeof notification.method !== "string") {
+    const scheduleCheck = () => {
+      if (settled || mutationHandle !== null) {
         return;
       }
 
-      const params = isRecord(notification.params) ? notification.params : null;
-      const threadId = params && typeof params.threadId === "string" ? params.threadId : null;
-      if (threadId && !activeThreadIds.includes(threadId)) {
-        return;
-      }
-
-      if (notification.method === "thread/status/changed") {
-        const status = params && isRecord(params.status) ? params.status : null;
-        if (!isActiveStatus(status)) {
-          void maybeRestart();
-        }
-        return;
-      }
-
-      if (notification.method === "turn/completed") {
-        void maybeRestart();
-      }
+      mutationHandle = window.setTimeout(() => {
+        mutationHandle = null;
+        void checkThreads();
+      }, mutationDebounceMs);
     };
 
-    window.addEventListener("message", onMessage);
+    observer = new MutationObserver(() => {
+      scheduleCheck();
+    });
+    observer.observe(getRootContainer(), {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+
+    fallbackHandle = window.setInterval(() => {
+      void checkThreads();
+    }, fallbackPollIntervalMs);
+
+    void checkThreads();
   });
 
   return { mode: "waited" };
@@ -731,6 +691,15 @@ export function createCodexDesktopLauncher(options: {
       throw new Error("Could not find the local Codex Desktop devtools target.");
     }
 
+    const devtoolsTimeoutMs =
+      options?.force === true
+        ? DEVTOOLS_REQUEST_TIMEOUT_MS
+        : Math.max(
+            DEVTOOLS_REQUEST_TIMEOUT_MS,
+            (options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS) +
+              DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS,
+          );
+
     await waitForPromiseOrAbort(
       evaluateDevtoolsExpression(
         createWebSocketImpl,
@@ -738,6 +707,7 @@ export function createCodexDesktopLauncher(options: {
         options?.force === true
           ? CODEX_APP_SERVER_RESTART_EXPRESSION
           : buildManagedSwitchExpression(options),
+        devtoolsTimeoutMs,
       ),
       options?.signal,
     );

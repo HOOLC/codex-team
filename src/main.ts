@@ -34,6 +34,8 @@ interface RunCliOptions extends Partial<CliStreams> {
   store?: AccountStore;
   desktopLauncher?: CodexDesktopLauncher;
   interruptSignal?: AbortSignal;
+  managedDesktopWaitStatusDelayMs?: number;
+  managedDesktopWaitStatusIntervalMs?: number;
 }
 
 interface ParsedArgs {
@@ -135,14 +137,79 @@ function stripManagedDesktopWarning(warnings: string[]): string[] {
   );
 }
 
+const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS = 2_000;
+const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS = 10_000;
+
+function startManagedDesktopWaitReporter(
+  stream: NodeJS.WriteStream,
+  options: {
+    delayMs?: number;
+    intervalMs?: number;
+  } = {},
+): {
+  stop: (result: "success" | "cancelled") => void;
+} {
+  const delayMs = options.delayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
+  const intervalMs = options.intervalMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS;
+  const startedAt = Date.now();
+  let started = false;
+  let intervalHandle: NodeJS.Timeout | null = null;
+
+  const timeoutHandle = setTimeout(() => {
+    started = true;
+    stream.write(
+      "Waiting for the current Codex Desktop thread to finish before applying the switch...\n",
+    );
+
+    intervalHandle = setInterval(() => {
+      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+      stream.write(
+        `Still waiting for the current Codex Desktop thread to finish (${elapsedSeconds}s elapsed)...\n`,
+      );
+    }, intervalMs);
+    intervalHandle.unref?.();
+  }, delayMs);
+  timeoutHandle.unref?.();
+
+  return {
+    stop: (result) => {
+      clearTimeout(timeoutHandle);
+      if (intervalHandle) {
+        clearInterval(intervalHandle);
+      }
+
+      if (started && result === "success") {
+        stream.write("Applied the switch to the managed Codex Desktop session.\n");
+      }
+    },
+  };
+}
+
 async function refreshManagedDesktopAfterSwitch(
   warnings: string[],
   desktopLauncher: CodexDesktopLauncher,
   options: {
     force?: boolean;
     signal?: AbortSignal;
+    statusStream?: NodeJS.WriteStream;
+    statusDelayMs?: number;
+    statusIntervalMs?: number;
   } = {},
 ): Promise<void> {
+  let reporter: ReturnType<typeof startManagedDesktopWaitReporter> | null = null;
+  if (options.force !== true && options.statusStream) {
+    try {
+      if (await desktopLauncher.isManagedDesktopRunning()) {
+        reporter = startManagedDesktopWaitReporter(options.statusStream, {
+          delayMs: options.statusDelayMs,
+          intervalMs: options.statusIntervalMs,
+        });
+      }
+    } catch {
+      // Keep status reporting best-effort, same as the rest of Desktop inspection.
+    }
+  }
+
   try {
     if (
       await desktopLauncher.applyManagedSwitch({
@@ -151,9 +218,11 @@ async function refreshManagedDesktopAfterSwitch(
         timeoutMs: DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
       })
     ) {
+      reporter?.stop("success");
       return;
     }
   } catch (error) {
+    reporter?.stop("cancelled");
     if ((error as Error).name === "AbortError") {
       warnings.push(
         "Refreshing the running codexm-managed Codex Desktop session was interrupted after the local auth switched. Relaunch Codex Desktop or rerun switch --force to apply the change immediately.",
@@ -166,6 +235,8 @@ async function refreshManagedDesktopAfterSwitch(
     );
     return;
   }
+
+  reporter?.stop("cancelled");
 
   try {
     const runningApps = await desktopLauncher.listRunningApps();
@@ -605,6 +676,10 @@ export async function runCli(
   const store = options.store ?? createAccountStore();
   const desktopLauncher = options.desktopLauncher ?? createCodexDesktopLauncher();
   const interruptSignal = options.interruptSignal;
+  const managedDesktopWaitStatusDelayMs =
+    options.managedDesktopWaitStatusDelayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
+  const managedDesktopWaitStatusIntervalMs =
+    options.managedDesktopWaitStatusIntervalMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS;
   const parsed = parseArgs(argv);
   const json = parsed.flags.has("--json");
 
@@ -801,6 +876,9 @@ export async function runCli(
           await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
             force,
             signal: interruptSignal,
+            statusStream: streams.stderr,
+            statusDelayMs: managedDesktopWaitStatusDelayMs,
+            statusIntervalMs: managedDesktopWaitStatusIntervalMs,
           });
 
           const payload = {
@@ -840,6 +918,9 @@ export async function runCli(
         await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
           force,
           signal: interruptSignal,
+          statusStream: streams.stderr,
+          statusDelayMs: managedDesktopWaitStatusDelayMs,
+          statusIntervalMs: managedDesktopWaitStatusIntervalMs,
         });
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         try {

@@ -327,7 +327,7 @@ describe("codex-desktop-launch", () => {
     }
   });
 
-  test("waits for a managed desktop thread to finish before restarting when force is disabled", async () => {
+  test("waits for a managed desktop thread to finish by polling renderer conversation state", async () => {
     const homeDir = await createTempHome();
     const statePath = join(homeDir, ".codex-team", "desktop-state.json");
     const sentMessages: string[] = [];
@@ -402,12 +402,111 @@ describe("codex-desktop-launch", () => {
       );
       expect(sentMessages).toHaveLength(1);
       expect(sentMessages[0]).toContain('"method":"Runtime.evaluate"');
-      expect(sentMessages[0]).toContain("thread/loaded/list");
-      expect(sentMessages[0]).toContain("thread/read");
-      expect(sentMessages[0]).toContain("thread/status/changed");
-      expect(sentMessages[0]).toContain("turn/completed");
+      expect(sentMessages[0]).toContain("threadRuntimeStatus");
+      expect(sentMessages[0]).toContain("__reactContainer$");
+      expect(sentMessages[0]).toContain("fallbackPollIntervalMs");
+      expect(sentMessages[0]).toContain("MutationObserver");
+      expect(sentMessages[0]).not.toContain("thread/loaded/list");
+      expect(sentMessages[0]).not.toContain("mcp-request");
       expect(sentMessages[0]).toContain("codex-app-server-restart");
     } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("passes an extended devtools timeout for managed switches", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const originalSetTimeout = globalThis.setTimeout;
+    const recordedTimeouts: number[] = [];
+
+    try {
+      globalThis.setTimeout = ((
+        handler: Parameters<typeof globalThis.setTimeout>[0],
+        timeout?: number,
+        ...args: Parameters<typeof globalThis.setTimeout> extends [
+          unknown,
+          unknown?,
+          ...infer Rest,
+        ]
+          ? Rest
+          : never
+      ) => {
+        recordedTimeouts.push(timeout ?? 0);
+        return originalSetTimeout(handler, timeout, ...args);
+      }) as typeof globalThis.setTimeout;
+
+      const launcher = createCodexDesktopLauncher({
+        statePath,
+        execFileImpl: async (file) => {
+          if (file === "ps") {
+            return {
+              stdout:
+                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223\n",
+              stderr: "",
+            };
+          }
+
+          throw new Error(`unexpected command: ${file}`);
+        },
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              type: "page",
+              url: "app://-/index.html?hostId=local",
+              webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/page/1",
+            },
+          ],
+        }),
+        createWebSocketImpl: () => {
+          const socket = {
+            onopen: null as (() => void) | null,
+            onmessage: null as ((event: { data: unknown }) => void) | null,
+            onerror: null as ((event: unknown) => void) | null,
+            onclose: null as (() => void) | null,
+            send(_data: string) {
+              queueMicrotask(() => {
+                socket.onmessage?.({
+                  data: JSON.stringify({
+                    id: 1,
+                    result: {
+                      result: {
+                        type: "undefined",
+                      },
+                    },
+                  }),
+                });
+              });
+            },
+            close() {
+              return;
+            },
+          };
+
+          queueMicrotask(() => {
+            socket.onopen?.();
+          });
+
+          return socket;
+        },
+      });
+
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
+        managed_by_codexm: true,
+        started_at: "2026-04-07T00:00:00.000Z",
+      });
+
+      await expect(launcher.applyManagedSwitch({ force: false, timeoutMs: 12_000 })).resolves.toBe(
+        true,
+      );
+      expect(recordedTimeouts.some((value) => value >= 22_000)).toBe(true);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
       await cleanupTempHome(homeDir);
     }
   });
