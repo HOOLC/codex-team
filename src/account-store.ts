@@ -1,7 +1,5 @@
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
 import {
   chmod,
   copyFile,
@@ -34,8 +32,6 @@ import {
   extractChatGPTAuth,
   fetchQuotaSnapshot,
 } from "./quota-client.js";
-
-const execFile = promisify(execFileCallback);
 
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -222,35 +218,6 @@ function canAutoMigrateLegacyChatGPTMeta(
   }
 
   return meta.account_id === getSnapshotAccountId(snapshot);
-}
-
-async function detectRunningCodexProcesses(): Promise<number[]> {
-  try {
-    const { stdout } = await execFile("ps", ["-Ao", "pid=,command="]);
-    const pids: number[] = [];
-
-    for (const line of stdout.split("\n")) {
-      const match = line.trim().match(/^(\d+)\s+(.+)$/);
-      if (!match) {
-        continue;
-      }
-
-      const pid = Number(match[1]);
-      const command = match[2];
-
-      if (
-        pid !== process.pid &&
-        /(^|\s|\/)codex(\s|$)/.test(command) &&
-        !command.includes("codex-team")
-      ) {
-        pids.push(pid);
-      }
-    }
-
-    return pids;
-  } catch {
-    return [];
-  }
 }
 
 export class AccountStore {
@@ -730,13 +697,6 @@ export class AccountStore {
       last_switched_account: name,
       last_backup_path: backupPath,
     });
-
-    const runningCodexPids = await detectRunningCodexProcesses();
-    if (runningCodexPids.length > 0) {
-      warnings.push(
-        `Detected running codex processes (${runningCodexPids.join(", ")}). Existing sessions may still hold the previous login state.`,
-      );
-    }
 
     return {
       account: await this.readManagedAccount(name),

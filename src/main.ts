@@ -1,4 +1,6 @@
+import { copyFile, rm, stat } from "node:fs/promises";
 import { stdin as defaultStdin, stdout as defaultStdout, stderr as defaultStderr } from "node:process";
+import { join } from "node:path";
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
@@ -10,6 +12,13 @@ import {
   type AccountQuotaSummary,
   createAccountStore,
 } from "./account-store.js";
+import {
+  createCodexDesktopLauncher,
+  type CodexDesktopLauncher,
+  type ManagedCodexDesktopState,
+  type RunningCodexDesktop,
+  DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
+} from "./codex-desktop-launch.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -22,6 +31,7 @@ interface CliStreams {
 
 interface RunCliOptions extends Partial<CliStreams> {
   store?: AccountStore;
+  desktopLauncher?: CodexDesktopLauncher;
 }
 
 interface ParsedArgs {
@@ -107,11 +117,49 @@ Usage:
   codexm update [--json]
   codexm switch <name> [--json]
   codexm switch --auto [--dry-run] [--json]
+  codexm launch [name] [--json]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
 
 Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
 `);
+}
+
+function stripManagedDesktopWarning(warnings: string[]): string[] {
+  return warnings.filter(
+    (warning) =>
+      !warning.startsWith("Detected running codex processes (") ||
+      !warning.endsWith("Existing sessions may still hold the previous login state."),
+  );
+}
+
+async function refreshManagedDesktopAfterSwitch(
+  warnings: string[],
+  desktopLauncher: CodexDesktopLauncher,
+): Promise<void> {
+  try {
+    if (await desktopLauncher.restartManagedAppServer()) {
+      return;
+    }
+  } catch (error) {
+    warnings.push(
+      `Failed to refresh the running codexm-managed Codex Desktop session: ${(error as Error).message}`,
+    );
+    return;
+  }
+
+  try {
+    const runningApps = await desktopLauncher.listRunningApps();
+    if (runningApps.length === 0) {
+      return;
+    }
+
+    warnings.push(
+      `Detected running codex processes (${runningApps.map((app) => app.pid).join(", ")}). Existing sessions may still hold the previous login state.`,
+    );
+  } catch {
+    // Keep Desktop detection best-effort so switch success does not depend on local process inspection.
+  }
 }
 
 function describeCurrentStatus(status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>): string {
@@ -419,6 +467,113 @@ async function confirmRemoval(
   });
 }
 
+async function confirmDesktopRelaunch(streams: CliStreams): Promise<boolean> {
+  if (!streams.stdin.isTTY) {
+    throw new Error("Refusing to relaunch Codex Desktop in a non-interactive terminal.");
+  }
+
+  streams.stdout.write(
+    "Codex Desktop is already running. Close it and relaunch with the selected auth? [y/N] ",
+  );
+
+  return await new Promise<boolean>((resolve) => {
+    const cleanup = () => {
+      streams.stdin.off("data", onData);
+      streams.stdin.pause();
+    };
+
+    const onData = (buffer: Buffer) => {
+      const answer = buffer.toString("utf8").trim().toLowerCase();
+      cleanup();
+      streams.stdout.write("\n");
+      resolve(answer === "y" || answer === "yes");
+    };
+
+    streams.stdin.resume();
+    streams.stdin.on("data", onData);
+  });
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+function isRunningDesktopFromApp(
+  app: RunningCodexDesktop,
+  appPath: string,
+): boolean {
+  return app.command.includes(`${appPath}/Contents/MacOS/Codex`);
+}
+
+async function resolveManagedDesktopState(
+  desktopLauncher: CodexDesktopLauncher,
+  appPath: string,
+  existingApps: RunningCodexDesktop[],
+): Promise<ManagedCodexDesktopState | null> {
+  const existingPids = new Set(existingApps.map((app) => app.pid));
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const runningApps = await desktopLauncher.listRunningApps();
+    const launchedApp =
+      runningApps
+        .filter(
+          (app) =>
+            isRunningDesktopFromApp(app, appPath) && !existingPids.has(app.pid),
+        )
+        .sort((left, right) => right.pid - left.pid)[0] ??
+      runningApps
+        .filter((app) => isRunningDesktopFromApp(app, appPath))
+        .sort((left, right) => right.pid - left.pid)[0] ??
+      null;
+
+    if (launchedApp) {
+      return {
+        pid: launchedApp.pid,
+        app_path: appPath,
+        remote_debugging_port: DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
+        managed_by_codexm: true,
+        started_at: new Date().toISOString(),
+      };
+    }
+
+    await sleep(300);
+  }
+
+  return null;
+}
+
+async function restoreLaunchBackup(
+  store: AccountStore,
+  backupPath: string | null,
+): Promise<void> {
+  if (backupPath && await pathExists(backupPath)) {
+    await copyFile(backupPath, store.paths.currentAuthPath);
+  } else {
+    await rm(store.paths.currentAuthPath, { force: true });
+  }
+
+  const configBackupPath = join(store.paths.backupsDir, "last-active-config.toml");
+  if (await pathExists(configBackupPath)) {
+    await copyFile(configBackupPath, store.paths.currentConfigPath);
+  } else {
+    await rm(store.paths.currentConfigPath, { force: true });
+  }
+}
+
 export async function runCli(
   argv: string[],
   options: RunCliOptions = {},
@@ -429,6 +584,7 @@ export async function runCli(
     stderr: options.stderr ?? defaultStderr,
   };
   const store = options.store ?? createAccountStore();
+  const desktopLauncher = options.desktopLauncher ?? createCodexDesktopLauncher();
   const parsed = parseArgs(argv);
   const json = parsed.flags.has("--json");
 
@@ -619,6 +775,9 @@ export async function runCli(
           for (const warning of warnings) {
             result.warnings.push(warning);
           }
+          result.warnings = stripManagedDesktopWarning(result.warnings);
+
+          await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher);
 
           const payload = {
             ok: true,
@@ -653,6 +812,8 @@ export async function runCli(
         }
 
         const result = await store.switchAccount(name);
+        result.warnings = stripManagedDesktopWarning(result.warnings);
+        await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher);
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         try {
           await store.refreshQuotaForAccount(result.account.name);
@@ -688,6 +849,108 @@ export async function runCli(
             streams.stdout.write(`Backup: ${result.backup_path}\n`);
           }
           for (const warning of result.warnings) {
+            streams.stdout.write(`Warning: ${warning}\n`);
+          }
+        }
+        return 0;
+      }
+
+      case "launch": {
+        const name = parsed.positionals[0] ?? null;
+
+        if (parsed.positionals.length > 1) {
+          throw new Error("Usage: codexm launch [name] [--json]");
+        }
+
+        const warnings: string[] = [];
+        const appPath = await desktopLauncher.findInstalledApp();
+        if (!appPath) {
+          throw new Error("Codex Desktop not found at /Applications/Codex.app.");
+        }
+
+        const runningApps = await desktopLauncher.listRunningApps();
+        if (runningApps.length > 0) {
+          const confirmed = await confirmDesktopRelaunch(streams);
+          if (!confirmed) {
+            if (json) {
+              writeJson(streams.stdout, {
+                ok: false,
+                action: "launch",
+                cancelled: true,
+              });
+            } else {
+              streams.stdout.write("Aborted.\n");
+            }
+            return 1;
+          }
+
+          await desktopLauncher.quitRunningApps();
+        }
+
+        let switchedAccount: Awaited<ReturnType<AccountStore["switchAccount"]>>["account"] | null =
+          null;
+        let switchBackupPath: string | null = null;
+        if (name) {
+          const switchResult = await store.switchAccount(name);
+          warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
+          switchedAccount = switchResult.account;
+          switchBackupPath = switchResult.backup_path;
+        }
+
+        try {
+          await desktopLauncher.launch(appPath);
+          const managedState = await resolveManagedDesktopState(
+            desktopLauncher,
+            appPath,
+            runningApps,
+          );
+          if (!managedState) {
+            await desktopLauncher.clearManagedState().catch(() => undefined);
+            throw new Error(
+              "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+            );
+          }
+          await desktopLauncher.writeManagedState(managedState);
+        } catch (error) {
+          if (switchedAccount) {
+            await restoreLaunchBackup(store, switchBackupPath).catch(() => undefined);
+          }
+          throw error;
+        }
+
+        if (json) {
+          writeJson(streams.stdout, {
+            ok: true,
+            action: "launch",
+            account: switchedAccount
+              ? {
+                  name: switchedAccount.name,
+                  account_id: switchedAccount.account_id,
+                  user_id: switchedAccount.user_id ?? null,
+                  identity: switchedAccount.identity,
+                  auth_mode: switchedAccount.auth_mode,
+                }
+              : null,
+            launched_with_current_auth: switchedAccount === null,
+            app_path: appPath,
+            relaunched: runningApps.length > 0,
+            warnings,
+          });
+        } else {
+          if (switchedAccount) {
+            streams.stdout.write(
+              `Switched to "${switchedAccount.name}" (${maskAccountId(switchedAccount.identity)}).\n`,
+            );
+          }
+          if (runningApps.length > 0) {
+            streams.stdout.write("Closed existing Codex Desktop instance and launched a new one.\n");
+          }
+          streams.stdout.write(
+            switchedAccount
+              ? `Launched Codex Desktop with "${switchedAccount.name}" (${maskAccountId(switchedAccount.identity)}).\n`
+              : "Launched Codex Desktop with current auth.\n",
+          );
+          for (const warning of warnings) {
             streams.stdout.write(`Warning: ${warning}\n`);
           }
         }

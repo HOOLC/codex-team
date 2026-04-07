@@ -8,6 +8,11 @@ import packageJson from "../package.json";
 
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store.js";
+import type {
+  CodexDesktopLauncher,
+  ManagedCodexDesktopState,
+  RunningCodexDesktop,
+} from "../src/codex-desktop-launch.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -35,6 +40,30 @@ function captureWritable(): {
   return {
     stream: stream as unknown as NodeJS.WriteStream,
     read: () => output,
+  };
+}
+
+function createDesktopLauncherStub(overrides: Partial<{
+  findInstalledApp: () => Promise<string | null>;
+  listRunningApps: () => Promise<RunningCodexDesktop[]>;
+  quitRunningApps: () => Promise<void>;
+  launch: (appPath: string) => Promise<void>;
+  writeManagedState: (state: ManagedCodexDesktopState) => Promise<void>;
+  readManagedState: () => Promise<ManagedCodexDesktopState | null>;
+  clearManagedState: () => Promise<void>;
+  isManagedDesktopRunning: () => Promise<boolean>;
+  restartManagedAppServer: () => Promise<boolean>;
+}> = {}): CodexDesktopLauncher {
+  return {
+    findInstalledApp: overrides.findInstalledApp ?? (async () => "/Applications/Codex.app"),
+    listRunningApps: overrides.listRunningApps ?? (async () => []),
+    quitRunningApps: overrides.quitRunningApps ?? (async () => undefined),
+    launch: overrides.launch ?? (async () => undefined),
+    writeManagedState: overrides.writeManagedState ?? (async () => undefined),
+    readManagedState: overrides.readManagedState ?? (async () => null),
+    clearManagedState: overrides.clearManagedState ?? (async () => undefined),
+    isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    restartManagedAppServer: overrides.restartManagedAppServer ?? (async () => false),
   };
 }
 
@@ -90,14 +119,18 @@ describe("CLI", () => {
   test("includes version flag in help output", async () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
+    const output = await (async () => {
+      const exitCode = await runCli(["--help"], {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
 
-    const exitCode = await runCli(["--help"], {
-      stdout: stdout.stream,
-      stderr: stderr.stream,
-    });
+      expect(exitCode).toBe(0);
+      return stdout.read();
+    })();
 
-    expect(exitCode).toBe(0);
-    expect(stdout.read()).toContain("codexm --version");
+    expect(output).toContain("codexm --version");
+    expect(output).toContain("codexm launch [name] [--json]");
     expect(stderr.read()).toBe("");
   });
 
@@ -326,6 +359,459 @@ wire_api = "responses"
 
       const accounts = await store.listAccounts();
       expect(accounts.accounts).toHaveLength(0);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launches desktop with current auth when no account is provided", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const calls: string[] = [];
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let listCalls = 0;
+
+      const exitCode = await runCli(["launch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 501, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+          quitRunningApps: async () => {
+            calls.push("quit");
+          },
+          launch: async () => {
+            calls.push("launch");
+          },
+          writeManagedState: async () => {
+            calls.push("write-state");
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["launch", "write-state"]);
+      expect(stdout.read()).toContain("Launched Codex Desktop with current auth.");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switches account before launch when account is provided", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-launch");
+      await runCli(["save", "launch-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const calls: string[] = [];
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let listCalls = 0;
+      const exitCode = await runCli(["launch", "launch-main"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 502, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+          quitRunningApps: async () => {
+            calls.push("quit");
+          },
+          launch: async () => {
+            calls.push("launch");
+          },
+          writeManagedState: async () => {
+            calls.push("write-state");
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["launch", "write-state"]);
+      expect(stdout.read()).toContain('Switched to "launch-main"');
+      expect(stdout.read()).toContain('Launched Codex Desktop with "launch-main"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("refuses to relaunch running desktop in non-interactive mode", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["launch"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub({
+        listRunningApps: async () => [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
+        quitRunningApps: async () => undefined,
+        launch: async () => undefined,
+      }),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.read()).toContain("Refusing to relaunch Codex Desktop in a non-interactive terminal.");
+  });
+
+  test("fails when Codex Desktop is not installed", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["launch"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub({
+        findInstalledApp: async () => null,
+      }),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.read()).toContain("Codex Desktop not found at /Applications/Codex.app.");
+  });
+
+  test("does not switch accounts when launch fails before Desktop startup", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-launch-before");
+      await runCli(["save", "launch-before", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-current");
+
+      const exitCode = await runCli(["launch", "launch-before"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          findInstalledApp: async () => null,
+        }),
+      });
+
+      expect(exitCode).toBe(1);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-launch-current");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("aborts relaunch when the user rejects confirmation", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+    const calls: string[] = [];
+
+    const launchPromise = runCli(["launch"], {
+      stdin,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub({
+        listRunningApps: async () => [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
+        quitRunningApps: async () => {
+          calls.push("quit");
+        },
+        launch: async () => {
+          calls.push("launch");
+        },
+      }),
+    });
+
+    stdin.emitInput("n\n");
+    const exitCode = await launchPromise;
+
+    expect(exitCode).toBe(1);
+    expect(calls).toEqual([]);
+    expect(stdout.read()).toContain("Aborted.");
+    expect(stderr.read()).toBe("");
+  });
+
+  test("relaunches an existing Desktop instance after confirmation", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+    const calls: string[] = [];
+    let listCalls = 0;
+
+    const launchPromise = runCli(["launch"], {
+      stdin,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub({
+        listRunningApps: async () => {
+          listCalls += 1;
+          return listCalls <= 2
+            ? [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }]
+            : [{ pid: 456, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+        },
+        quitRunningApps: async () => {
+          calls.push("quit");
+        },
+        launch: async () => {
+          calls.push("launch");
+        },
+        writeManagedState: async () => {
+          calls.push("write-state");
+        },
+      }),
+    });
+
+    stdin.emitInput("y\n");
+    const exitCode = await launchPromise;
+
+    expect(exitCode).toBe(0);
+    expect(calls).toEqual(["quit", "launch", "write-state"]);
+    expect(stdout.read()).toContain("Closed existing Codex Desktop instance and launched a new one.");
+    expect(stderr.read()).toBe("");
+  });
+
+  test("does not launch a new Desktop instance when quitting the old one fails", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+    const calls: string[] = [];
+
+    const launchPromise = runCli(["launch"], {
+      stdin,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub({
+        listRunningApps: async () => [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
+        quitRunningApps: async () => {
+          calls.push("quit");
+          throw new Error("quit failed");
+        },
+        launch: async () => {
+          calls.push("launch");
+        },
+      }),
+    });
+
+    stdin.emitInput("y\n");
+    const exitCode = await launchPromise;
+
+    expect(exitCode).toBe(1);
+    expect(calls).toEqual(["quit"]);
+    expect(stderr.read()).toContain("quit failed");
+  });
+
+  test("fails launch when managed desktop tracking cannot be recorded", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+    const calls: string[] = [];
+
+    const exitCode = await runCli(["launch"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub({
+        listRunningApps: async () => [],
+        launch: async () => {
+          calls.push("launch");
+        },
+        clearManagedState: async () => {
+          calls.push("clear-state");
+        },
+        writeManagedState: async () => {
+          calls.push("write-state");
+        },
+      }),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(calls).toEqual(["launch", "clear-state"]);
+    expect(stderr.read()).toContain(
+      "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+    );
+  });
+
+  test("restores the previous auth when launch fails after switching accounts", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-launch-target");
+      await runCli(["save", "launch-target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-original");
+
+      const exitCode = await runCli(["launch", "launch-target"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => [],
+          launch: async () => undefined,
+        }),
+      });
+
+      expect(exitCode).toBe(1);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-launch-original");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch still warns when a non-managed Codex Desktop instance is running", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-warning");
+      await runCli(["save", "switch-warning", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "switch-warning"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          restartManagedAppServer: async () => false,
+          listRunningApps: async () => [{ pid: 321, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Existing sessions may still hold the previous login state.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch does not warn when the running Desktop instance is managed by codexm", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-managed");
+      await runCli(["save", "switch-managed", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const calls: string[] = [];
+
+      const exitCode = await runCli(["switch", "switch-managed"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          restartManagedAppServer: async () => {
+            calls.push("restart");
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["restart"]);
+      expect(stdout.read()).not.toContain("Existing sessions may still hold the previous login state.");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch warns when refreshing the running codexm-managed Desktop session fails", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-restart-fail");
+      await runCli(["save", "switch-restart-fail", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "switch-restart-fail"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          restartManagedAppServer: async () => {
+            throw new Error("restart failed");
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain(
+        "Failed to refresh the running codexm-managed Codex Desktop session: restart failed",
+      );
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch succeeds even when Desktop inspection fails after the auth has been switched", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-inspection");
+      await runCli(["save", "switch-inspection", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "switch-inspection"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            throw new Error("ps failed");
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain('Switched to "switch-inspection"');
+      expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
     }
