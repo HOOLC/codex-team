@@ -36,7 +36,7 @@ Use `--json` on query and mutation commands when you need machine-readable outpu
 4. Switch between saved accounts with `codexm switch <name>` or let the tool choose with `codexm switch --auto`.
 5. Refresh and inspect quota usage with `codexm list`.
 
-For ChatGPT auth snapshots, `codex-team` treats identity as account + user when the local tokens expose both values. This allows saving and switching different users under the same ChatGPT account/workspace as separate managed entries.
+For ChatGPT auth snapshots, `codex-team` can save and switch different users under the same ChatGPT account/workspace as separate managed entries when the local login tokens distinguish them.
 
 ## Development
 

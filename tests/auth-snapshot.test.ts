@@ -82,7 +82,7 @@ describe("auth snapshot parsing", () => {
   });
 
   test("creates metadata with a preserved created_at on overwrite", () => {
-    const payload = createAuthPayload("acct-primary");
+    const payload = createAuthPayload("acct-primary", "chatgpt", "plus", "user-primary");
     const created = createSnapshotMeta("main", payload, new Date("2026-03-18T00:00:00.000Z"));
     const overwritten = createSnapshotMeta(
       "main",
@@ -94,6 +94,8 @@ describe("auth snapshot parsing", () => {
     expect(overwritten.created_at).toBe(created.created_at);
     expect(overwritten.updated_at).toBe("2026-03-19T00:00:00.000Z");
     expect(overwritten.last_switched_at).toBe(null);
+    expect(overwritten.account_id).toBe("acct-primary");
+    expect(overwritten.user_id).toBe("user-primary");
     expect(overwritten.quota.status).toBe("stale");
   });
 
@@ -103,6 +105,7 @@ describe("auth snapshot parsing", () => {
         name: "main",
         auth_mode: "chatgpt",
         account_id: "acct-primary",
+        user_id: "user-primary",
         created_at: "2026-03-18T00:00:00.000Z",
         updated_at: "2026-03-18T00:00:00.000Z",
         last_switched_at: null,
@@ -110,5 +113,7 @@ describe("auth snapshot parsing", () => {
     );
 
     expect(parsed.quota.status).toBe("stale");
+    expect(parsed.account_id).toBe("acct-primary");
+    expect(parsed.user_id).toBe("user-primary");
   });
 });

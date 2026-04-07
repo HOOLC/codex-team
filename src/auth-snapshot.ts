@@ -38,6 +38,7 @@ export interface SnapshotMeta {
   name: string;
   auth_mode: string;
   account_id: string;
+  user_id?: string;
   created_at: string;
   updated_at: string;
   last_switched_at: string | null;
@@ -136,7 +137,7 @@ function extractSnapshotJwtPayloads(snapshot: AuthSnapshot): Record<string, unkn
   return payloads;
 }
 
-function getChatGPTUserId(snapshot: AuthSnapshot): string | undefined {
+export function getSnapshotUserId(snapshot: AuthSnapshot): string | undefined {
   for (const payload of extractSnapshotJwtPayloads(snapshot)) {
     const authClaim = extractAuthClaim(payload);
     const chatGPTUserId = authClaim?.chatgpt_user_id;
@@ -157,7 +158,13 @@ function fingerprintApiKey(apiKey: string): string {
   return createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
 }
 
-export function getSnapshotIdentity(snapshot: AuthSnapshot): string {
+export function composeIdentity(accountId: string, userId?: string): string {
+  return typeof userId === "string" && userId.trim() !== ""
+    ? `${accountId}:${userId}`
+    : accountId;
+}
+
+export function getSnapshotAccountId(snapshot: AuthSnapshot): string {
   if (isApiKeyAuthMode(snapshot.auth_mode)) {
     const apiKey = snapshot.OPENAI_API_KEY;
     if (typeof apiKey !== "string" || apiKey.trim() === "") {
@@ -172,14 +179,18 @@ export function getSnapshotIdentity(snapshot: AuthSnapshot): string {
     throw new Error('Field "tokens.account_id" must be a non-empty string.');
   }
 
-  if (isSupportedChatGPTAuthMode(snapshot.auth_mode)) {
-    const userId = getChatGPTUserId(snapshot);
-    if (userId) {
-      return `${accountId}:${userId}`;
-    }
-  }
-
   return accountId;
+}
+
+export function getSnapshotIdentity(snapshot: AuthSnapshot): string {
+  return composeIdentity(
+    getSnapshotAccountId(snapshot),
+    isSupportedChatGPTAuthMode(snapshot.auth_mode) ? getSnapshotUserId(snapshot) : undefined,
+  );
+}
+
+export function getMetaIdentity(meta: Pick<SnapshotMeta, "account_id" | "user_id">): string {
+  return composeIdentity(meta.account_id, meta.user_id);
 }
 
 export function defaultQuotaSnapshot(): QuotaSnapshot {
@@ -319,7 +330,10 @@ export function createSnapshotMeta(
   return {
     name,
     auth_mode: snapshot.auth_mode,
-    account_id: getSnapshotIdentity(snapshot),
+    account_id: getSnapshotAccountId(snapshot),
+    user_id: isSupportedChatGPTAuthMode(snapshot.auth_mode)
+      ? getSnapshotUserId(snapshot)
+      : undefined,
     created_at: existingCreatedAt ?? timestamp,
     updated_at: timestamp,
     last_switched_at: null,
@@ -351,6 +365,7 @@ export function parseSnapshotMeta(raw: string): SnapshotMeta {
     name: asNonEmptyString(parsed.name, "name"),
     auth_mode: asNonEmptyString(parsed.auth_mode, "auth_mode"),
     account_id: asNonEmptyString(parsed.account_id, "account_id"),
+    user_id: asOptionalString(parsed.user_id, "user_id"),
     created_at: asNonEmptyString(parsed.created_at, "created_at"),
     updated_at: asNonEmptyString(parsed.updated_at, "updated_at"),
     last_switched_at: lastSwitchedAt,
