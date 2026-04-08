@@ -21,6 +21,9 @@ const CODEX_APP_SERVER_RESTART_EXPRESSION =
 const CODEXM_WATCH_CONSOLE_PREFIX = "__codexm_watch__";
 const DEVTOOLS_REQUEST_TIMEOUT_MS = 5_000;
 const DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS = 10_000;
+const DEFAULT_WATCH_RECONNECT_DELAY_MS = 1_000;
+const DEFAULT_WATCH_HEALTH_CHECK_INTERVAL_MS = 5_000;
+const DEFAULT_WATCH_HEALTH_CHECK_TIMEOUT_MS = 3_000;
 
 export interface ExecFileLike {
   (
@@ -85,6 +88,12 @@ export interface ManagedWatchStatusEvent {
   error: string | null;
 }
 
+export interface ManagedWatchStatusEvent {
+  type: "disconnected" | "reconnected";
+  attempt: number;
+  error: string | null;
+}
+
 export interface ManagedCurrentQuotaSnapshot {
   plan_type: string | null;
   credits_balance: number | null;
@@ -122,6 +131,7 @@ export interface CodexDesktopLauncher {
     signal?: AbortSignal;
     debugLogger?: (line: string) => void;
     onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+    onStatus?: (event: ManagedWatchStatusEvent) => Promise<void> | void;
   }): Promise<void>;
 }
 
@@ -1273,6 +1283,9 @@ export function createCodexDesktopLauncher(options: {
   fetchImpl?: FetchLike;
   createWebSocketImpl?: CreateWebSocketLike;
   launchProcessImpl?: LaunchProcessLike;
+  watchReconnectDelayMs?: number;
+  watchHealthCheckIntervalMs?: number;
+  watchHealthCheckTimeoutMs?: number;
 } = {}): CodexDesktopLauncher {
   const execFileImpl = options.execFileImpl ?? execFile;
   const statePath = options.statePath ?? DEFAULT_CODEX_DESKTOP_STATE_PATH;
@@ -1281,6 +1294,11 @@ export function createCodexDesktopLauncher(options: {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   const createWebSocketImpl = options.createWebSocketImpl ?? createDefaultWebSocket;
   const launchProcessImpl = options.launchProcessImpl ?? launchManagedDesktopProcess;
+  const watchReconnectDelayMs = options.watchReconnectDelayMs ?? DEFAULT_WATCH_RECONNECT_DELAY_MS;
+  const watchHealthCheckIntervalMs =
+    options.watchHealthCheckIntervalMs ?? DEFAULT_WATCH_HEALTH_CHECK_INTERVAL_MS;
+  const watchHealthCheckTimeoutMs =
+    options.watchHealthCheckTimeoutMs ?? DEFAULT_WATCH_HEALTH_CHECK_TIMEOUT_MS;
 
   async function findInstalledApp(): Promise<string | null> {
     const candidates = [
@@ -1514,10 +1532,12 @@ export function createCodexDesktopLauncher(options: {
     return true;
   }
 
-  async function watchManagedQuotaSignals(options?: {
+  async function watchManagedQuotaSignalsSession(sessionOptions: {
     signal?: AbortSignal;
     debugLogger?: (line: string) => void;
     onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+    signaledRequests: Set<string>;
+    onReady?: () => Promise<void> | void;
   }): Promise<void> {
     const state = await readManagedState();
     if (!state) {
@@ -1531,23 +1551,37 @@ export function createCodexDesktopLauncher(options: {
 
     const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
     const socket = createWebSocketImpl(webSocketDebuggerUrl);
-    const debugLogger = options?.debugLogger;
+    const debugLogger = sessionOptions.debugLogger;
     const rpcRequestMethods = new Map<string, string>();
-    const signaledRequests = new Set<string>();
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       let closedByClient = false;
       let nextCommandId = 1;
+      let healthCheckTimer: NodeJS.Timeout | null = null;
+      let healthCheckTimeout: NodeJS.Timeout | null = null;
+      let ready = false;
       const pendingCommands = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 
+      const clearHealthCheckTimers = () => {
+        if (healthCheckTimer) {
+          clearInterval(healthCheckTimer);
+          healthCheckTimer = null;
+        }
+        if (healthCheckTimeout) {
+          clearTimeout(healthCheckTimeout);
+          healthCheckTimeout = null;
+        }
+      };
+
       const cleanup = () => {
+        clearHealthCheckTimers();
         socket.onopen = null;
         socket.onmessage = null;
         socket.onerror = null;
         socket.onclose = null;
-        if (options?.signal) {
-          options.signal.removeEventListener("abort", onAbort);
+        if (sessionOptions.signal) {
+          sessionOptions.signal.removeEventListener("abort", onAbort);
         }
 
         for (const pending of pendingCommands.values()) {
@@ -1607,12 +1641,58 @@ export function createCodexDesktopLauncher(options: {
           }
         });
 
-      const emitQuotaSignal = async (signal: ManagedQuotaSignal) => {
-        if (signaledRequests.has(signal.requestId)) {
+      const startHealthChecks = () => {
+        if (watchHealthCheckIntervalMs <= 0 || watchHealthCheckTimeoutMs <= 0) {
           return;
         }
-        signaledRequests.add(signal.requestId);
-        await options?.onQuotaSignal?.(signal);
+
+        healthCheckTimer = setInterval(() => {
+          if (settled || !ready || healthCheckTimeout) {
+            return;
+          }
+
+          let timeoutFired = false;
+          healthCheckTimeout = setTimeout(() => {
+            timeoutFired = true;
+            healthCheckTimeout = null;
+            try {
+              socket.close();
+            } catch {
+              // Keep the timeout path best-effort before surfacing the failure.
+            }
+            fail(new Error("Codex Desktop devtools watch health check timed out."));
+          }, watchHealthCheckTimeoutMs);
+
+          void sendCommand("Runtime.evaluate", {
+            expression: "void 0",
+            returnByValue: true,
+          }).then(
+            () => {
+              if (healthCheckTimeout) {
+                clearTimeout(healthCheckTimeout);
+                healthCheckTimeout = null;
+              }
+            },
+            (error) => {
+              if (timeoutFired) {
+                return;
+              }
+              if (healthCheckTimeout) {
+                clearTimeout(healthCheckTimeout);
+                healthCheckTimeout = null;
+              }
+              fail(error);
+            },
+          );
+        }, watchHealthCheckIntervalMs);
+      };
+
+      const emitQuotaSignal = async (signal: ManagedQuotaSignal) => {
+        if (sessionOptions.signaledRequests.has(signal.requestId)) {
+          return;
+        }
+        sessionOptions.signaledRequests.add(signal.requestId);
+        await sessionOptions.onQuotaSignal?.(signal);
       };
 
       socket.onopen = () => {
@@ -1624,6 +1704,11 @@ export function createCodexDesktopLauncher(options: {
               returnByValue: true,
             }),
           )
+          .then(async () => {
+            ready = true;
+            startHealthChecks();
+            await sessionOptions.onReady?.();
+          })
           .catch((error) => {
             fail(error);
           });
@@ -1702,14 +1787,62 @@ export function createCodexDesktopLauncher(options: {
         fail(new Error("Codex Desktop devtools watch connection closed unexpectedly."));
       };
 
-      if (options?.signal) {
-        if (options.signal.aborted) {
+      if (sessionOptions.signal) {
+        if (sessionOptions.signal.aborted) {
           onAbort();
           return;
         }
-        options.signal.addEventListener("abort", onAbort, { once: true });
+        sessionOptions.signal.addEventListener("abort", onAbort, { once: true });
       }
     });
+  }
+
+  async function watchManagedQuotaSignals(options?: {
+    signal?: AbortSignal;
+    debugLogger?: (line: string) => void;
+    onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+    onStatus?: (event: ManagedWatchStatusEvent) => Promise<void> | void;
+  }): Promise<void> {
+    const signaledRequests = new Set<string>();
+    let reconnectAttempt = 0;
+
+    while (true) {
+      if (options?.signal?.aborted) {
+        return;
+      }
+
+      try {
+        await watchManagedQuotaSignalsSession({
+          signal: options?.signal,
+          debugLogger: options?.debugLogger,
+          onQuotaSignal: options?.onQuotaSignal,
+          signaledRequests,
+          onReady: async () => {
+            if (reconnectAttempt > 0) {
+              await options?.onStatus?.({
+                type: "reconnected",
+                attempt: reconnectAttempt,
+                error: null,
+              });
+              reconnectAttempt = 0;
+            }
+          },
+        });
+        return;
+      } catch (error) {
+        if (options?.signal?.aborted || (error as Error).name === "AbortError") {
+          return;
+        }
+
+        reconnectAttempt += 1;
+        await options?.onStatus?.({
+          type: "disconnected",
+          attempt: reconnectAttempt,
+          error: (error as Error).message,
+        });
+        await delay(watchReconnectDelayMs);
+      }
+    }
   }
 
   return {

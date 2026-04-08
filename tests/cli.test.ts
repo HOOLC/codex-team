@@ -1648,7 +1648,6 @@ wire_api = "responses"
       await cleanupTempHome(homeDir);
     }
   });
-
   test("watch reports connection loss and recovery while reconnecting", async () => {
     const homeDir = await createTempHome();
 
@@ -1800,6 +1799,7 @@ wire_api = "responses"
 
       await writeCurrentAuth(homeDir, "acct-watch-a");
 
+      const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
       const stdout = captureWritable();
       const stderr = captureWritable();
 
@@ -1825,7 +1825,10 @@ wire_api = "responses"
                 '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
             });
           },
-          applyManagedSwitch: async () => true,
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
         }),
       });
 
@@ -1843,6 +1846,7 @@ wire_api = "responses"
       expect(stdout.read()).toMatch(
         /\[\d{2}:\d{2}:\d{2}\] auto-switch from="watch-a" to="watch-b"/,
       );
+      expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 600_000 }]);
     } finally {
       await cleanupTempHome(homeDir);
     }

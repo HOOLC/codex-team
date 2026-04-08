@@ -18,6 +18,7 @@ import {
   type ManagedCurrentQuotaSnapshot,
   type ManagedCodexDesktopState,
   type ManagedQuotaSignal,
+  type ManagedWatchStatusEvent,
   type RunningCodexDesktop,
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
@@ -285,6 +286,7 @@ function stripManagedDesktopWarning(warnings: string[]): string[] {
 
 const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS = 1_000;
 const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS = 5_000;
+const WATCH_AUTO_SWITCH_TIMEOUT_MS = 600_000;
 
 function startManagedDesktopWaitReporter(
   stream: NodeJS.WriteStream,
@@ -340,6 +342,7 @@ async function refreshManagedDesktopAfterSwitch(
     statusStream?: NodeJS.WriteStream;
     statusDelayMs?: number;
     statusIntervalMs?: number;
+    timeoutMs?: number;
   } = {},
 ): Promise<void> {
   let reporter: ReturnType<typeof startManagedDesktopWaitReporter> | null = null;
@@ -361,7 +364,7 @@ async function refreshManagedDesktopAfterSwitch(
       await desktopLauncher.applyManagedSwitch({
         force: options.force === true,
         signal: options.signal,
-        timeoutMs: DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
+        timeoutMs: options.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
       })
     ) {
       reporter?.stop("success");
@@ -628,6 +631,7 @@ async function performAutoSwitch(
     statusStream?: NodeJS.WriteStream;
     statusDelayMs?: number;
     statusIntervalMs?: number;
+    timeoutMs?: number;
     debugLog?: (message: string) => void;
   },
 ): Promise<AutoSwitchExecutionResult> {
@@ -690,6 +694,7 @@ async function performAutoSwitch(
     statusStream: options.statusStream,
     statusDelayMs: options.statusDelayMs,
     statusIntervalMs: options.statusIntervalMs,
+    timeoutMs: options.timeoutMs,
   });
   options.debugLog?.(
     `switch: completed mode=auto target=${result.account.name} candidates=${candidates.length} warnings=${result.warnings.length}`,
@@ -1809,6 +1814,7 @@ export async function runCli(
                 statusStream: streams.stderr,
                 statusDelayMs: managedDesktopWaitStatusDelayMs,
                 statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+                timeoutMs: WATCH_AUTO_SWITCH_TIMEOUT_MS,
                 debugLog,
               });
 
