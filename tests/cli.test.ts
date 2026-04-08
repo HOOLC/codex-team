@@ -708,7 +708,13 @@ wire_api = "responses"
       });
 
       expect(exitCode).toBe(0);
-      expect(stdout.read()).toContain("Existing sessions may still hold the previous login state.");
+      const output = stdout.read();
+      expect(output).toContain(
+        'Warning: "codexm switch" updates local auth, but running Codex Desktop may still use the previous login state.',
+      );
+      expect(output).toContain(
+        'Warning: Use "codexm launch" to start Codex Desktop with the selected auth; future switches can apply immediately to that session.',
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1034,9 +1040,15 @@ wire_api = "responses"
       });
       expect(listCode).toBe(0);
       expect(JSON.parse(listStdout.read())).toMatchObject({
+        current: {
+          exists: true,
+          managed: true,
+          matched_accounts: ["quota-main"],
+        },
         successes: [
           {
             name: "quota-main",
+            is_current: true,
             available: "available",
             credits_balance: 11,
             refresh_status: "ok",
@@ -1053,7 +1065,7 @@ wire_api = "responses"
 
       const removedStdout = captureWritable();
       const removedStderr = captureWritable();
-      const removedCode = await runCli(["quota", "refresh", "--json"], {
+      const removedCode = await runCli(["lsit", "--json"], {
         store,
         stdout: removedStdout.stream,
         stderr: removedStderr.stream,
@@ -1061,32 +1073,34 @@ wire_api = "responses"
       expect(removedCode).toBe(1);
       expect(JSON.parse(removedStderr.read())).toMatchObject({
         ok: false,
-        error: 'Unknown command "quota".',
+        error: 'Unknown command "lsit".',
+        suggestion: "list",
       });
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("formats list output with local reset times and hides credits in text mode", async () => {
+  test("marks the current account in list text output while keeping the table aligned", async () => {
     const homeDir = await createTempHome();
 
     try {
       const store = createAccountStore(homeDir, {
-        fetchImpl: async (input) => {
+        fetchImpl: async (input, init) => {
           const url = String(input);
           if (url.endsWith("/backend-api/wham/usage")) {
+            const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
             return jsonResponse({
               plan_type: "plus",
               rate_limit: {
                 primary_window: {
-                  used_percent: 15,
+                  used_percent: accountId === "acct-cli-quota-text-a" ? 15 : 25,
                   limit_window_seconds: 18_000,
                   reset_after_seconds: 400,
                   reset_at: 1_773_868_641,
                 },
                 secondary_window: {
-                  used_percent: 45,
+                  used_percent: accountId === "acct-cli-quota-text-a" ? 45 : 55,
                   limit_window_seconds: 604_800,
                   reset_after_seconds: 4_000,
                   reset_at: 1_773_890_040,
@@ -1103,9 +1117,21 @@ wire_api = "responses"
           return textResponse("not found", 404);
         },
       });
-      await writeCurrentAuth(homeDir, "acct-cli-quota-text");
+      await writeCurrentAuth(homeDir, "acct-cli-quota-text-a");
       await runCli(["save", "quota-main", "--json"], {
         store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-quota-text-b");
+      await runCli(["save", "quota-backup", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await runCli(["switch", "quota-main", "--json"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub(),
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
       });
@@ -1125,15 +1151,52 @@ wire_api = "responses"
       expect(listCode).toBe(0);
 
       const output = listStdout.read();
+      const lines = output.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
+      const currentRow = tableLines.find((line) => line.includes("quota-main"));
+
+      expect(lines[0]).toBe("Current managed account: quota-main");
       expect(output).not.toContain("CREDITS");
       expect(output).toContain("AVAILABLE");
       expect(output).toContain("available");
+      expect(output).toContain("* quota-main");
+      expect(output).toContain("  quota-backup");
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
       expect(output).toContain(
         dayjs.utc("2026-03-19T03:14:00.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
+      expect(tableLines).toHaveLength(4);
+      expect(currentRow).toBeDefined();
+      expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
+      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
+      expect(tableLines[0]?.indexOf("PLAN TYPE")).toBe(tableLines[3]?.indexOf("plus"));
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("errors on unknown flags with a suggestion instead of silently ignoring them", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["list", "--josn"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      const errorOutput = stderr.read();
+      expect(errorOutput).toContain('Unknown flag "--josn" for command "list".');
+      expect(errorOutput).toContain('Did you mean "--json"?');
     } finally {
       await cleanupTempHome(homeDir);
     }

@@ -60,6 +60,40 @@ interface AutoSwitchCandidate {
   one_week_reset_at: string | null;
 }
 
+class CliUsageError extends Error {
+  suggestion: string | null;
+
+  constructor(message: string, suggestion: string | null = null) {
+    super(message);
+    this.name = "CliUsageError";
+    this.suggestion = suggestion;
+  }
+}
+
+const COMMAND_NAMES = [
+  "current",
+  "list",
+  "save",
+  "update",
+  "switch",
+  "launch",
+  "remove",
+  "rename",
+] as const;
+
+const GLOBAL_FLAGS = new Set(["--help", "--version"]);
+
+const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
+  current: new Set(["--json"]),
+  list: new Set(["--json"]),
+  save: new Set(["--force", "--json"]),
+  update: new Set(["--json"]),
+  switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
+  launch: new Set(["--json"]),
+  remove: new Set(["--yes", "--json"]),
+  rename: new Set(["--json"]),
+};
+
 function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Set<string>();
   const positionals: string[] = [];
@@ -81,6 +115,74 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 function writeJson(stream: NodeJS.WriteStream, value: unknown): void {
   stream.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    let diagonal = previous[0];
+    previous[0] = leftIndex;
+
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const nextDiagonal = previous[rightIndex];
+      const cost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      previous[rightIndex] = Math.min(
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + 1,
+        diagonal + cost,
+      );
+      diagonal = nextDiagonal;
+    }
+  }
+
+  return previous[right.length];
+}
+
+function findClosestSuggestion(value: string, candidates: string[]): string | null {
+  let bestCandidate: string | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const distance = levenshteinDistance(value, candidate);
+    if (distance < bestDistance) {
+      bestCandidate = candidate;
+      bestDistance = distance;
+    }
+  }
+
+  const threshold = Math.max(2, Math.ceil(value.length / 3));
+  return bestDistance <= threshold ? bestCandidate : null;
+}
+
+function validateParsedArgs(parsed: ParsedArgs): void {
+  if (parsed.command && !COMMAND_NAMES.includes(parsed.command as (typeof COMMAND_NAMES)[number])) {
+    throw new CliUsageError(
+      `Unknown command "${parsed.command}".`,
+      findClosestSuggestion(parsed.command, [...COMMAND_NAMES]),
+    );
+  }
+
+  const allowedFlags = new Set<string>(GLOBAL_FLAGS);
+  if (parsed.command) {
+    for (const flag of COMMAND_FLAGS[parsed.command as keyof typeof COMMAND_FLAGS]) {
+      allowedFlags.add(flag);
+    }
+  }
+
+  for (const flag of parsed.flags) {
+    if (!allowedFlags.has(flag)) {
+      const commandContext = parsed.command ? ` for command "${parsed.command}"` : "";
+      throw new CliUsageError(
+        `Unknown flag "${flag}"${commandContext}.`,
+        findClosestSuggestion(flag, [...allowedFlags]),
+      );
+    }
+  }
 }
 
 function formatTable(
@@ -109,6 +211,24 @@ function formatTable(
   return [header, separator, ...rows.map(renderRow)].join("\n");
 }
 
+function describeCurrentListStatus(
+  status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
+): string {
+  if (!status.exists) {
+    return "Current auth: missing";
+  }
+
+  if (status.matched_accounts.length === 0) {
+    return "Current auth: unmanaged";
+  }
+
+  if (status.matched_accounts.length === 1) {
+    return `Current managed account: ${status.matched_accounts[0]}`;
+  }
+
+  return `Current managed account: multiple (${status.matched_accounts.join(", ")})`;
+}
+
 function printHelp(stream: NodeJS.WriteStream): void {
   stream.write(`codexm - manage multiple Codex ChatGPT auth snapshots
 
@@ -125,15 +245,24 @@ Usage:
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
 
+Notes:
+  codexm list refreshes quota data, shows the current managed account, and marks current rows with "*".
+  Unknown commands and flags fail fast; close matches include a suggestion.
+
 Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
 `);
 }
 
+const NON_MANAGED_DESKTOP_WARNING_PREFIX =
+  '"codexm switch" updates local auth, but running Codex Desktop may still use the previous login state.';
+const NON_MANAGED_DESKTOP_FOLLOWUP_WARNING =
+  'Use "codexm launch" to start Codex Desktop with the selected auth; future switches can apply immediately to that session.';
+
 function stripManagedDesktopWarning(warnings: string[]): string[] {
   return warnings.filter(
     (warning) =>
-      !warning.startsWith("Detected running codex processes (") ||
-      !warning.endsWith("Existing sessions may still hold the previous login state."),
+      warning !== NON_MANAGED_DESKTOP_WARNING_PREFIX &&
+      warning !== NON_MANAGED_DESKTOP_FOLLOWUP_WARNING,
   );
 }
 
@@ -244,9 +373,10 @@ async function refreshManagedDesktopAfterSwitch(
       return;
     }
 
-    warnings.push(
-      `Detected running codex processes (${runningApps.map((app) => app.pid).join(", ")}). Existing sessions may still hold the previous login state.`,
-    );
+    if (runningApps.length > 0) {
+      warnings.push(NON_MANAGED_DESKTOP_WARNING_PREFIX);
+      warnings.push(NON_MANAGED_DESKTOP_FOLLOWUP_WARNING);
+    }
   } catch {
     // Keep Desktop detection best-effort so switch success does not depend on local process inspection.
   }
@@ -466,17 +596,23 @@ function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings: string
 
 function describeQuotaAccounts(
   accounts: AccountQuotaSummary[],
+  currentStatus: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
   warnings: string[],
 ): string {
   if (accounts.length === 0) {
-    return warnings.length === 0
-      ? "No saved accounts."
-      : warnings.map((warning) => `Warning: ${warning}`).join("\n");
+    const lines = [describeCurrentListStatus(currentStatus), "No saved accounts."];
+    for (const warning of warnings) {
+      lines.push(`Warning: ${warning}`);
+    }
+
+    return lines.join("\n");
   }
+
+  const currentAccounts = new Set(currentStatus.matched_accounts);
 
   const table = formatTable(
     accounts.map((account) => ({
-      name: account.name,
+      name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
       account_id: maskAccountId(account.identity),
       plan_type: account.plan_type ?? "-",
       available: computeAvailability(account) ?? "-",
@@ -487,7 +623,7 @@ function describeQuotaAccounts(
       refresh_status: account.status,
     })),
     [
-      { key: "name", label: "NAME" },
+      { key: "name", label: "  NAME" },
       { key: "account_id", label: "IDENTITY" },
       { key: "plan_type", label: "PLAN TYPE" },
       { key: "available", label: "AVAILABLE" },
@@ -499,7 +635,7 @@ function describeQuotaAccounts(
     ],
   );
 
-  const lines = [table];
+  const lines = [describeCurrentListStatus(currentStatus), "Refreshed quotas:", table];
   for (const warning of warnings) {
     lines.push(`Warning: ${warning}`);
   }
@@ -510,12 +646,13 @@ function describeQuotaAccounts(
 function describeQuotaRefresh(result: {
   successes: AccountQuotaSummary[];
   failures: Array<{ name: string; error: string }>;
-}): string {
+}, currentStatus: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>): string {
   const lines: string[] = [];
 
   if (result.successes.length > 0) {
-    lines.push("Refreshed quotas:");
-    lines.push(describeQuotaAccounts(result.successes, []));
+    lines.push(describeQuotaAccounts(result.successes, currentStatus, []));
+  } else {
+    lines.push(describeQuotaAccounts([], currentStatus, []));
   }
 
   for (const failure of result.failures) {
@@ -523,7 +660,7 @@ function describeQuotaRefresh(result: {
   }
 
   if (lines.length === 0) {
-    lines.push("No accounts were refreshed.");
+    lines.push(describeQuotaAccounts([], currentStatus, []));
   }
 
   return lines.join("\n");
@@ -684,6 +821,8 @@ export async function runCli(
   const json = parsed.flags.has("--json");
 
   try {
+    validateParsedArgs(parsed);
+
     if (parsed.flags.has("--version")) {
       streams.stdout.write(`${packageJson.version}\n`);
       return 0;
@@ -708,10 +847,19 @@ export async function runCli(
       case "list": {
         const targetName = parsed.positionals[0];
         const result = await store.refreshAllQuotas(targetName);
+        const current = await store.getCurrentStatus();
+        const currentAccounts = new Set(current.matched_accounts);
         if (json) {
-          writeJson(streams.stdout, toCliQuotaRefreshResult(result));
+          writeJson(streams.stdout, {
+            ...toCliQuotaRefreshResult(result),
+            current,
+            successes: result.successes.map((account) => ({
+              ...toCliQuotaSummary(account),
+              is_current: currentAccounts.has(account.name),
+            })),
+          });
         } else {
-          streams.stdout.write(`${describeQuotaRefresh(result)}\n`);
+          streams.stdout.write(`${describeQuotaRefresh(result, current)}\n`);
         }
         return result.failures.length === 0 ? 0 : 1;
       }
@@ -1123,14 +1271,22 @@ export async function runCli(
       }
 
       default:
-        throw new Error(`Unknown command "${parsed.command}".`);
+        throw new CliUsageError(`Unknown command "${parsed.command}".`);
     }
   } catch (error) {
     const message = (error as Error).message;
+    const suggestion = error instanceof CliUsageError ? error.suggestion : null;
     if (json) {
-      writeJson(streams.stderr, { ok: false, error: message });
+      writeJson(streams.stderr, {
+        ok: false,
+        error: message,
+        ...(suggestion ? { suggestion } : {}),
+      });
     } else {
       streams.stderr.write(`Error: ${message}\n`);
+      if (suggestion) {
+        streams.stderr.write(`Did you mean "${suggestion}"?\n`);
+      }
     }
     return 1;
   }
