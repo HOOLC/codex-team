@@ -253,15 +253,16 @@ Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
 `);
 }
 
-const NON_MANAGED_DESKTOP_WARNING_PREFIX = "Detected running codex processes (";
-
-function formatNonManagedDesktopWarning(pids: number[]): string {
-  return `${NON_MANAGED_DESKTOP_WARNING_PREFIX}${pids.join(", ")}). Existing sessions may still hold the previous login state. Use "codexm launch" to start Codex Desktop with the selected auth.`;
-}
+const NON_MANAGED_DESKTOP_WARNING_PREFIX =
+  '"codexm switch" updates local auth, but running Codex Desktop may still use the previous login state.';
+const NON_MANAGED_DESKTOP_FOLLOWUP_WARNING =
+  'Use "codexm launch" to start Codex Desktop with the selected auth; future switches can apply immediately to that session.';
 
 function stripManagedDesktopWarning(warnings: string[]): string[] {
   return warnings.filter(
-    (warning) => !warning.startsWith(NON_MANAGED_DESKTOP_WARNING_PREFIX),
+    (warning) =>
+      warning !== NON_MANAGED_DESKTOP_WARNING_PREFIX &&
+      warning !== NON_MANAGED_DESKTOP_FOLLOWUP_WARNING,
   );
 }
 
@@ -372,9 +373,10 @@ async function refreshManagedDesktopAfterSwitch(
       return;
     }
 
-    warnings.push(
-      formatNonManagedDesktopWarning(runningApps.map((app) => app.pid)),
-    );
+    if (runningApps.length > 0) {
+      warnings.push(NON_MANAGED_DESKTOP_WARNING_PREFIX);
+      warnings.push(NON_MANAGED_DESKTOP_FOLLOWUP_WARNING);
+    }
   } catch {
     // Keep Desktop detection best-effort so switch success does not depend on local process inspection.
   }
