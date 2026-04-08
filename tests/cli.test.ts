@@ -58,18 +58,32 @@ function createDesktopLauncherStub(overrides: Partial<{
     timeoutMs?: number;
     signal?: AbortSignal;
   }) => Promise<boolean>;
+  watchManagedQuotaSignals: (options?: {
+    signal?: AbortSignal;
+    debugLogger?: (line: string) => void;
+    onQuotaSignal?: (signal: {
+      requestId: string;
+      url: string;
+      status: number | null;
+      reason: string;
+      bodySnippet: string | null;
+    }) => Promise<void> | void;
+  }) => Promise<void>;
 }> = {}): CodexDesktopLauncher {
   return {
     findInstalledApp: overrides.findInstalledApp ?? (async () => "/Applications/Codex.app"),
     listRunningApps: overrides.listRunningApps ?? (async () => []),
     quitRunningApps: overrides.quitRunningApps ?? (async () => undefined),
-    launch: overrides.launch ?? (async () => undefined),
+    launch:
+      overrides.launch ??
+      (async () => undefined),
     writeManagedState: overrides.writeManagedState ?? (async () => undefined),
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
     isRunningInsideDesktopShell: overrides.isRunningInsideDesktopShell ?? (async () => false),
     applyManagedSwitch: overrides.applyManagedSwitch ?? (async () => false),
+    watchManagedQuotaSignals: overrides.watchManagedQuotaSignals ?? (async () => undefined),
   };
 }
 
@@ -137,7 +151,34 @@ describe("CLI", () => {
 
     expect(output).toContain("codexm --version");
     expect(output).toContain("codexm launch [name] [--json]");
+    expect(output).toContain("codexm watch [--auto-switch]");
+    expect(output).toContain("Global flags: --help, --version, --debug");
     expect(stderr.read()).toBe("");
+  });
+
+  test("accepts --debug for existing commands and writes current debug output", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-debug-current");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["current", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Current auth: present");
+      expect(stderr.read()).toContain("[debug] current:");
+      expect(stderr.read()).toContain("matched_accounts=0");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
   });
 
   test("supports save and current in json mode", async () => {
@@ -407,6 +448,38 @@ wire_api = "responses"
       expect(calls).toEqual(["launch", "write-state"]);
       expect(stdout.read()).toContain("Launched Codex Desktop with current auth.");
       expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("prints debug details during launch when --debug is enabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let listCalls = 0;
+
+      const exitCode = await runCli(["launch", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 501, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+          launch: async () => undefined,
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain("[debug] launch: using app path /Applications/Codex.app");
+      expect(stderr.read()).toContain("[debug] launch: recorded managed desktop pid=501 port=9223");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -767,6 +840,208 @@ wire_api = "responses"
     }
   });
 
+  test("watch refuses to run when there is no managed desktop session", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => false,
+        }),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("No codexm-managed Codex Desktop session is running.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+
+  test("watch prints bridge logs without auto-switching by default", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let applyManagedSwitchCalls = 0;
+
+      const exitCode = await runCli(["watch", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          watchManagedQuotaSignals: async (options) => {
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"from_view","event":{"type":"mcp-request","request":{"id":"req-1","method":"account/rateLimits/read","params":{}}}}}',
+            );
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"for_view","event":{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}}}',
+            );
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+            });
+          },
+          applyManagedSwitch: async () => {
+            applyManagedSwitchCalls += 1;
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain('"method":"Bridge.message"');
+      expect(stderr.read()).toContain('"type":"mcp-request"');
+      expect(stderr.read()).toContain('"type":"mcp-response"');
+      expect(stderr.read()).toContain(
+        '[debug] watch: quota signal matched reason=rpc_response requestId=rpc:req-1',
+      );
+      expect(stdout.read()).toBe("");
+      expect(applyManagedSwitchCalls).toBe(0);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --auto-switch auto-switches on quota signals", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            const headers = new Headers(init?.headers);
+            const accountId = headers.get("ChatGPT-Account-Id");
+
+            if (accountId === "acct-watch-a") {
+              return jsonResponse({
+                plan_type: "plus",
+                rate_limit: {
+                  primary_window: {
+                    used_percent: 100,
+                    limit_window_seconds: 18_000,
+                    reset_after_seconds: 500,
+                    reset_at: 1_773_868_641,
+                  },
+                  secondary_window: {
+                    used_percent: 100,
+                    limit_window_seconds: 604_800,
+                    reset_after_seconds: 6_000,
+                    reset_at: 1_773_890_040,
+                  },
+                },
+                credits: {
+                  has_credits: false,
+                  unlimited: false,
+                  balance: "0",
+                },
+              });
+            }
+
+            if (accountId === "acct-watch-b") {
+              return jsonResponse({
+                plan_type: "plus",
+                rate_limit: {
+                  primary_window: {
+                    used_percent: 20,
+                    limit_window_seconds: 18_000,
+                    reset_after_seconds: 500,
+                    reset_at: 1_773_868_641,
+                  },
+                  secondary_window: {
+                    used_percent: 30,
+                    limit_window_seconds: 604_800,
+                    reset_after_seconds: 6_000,
+                    reset_at: 1_773_890_040,
+                  },
+                },
+                credits: {
+                  has_credits: true,
+                  unlimited: false,
+                  balance: "3",
+                },
+              });
+            }
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-a");
+      await runCli(["save", "watch-a", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-b");
+      await runCli(["save", "watch-b", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-a");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--debug", "--auto-switch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          watchManagedQuotaSignals: async (options) => {
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"from_view","event":{"type":"mcp-request","request":{"id":"req-1","method":"account/rateLimits/read","params":{}}}}}',
+            );
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"for_view","event":{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}}}',
+            );
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+            });
+          },
+          applyManagedSwitch: async () => true,
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain('"method":"Bridge.message"');
+      expect(stderr.read()).toContain('"type":"mcp-request"');
+      expect(stderr.read()).toContain('"type":"mcp-response"');
+      expect(stderr.read()).toContain(
+        '[debug] watch: quota signal matched reason=rpc_response requestId=rpc:req-1',
+      );
+      expect(stderr.read()).toContain('[debug] watch: auto-switch enabled');
+      expect(stdout.read()).toContain('Auto-switched to "watch-b"');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("switch still warns when a non-managed Codex Desktop instance is running", async () => {
     const homeDir = await createTempHome();
 
@@ -992,6 +1267,39 @@ wire_api = "responses"
       expect(calls).toEqual([{ force: true, timeoutMs: 120_000 }]);
       expect(stdout.read()).toContain('Switched to "switch-force"');
       expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch prints debug details when --debug is enabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-debug");
+      await runCli(["save", "switch-debug", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "switch-debug", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async () => true,
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain('Switched to "switch-debug"');
+      expect(stderr.read()).toContain("[debug] switch: mode=manual target=switch-debug force=false");
+      expect(stderr.read()).toContain("[debug] switch: completed target=switch-debug");
     } finally {
       await cleanupTempHome(homeDir);
     }

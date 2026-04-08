@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn as spawnCallback } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,7 @@ const CODEX_LOCAL_HOST_ID = "local";
 export const DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS = 120_000;
 const CODEX_APP_SERVER_RESTART_EXPRESSION =
   'window.electronBridge.sendMessageFromView({ type: "codex-app-server-restart", hostId: "local" })';
+const CODEXM_WATCH_CONSOLE_PREFIX = "__codexm_watch__";
 const DEVTOOLS_REQUEST_TIMEOUT_MS = 5_000;
 const DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS = 10_000;
 
@@ -49,6 +50,11 @@ interface WebSocketLike {
 }
 
 type CreateWebSocketLike = (url: string) => WebSocketLike;
+type LaunchProcessLike = (options: {
+  appPath: string;
+  binaryPath: string;
+  args: readonly string[];
+}) => Promise<void>;
 
 export interface RunningCodexDesktop {
   pid: number;
@@ -61,6 +67,14 @@ export interface ManagedCodexDesktopState {
   remote_debugging_port: number;
   managed_by_codexm: true;
   started_at: string;
+}
+
+export interface ManagedQuotaSignal {
+  requestId: string;
+  url: string;
+  status: number | null;
+  reason: "rpc_response" | "rpc_notification";
+  bodySnippet: string | null;
 }
 
 export interface CodexDesktopLauncher {
@@ -78,6 +92,11 @@ export interface CodexDesktopLauncher {
     timeoutMs?: number;
     signal?: AbortSignal;
   }): Promise<boolean>;
+  watchManagedQuotaSignals(options?: {
+    signal?: AbortSignal;
+    debugLogger?: (line: string) => void;
+    onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+  }): Promise<void>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -236,6 +255,55 @@ function isDevtoolsTarget(value: unknown): value is {
   return isRecord(value);
 }
 
+function toErrorMessage(value: unknown, fallback: string): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+
+  if (isRecord(value) && typeof value.message === "string") {
+    return new Error(value.message);
+  }
+
+  if (typeof value === "string" && value.trim() !== "") {
+    return new Error(value);
+  }
+
+  return new Error(fallback);
+}
+
+async function launchManagedDesktopProcess(options: {
+  appPath: string;
+  binaryPath: string;
+  args: readonly string[];
+}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawnCallback(options.binaryPath, [...options.args], {
+      cwd: options.appPath,
+      detached: true,
+      stdio: "ignore",
+    });
+
+    let settled = false;
+
+    const settle = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      callback();
+    };
+
+    child.once("error", (error) => {
+      settle(() => reject(error));
+    });
+
+    child.once("spawn", () => {
+      child.unref();
+      settle(resolve);
+    });
+  });
+}
+
 function isManagedDesktopProcess(
   runningApps: RunningCodexDesktop[],
   state: ManagedCodexDesktopState,
@@ -249,6 +317,305 @@ function isManagedDesktopProcess(
       entry.command.includes(expectedBinaryPath) &&
       entry.command.includes(expectedPort),
   );
+}
+
+async function resolveLocalDevtoolsTarget(
+  fetchImpl: FetchLike,
+  state: ManagedCodexDesktopState,
+): Promise<string> {
+  const response = await fetchImpl(
+    `http://127.0.0.1:${state.remote_debugging_port}/json/list`,
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Failed to query Codex Desktop devtools targets (HTTP ${response.status}).`,
+    );
+  }
+
+  const targets = await response.json();
+  if (!Array.isArray(targets)) {
+    throw new Error("Codex Desktop devtools target list was not an array.");
+  }
+
+  const localTarget = targets.find((target) => {
+    if (!isDevtoolsTarget(target)) {
+      return false;
+    }
+
+    return (
+      target.type === "page" &&
+      target.url === `app://-/index.html?hostId=${CODEX_LOCAL_HOST_ID}` &&
+      isNonEmptyString(target.webSocketDebuggerUrl)
+    );
+  });
+
+  if (!localTarget || !isNonEmptyString(localTarget.webSocketDebuggerUrl)) {
+    throw new Error("Could not find the local Codex Desktop devtools target.");
+  }
+
+  return localTarget.webSocketDebuggerUrl;
+}
+
+function normalizeBodySnippet(body: string | null): string | null {
+  if (!body) {
+    return null;
+  }
+
+  return body.slice(0, 2_000);
+}
+
+function hasStructuredQuotaError(value: unknown, depth = 0): boolean {
+  if (depth > 8) {
+    return false;
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasStructuredQuotaError(entry, depth + 1));
+  }
+
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  if (value.codexErrorInfo === "UsageLimitExceeded") {
+    return true;
+  }
+
+  const exactErrorCodeCandidates = [
+    value.code,
+    value.errorCode,
+    value.error_code,
+    value.type,
+  ];
+  if (exactErrorCodeCandidates.some((entry) => entry === "insufficient_quota")) {
+    return true;
+  }
+
+  return Object.values(value).some((entry) => hasStructuredQuotaError(entry, depth + 1));
+}
+
+function buildManagedWatchProbeExpression(): string {
+  return `(() => {
+  const prefix = ${JSON.stringify(CODEXM_WATCH_CONSOLE_PREFIX)};
+  const globalState = window.__codexmWatchState ?? { installed: false };
+
+  if (globalState.installed) {
+    return { installed: true };
+  }
+
+  globalState.installed = true;
+  window.__codexmWatchState = globalState;
+
+  const emitBridge = (direction, event) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      return;
+    }
+    const type = typeof event.type === "string" ? event.type : "";
+    if (!type.startsWith("mcp-")) {
+      return;
+    }
+    console.debug(prefix + JSON.stringify({ kind: "bridge", direction, event }));
+  };
+  window.addEventListener("codex-message-from-view", (event) => {
+    emitBridge("from_view", event.detail);
+  });
+  window.addEventListener("message", (event) => {
+    emitBridge("for_view", event.data);
+  });
+
+  return { installed: true };
+})()`;
+}
+
+interface ProbeConsolePayload {
+  kind?: unknown;
+  message?: unknown;
+  event?: unknown;
+  direction?: unknown;
+}
+
+interface BridgeProbePayload {
+  kind: "bridge";
+  direction: string | null;
+  event: Record<string, unknown>;
+}
+
+function extractRuntimeConsoleText(payload: Record<string, unknown>): string | null {
+  const args = Array.isArray(payload.args) ? payload.args : [];
+  const parts = args
+    .map((arg) => {
+      if (!isRecord(arg)) {
+        return null;
+      }
+
+      if (typeof arg.value === "string") {
+        return arg.value;
+      }
+      if (typeof arg.unserializableValue === "string") {
+        return arg.unserializableValue;
+      }
+      if (typeof arg.description === "string") {
+        return arg.description;
+      }
+
+      return null;
+    })
+    .filter((value): value is string => typeof value === "string" && value.trim() !== "");
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return parts.join(" ");
+}
+
+function extractProbeConsolePayload(message: string | null): ProbeConsolePayload | null {
+  if (!message || !message.startsWith(CODEXM_WATCH_CONSOLE_PREFIX)) {
+    return null;
+  }
+
+  const rawPayload = message.slice(CODEXM_WATCH_CONSOLE_PREFIX.length);
+  try {
+    const parsed = JSON.parse(rawPayload) as ProbeConsolePayload;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeBridgeProbePayload(payload: ProbeConsolePayload | null): BridgeProbePayload | null {
+  if (payload?.kind !== "bridge" || !isRecord(payload.event)) {
+    return null;
+  }
+
+  return {
+    kind: "bridge",
+    direction: typeof payload.direction === "string" ? payload.direction : null,
+    event: payload.event,
+  };
+}
+
+function formatBridgeDebugLine(payload: BridgeProbePayload): string {
+  return JSON.stringify({
+    method: "Bridge.message",
+    params: {
+      direction: payload.direction,
+      event: payload.event,
+    },
+  });
+}
+
+function stringifySnippet(value: unknown): string | null {
+  try {
+    return normalizeBodySnippet(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
+function hasExhaustedRateLimit(value: unknown, depth = 0): boolean {
+  if (depth > 8) {
+    return false;
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasExhaustedRateLimit(entry, depth + 1));
+  }
+
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const usedPercent = value.usedPercent ?? value.used_percent;
+  if (typeof usedPercent === "number" && usedPercent >= 100) {
+    return true;
+  }
+
+  return Object.values(value).some((entry) => hasExhaustedRateLimit(entry, depth + 1));
+}
+
+function buildRpcQuotaSignal(options: {
+  event: Record<string, unknown>;
+  requestId: string;
+  method: string | null;
+  reason: "rpc_response" | "rpc_notification";
+}): ManagedQuotaSignal {
+  return {
+    requestId: options.requestId,
+    url: options.method ? `mcp:${options.method}` : "mcp",
+    status: null,
+    reason: options.reason,
+    bodySnippet: stringifySnippet(options.event),
+  };
+}
+
+function extractRpcQuotaSignal(
+  payload: BridgeProbePayload | null,
+  rpcRequestMethods: Map<string, string>,
+): ManagedQuotaSignal | null {
+  if (!payload) {
+    return null;
+  }
+
+  const event = payload.event;
+  const eventType = typeof event.type === "string" ? event.type : null;
+  if (!eventType?.startsWith("mcp-")) {
+    return null;
+  }
+
+  if (eventType === "mcp-request") {
+    const request = isRecord(event.request) ? event.request : null;
+    const requestId =
+      typeof request?.id === "string" || typeof request?.id === "number"
+        ? String(request.id)
+        : null;
+    const method = typeof request?.method === "string" ? request.method : null;
+    if (requestId && method) {
+      rpcRequestMethods.set(requestId, method);
+    }
+    return null;
+  }
+
+  if (eventType === "mcp-notification") {
+    const method = typeof event.method === "string" ? event.method : null;
+    if (
+      (method === "account/rateLimits/updated" && hasExhaustedRateLimit(event.params)) ||
+      (method === "error" && hasStructuredQuotaError(event.params))
+    ) {
+      return buildRpcQuotaSignal({
+        event,
+        requestId: `rpc:notification:${method ?? "unknown"}`,
+        method,
+        reason: "rpc_notification",
+      });
+    }
+    return null;
+  }
+
+  if (eventType !== "mcp-response") {
+    return null;
+  }
+
+  const message = isRecord(event.message) ? event.message : null;
+  const responseId =
+    typeof message?.id === "string" || typeof message?.id === "number"
+      ? String(message.id)
+      : "unknown";
+  const method = rpcRequestMethods.get(responseId) ?? null;
+
+  if (
+    (method === "account/rateLimits/read" && hasExhaustedRateLimit(message?.result)) ||
+    hasStructuredQuotaError(message?.error)
+  ) {
+    return buildRpcQuotaSignal({
+      event,
+      requestId: `rpc:${responseId}`,
+      method,
+      reason: "rpc_response",
+    });
+  }
+
+  return null;
 }
 
 async function evaluateDevtoolsExpression(
@@ -345,7 +712,7 @@ function buildManagedSwitchExpression(options?: {
   const force = ${JSON.stringify(force)};
   const timeoutMs = ${JSON.stringify(timeoutMs)};
   const fallbackPollIntervalMs = 2000;
-  const mutationDebounceMs = 50;
+  const rpcTimeoutMs = 5000;
 
   const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
   const toError = (value, fallback) => {
@@ -360,26 +727,6 @@ function buildManagedSwitchExpression(options?: {
           ? value.message
           : fallback;
     return new Error(message);
-  };
-
-  const getRootContainer = () => {
-    const root = document.getElementById("root");
-    if (!root) {
-      throw new Error("Codex Desktop root container is unavailable.");
-    }
-
-    return root;
-  };
-
-  const getRootFiber = () => {
-    const root = getRootContainer();
-
-    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith("__reactContainer$"));
-    if (!fiberKey) {
-      throw new Error("Could not locate the Codex Desktop React container.");
-    }
-
-    return root[fiberKey];
   };
 
   const postMessage = async (message) => {
@@ -397,162 +744,214 @@ function buildManagedSwitchExpression(options?: {
     });
   };
 
-  const collectActiveThreadIds = () => {
-    const conversations = new Map();
+  const pendingResponses = new Map();
+  let nextRequestId = 1;
 
-    const visit = (fiber) => {
-      if (!fiber) {
-        return;
-      }
+  const onMessage = (event) => {
+    const data = event?.data;
+    if (!isRecord(data) || data.type !== "mcp-response" || !isRecord(data.message)) {
+      return;
+    }
 
-      const props = fiber.memoizedProps;
-      if (isRecord(props) && isRecord(props.conversation)) {
-        const conversation = props.conversation;
-        const id = typeof conversation.id === "string" ? conversation.id : null;
-        const threadRuntimeStatus =
-          isRecord(conversation.threadRuntimeStatus) &&
-          typeof conversation.threadRuntimeStatus.type === "string"
-            ? conversation.threadRuntimeStatus.type
-            : null;
-        const turns = Array.isArray(conversation.turns) ? conversation.turns : [];
-        const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-        const lastTurnStatus =
-          isRecord(lastTurn) && typeof lastTurn.status === "string"
-            ? lastTurn.status
-            : null;
+    const responseId =
+      typeof data.message.id === "string" || typeof data.message.id === "number"
+        ? String(data.message.id)
+        : null;
+    if (!responseId) {
+      return;
+    }
 
-        if (id) {
-          conversations.set(id, {
-            threadRuntimeStatus,
-            lastTurnStatus,
-          });
+    const pending = pendingResponses.get(responseId);
+    if (!pending) {
+      return;
+    }
+
+    pendingResponses.delete(responseId);
+    window.clearTimeout(pending.timeoutHandle);
+
+    if (isRecord(data.message.error)) {
+      pending.reject(toError(data.message.error, "Codex Desktop bridge request failed."));
+      return;
+    }
+
+    pending.resolve(data.message.result);
+  };
+
+  window.addEventListener("message", onMessage);
+
+  const sendRpcRequest = async (method, params = {}) => {
+    const requestId = "codexm-switch-" + String(nextRequestId++);
+
+    return await new Promise((resolve, reject) => {
+      const timeoutHandle = window.setTimeout(() => {
+        pendingResponses.delete(requestId);
+        reject(new Error("Timed out waiting for Codex Desktop bridge response."));
+      }, rpcTimeoutMs);
+
+      pendingResponses.set(requestId, {
+        resolve,
+        reject,
+        timeoutHandle,
+      });
+
+      void postMessage({
+        type: "mcp-request",
+        hostId,
+        request: {
+          id: requestId,
+          method,
+          params,
+        },
+      }).catch((error) => {
+        pendingResponses.delete(requestId);
+        window.clearTimeout(timeoutHandle);
+        reject(toError(error, "Failed to send Codex Desktop bridge request."));
+      });
+    });
+  };
+
+  const listLoadedThreadIds = async () => {
+    const threadIds = [];
+    let cursor = null;
+
+    while (true) {
+      const result = await sendRpcRequest(
+        "thread/loaded/list",
+        cursor ? { cursor } : {},
+      );
+
+      const data = Array.isArray(result?.data) ? result.data : [];
+      for (const threadId of data) {
+        if (typeof threadId === "string" && threadId) {
+          threadIds.push(threadId);
         }
       }
 
-      if (fiber.child) {
-        visit(fiber.child);
+      cursor = typeof result?.nextCursor === "string" && result.nextCursor ? result.nextCursor : null;
+      if (!cursor) {
+        return threadIds;
       }
+    }
+  };
 
-      if (fiber.sibling) {
-        visit(fiber.sibling);
+  const collectActiveThreadIds = async () => {
+    const loadedThreadIds = await listLoadedThreadIds();
+    const activeThreadIds = [];
+
+    for (const threadId of loadedThreadIds) {
+      try {
+        const result = await sendRpcRequest("thread/read", { threadId });
+        const thread = isRecord(result?.thread) ? result.thread : null;
+        const status = isRecord(thread?.status) ? thread.status : null;
+
+        if (status?.type === "active") {
+          activeThreadIds.push(threadId);
+        }
+      } catch (error) {
+        const message = toError(error, "Failed to read thread state.").message;
+        if (!message.includes("notLoaded")) {
+          throw error;
+        }
       }
-    };
+    }
 
-    visit(getRootFiber());
-
-    return Array.from(conversations.entries())
-      .filter(
-        ([, status]) =>
-          status.threadRuntimeStatus === "active" || status.lastTurnStatus === "inProgress",
-      )
-      .map(([threadId]) => threadId);
+    return activeThreadIds;
   };
 
   if (force) {
-    await restart();
-    return { mode: "force" };
+    try {
+      await restart();
+      return { mode: "force" };
+    } finally {
+      window.removeEventListener("message", onMessage);
+    }
   }
 
-  let activeThreadIds = collectActiveThreadIds();
-  if (activeThreadIds.length === 0) {
-    await restart();
-    return { mode: "immediate" };
-  }
+  try {
+    let activeThreadIds = await collectActiveThreadIds();
+    if (activeThreadIds.length === 0) {
+      await restart();
+      return { mode: "immediate" };
+    }
 
-  await new Promise((resolve, reject) => {
-    let settled = false;
-    let mutationHandle = null;
-    let fallbackHandle = null;
-    let observer = null;
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let fallbackHandle = null;
+      let checking = false;
 
-    const cleanup = () => {
-      window.clearTimeout(timeoutHandle);
-      if (mutationHandle !== null) {
-        window.clearTimeout(mutationHandle);
-      }
-      if (fallbackHandle !== null) {
-        window.clearInterval(fallbackHandle);
-      }
-      observer?.disconnect();
-    };
+      const cleanup = () => {
+        window.clearTimeout(timeoutHandle);
+        if (fallbackHandle !== null) {
+          window.clearInterval(fallbackHandle);
+        }
+      };
 
-    const finishWithError = (error) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-
-    const finishWithRestart = async () => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      cleanup();
-
-      try {
-        await restart();
-        resolve(undefined);
-      } catch (error) {
-        reject(toError(error, "Failed to restart the Codex app server."));
-      }
-    };
-
-    const checkThreads = async () => {
-      if (settled) {
-        return;
-      }
-
-      try {
-        activeThreadIds = collectActiveThreadIds();
-        if (activeThreadIds.length === 0) {
-          await finishWithRestart();
+      const finishWithError = (error) => {
+        if (settled) {
           return;
         }
-      } catch (error) {
-        finishWithError(toError(error, "Failed to refresh active thread state."));
-      }
-    };
 
-    const timeoutHandle = window.setTimeout(() => {
-      finishWithError(
-        new Error("Timed out waiting for the current Codex thread to finish."),
-      );
-    }, timeoutMs);
+        settled = true;
+        cleanup();
+        reject(error);
+      };
 
-    const scheduleCheck = () => {
-      if (settled || mutationHandle !== null) {
-        return;
-      }
+      const finishWithRestart = async () => {
+        if (settled) {
+          return;
+        }
 
-      mutationHandle = window.setTimeout(() => {
-        mutationHandle = null;
+        settled = true;
+        cleanup();
+
+        try {
+          await restart();
+          resolve(undefined);
+        } catch (error) {
+          reject(toError(error, "Failed to restart the Codex app server."));
+        }
+      };
+
+      const checkThreads = async () => {
+        if (settled || checking) {
+          return;
+        }
+
+        checking = true;
+
+        try {
+          activeThreadIds = await collectActiveThreadIds();
+          if (activeThreadIds.length === 0) {
+            await finishWithRestart();
+          }
+        } catch (error) {
+          finishWithError(toError(error, "Failed to refresh active thread state."));
+        } finally {
+          checking = false;
+        }
+      };
+
+      const timeoutHandle = window.setTimeout(() => {
+        finishWithError(
+          new Error("Timed out waiting for the current Codex thread to finish."),
+        );
+      }, timeoutMs);
+
+      fallbackHandle = window.setInterval(() => {
         void checkThreads();
-      }, mutationDebounceMs);
-    };
+      }, fallbackPollIntervalMs);
 
-    observer = new MutationObserver(() => {
-      scheduleCheck();
-    });
-    observer.observe(getRootContainer(), {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      characterData: true,
-    });
-
-    fallbackHandle = window.setInterval(() => {
       void checkThreads();
-    }, fallbackPollIntervalMs);
+    });
 
-    void checkThreads();
-  });
-
-  return { mode: "waited" };
+    return { mode: "waited" };
+  } finally {
+    for (const pending of pendingResponses.values()) {
+      window.clearTimeout(pending.timeoutHandle);
+    }
+    pendingResponses.clear();
+    window.removeEventListener("message", onMessage);
+  }
 })()`;
 }
 
@@ -563,6 +962,7 @@ export function createCodexDesktopLauncher(options: {
   writeFileImpl?: (path: string, content: string) => Promise<void>;
   fetchImpl?: FetchLike;
   createWebSocketImpl?: CreateWebSocketLike;
+  launchProcessImpl?: LaunchProcessLike;
 } = {}): CodexDesktopLauncher {
   const execFileImpl = options.execFileImpl ?? execFile;
   const statePath = options.statePath ?? DEFAULT_CODEX_DESKTOP_STATE_PATH;
@@ -570,6 +970,7 @@ export function createCodexDesktopLauncher(options: {
   const writeFileImpl = options.writeFileImpl ?? writeFile;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   const createWebSocketImpl = options.createWebSocketImpl ?? createDefaultWebSocket;
+  const launchProcessImpl = options.launchProcessImpl ?? launchManagedDesktopProcess;
 
   async function findInstalledApp(): Promise<string | null> {
     const candidates = [
@@ -702,12 +1103,13 @@ export function createCodexDesktopLauncher(options: {
   }
 
   async function launch(appPath: string): Promise<void> {
-    await execFileImpl("open", [
-      "-na",
+    const binaryPath = `${appPath}${CODEX_BINARY_SUFFIX}`;
+
+    await launchProcessImpl({
       appPath,
-      "--args",
-      `--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`,
-    ]);
+      binaryPath,
+      args: [`--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`],
+    });
   }
 
   async function readManagedState(): Promise<ManagedCodexDesktopState | null> {
@@ -755,35 +1157,7 @@ export function createCodexDesktopLauncher(options: {
       return false;
     }
 
-    const response = await fetchImpl(
-      `http://127.0.0.1:${state.remote_debugging_port}/json/list`,
-    );
-    if (!response.ok) {
-      throw new Error(
-        `Failed to query Codex Desktop devtools targets (HTTP ${response.status}).`,
-      );
-    }
-
-    const targets = await response.json();
-    if (!Array.isArray(targets)) {
-      throw new Error("Codex Desktop devtools target list was not an array.");
-    }
-
-    const localTarget = targets.find((target) => {
-      if (!isDevtoolsTarget(target)) {
-        return false;
-      }
-
-      return (
-        target.type === "page" &&
-        target.url === `app://-/index.html?hostId=${CODEX_LOCAL_HOST_ID}` &&
-        isNonEmptyString(target.webSocketDebuggerUrl)
-      );
-    });
-
-    if (!localTarget || !isNonEmptyString(localTarget.webSocketDebuggerUrl)) {
-      throw new Error("Could not find the local Codex Desktop devtools target.");
-    }
+    const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
 
     const devtoolsTimeoutMs =
       options?.force === true
@@ -797,7 +1171,7 @@ export function createCodexDesktopLauncher(options: {
     await waitForPromiseOrAbort(
       evaluateDevtoolsExpression(
         createWebSocketImpl,
-        localTarget.webSocketDebuggerUrl,
+        webSocketDebuggerUrl,
         options?.force === true
           ? CODEX_APP_SERVER_RESTART_EXPRESSION
           : buildManagedSwitchExpression(options),
@@ -806,6 +1180,204 @@ export function createCodexDesktopLauncher(options: {
       options?.signal,
     );
     return true;
+  }
+
+  async function watchManagedQuotaSignals(options?: {
+    signal?: AbortSignal;
+    debugLogger?: (line: string) => void;
+    onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+  }): Promise<void> {
+    const state = await readManagedState();
+    if (!state) {
+      throw new Error("No codexm-managed Codex Desktop session is running.");
+    }
+
+    const runningApps = await listRunningApps();
+    if (!isManagedDesktopProcess(runningApps, state)) {
+      throw new Error("No codexm-managed Codex Desktop session is running.");
+    }
+
+    const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
+    const socket = createWebSocketImpl(webSocketDebuggerUrl);
+    const debugLogger = options?.debugLogger;
+    const rpcRequestMethods = new Map<string, string>();
+    const signaledRequests = new Set<string>();
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let closedByClient = false;
+      let nextCommandId = 1;
+      const pendingCommands = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+
+      const cleanup = () => {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        if (options?.signal) {
+          options.signal.removeEventListener("abort", onAbort);
+        }
+
+        for (const pending of pendingCommands.values()) {
+          pending.reject(new Error("Codex Desktop devtools watch stopped before completing a request."));
+        }
+        pendingCommands.clear();
+      };
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      const fail = (error: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(toErrorMessage(error, "Codex Desktop devtools watch failed."));
+      };
+
+      const onAbort = () => {
+        closedByClient = true;
+        try {
+          socket.close();
+        } catch {
+          // Ignore close failures while aborting the watch loop.
+        }
+        finish();
+      };
+
+      const sendCommand = (method: string, params: Record<string, unknown> = {}) =>
+        new Promise<unknown>((commandResolve, commandReject) => {
+          const commandId = nextCommandId;
+          nextCommandId += 1;
+          pendingCommands.set(commandId, {
+            resolve: commandResolve,
+            reject: commandReject,
+          });
+
+          try {
+            socket.send(
+              JSON.stringify({
+                id: commandId,
+                method,
+                params,
+              }),
+            );
+          } catch (error) {
+            pendingCommands.delete(commandId);
+            commandReject(toErrorMessage(error, "Failed to send Codex Desktop devtools command."));
+          }
+        });
+
+      const emitQuotaSignal = async (signal: ManagedQuotaSignal) => {
+        if (signaledRequests.has(signal.requestId)) {
+          return;
+        }
+        signaledRequests.add(signal.requestId);
+        await options?.onQuotaSignal?.(signal);
+      };
+
+      socket.onopen = () => {
+        void sendCommand("Runtime.enable")
+          .then(() =>
+            sendCommand("Runtime.evaluate", {
+              expression: buildManagedWatchProbeExpression(),
+              awaitPromise: true,
+              returnByValue: true,
+            }),
+          )
+          .catch((error) => {
+            fail(error);
+          });
+      };
+
+      socket.onmessage = (event) => {
+        if (typeof event.data !== "string") {
+          return;
+        }
+
+        let payload: unknown;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (!isRecord(payload)) {
+          return;
+        }
+
+        if (typeof payload.id === "number") {
+          const pending = pendingCommands.get(payload.id);
+          if (!pending) {
+            return;
+          }
+          pendingCommands.delete(payload.id);
+
+          if (isRecord(payload.error)) {
+            pending.reject(
+              toErrorMessage(payload.error, "Codex Desktop devtools command failed."),
+            );
+            return;
+          }
+
+          pending.resolve(payload.result);
+          return;
+        }
+
+        if (typeof payload.method !== "string") {
+          return;
+        }
+
+        const params = isRecord(payload.params) ? payload.params : null;
+        if (!params) {
+          return;
+        }
+
+        if (payload.method === "Runtime.consoleAPICalled") {
+          const runtimeMessage = extractRuntimeConsoleText(params);
+          const probePayload = extractProbeConsolePayload(runtimeMessage);
+          const bridgePayload = normalizeBridgeProbePayload(probePayload);
+          if (bridgePayload) {
+            debugLogger?.(formatBridgeDebugLine(bridgePayload));
+          }
+
+          const rpcQuotaSignal = extractRpcQuotaSignal(bridgePayload, rpcRequestMethods);
+          if (rpcQuotaSignal) {
+            void emitQuotaSignal(rpcQuotaSignal).catch((error) => {
+              fail(error);
+            });
+          }
+          return;
+        }
+      };
+
+      socket.onerror = (event) => {
+        fail(event);
+      };
+
+      socket.onclose = () => {
+        if (closedByClient) {
+          finish();
+          return;
+        }
+        fail(new Error("Codex Desktop devtools watch connection closed unexpectedly."));
+      };
+
+      if (options?.signal) {
+        if (options.signal.aborted) {
+          onAbort();
+          return;
+        }
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
   }
 
   return {
@@ -819,5 +1391,6 @@ export function createCodexDesktopLauncher(options: {
     clearManagedState,
     isManagedDesktopRunning,
     applyManagedSwitch,
+    watchManagedQuotaSignals,
   };
 }

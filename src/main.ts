@@ -16,6 +16,7 @@ import {
   createCodexDesktopLauncher,
   type CodexDesktopLauncher,
   type ManagedCodexDesktopState,
+  type ManagedQuotaSignal,
   type RunningCodexDesktop,
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
@@ -77,11 +78,12 @@ const COMMAND_NAMES = [
   "update",
   "switch",
   "launch",
+  "watch",
   "remove",
   "rename",
 ] as const;
 
-const GLOBAL_FLAGS = new Set(["--help", "--version"]);
+const GLOBAL_FLAGS = new Set(["--help", "--version", "--debug"]);
 
 const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   current: new Set(["--json"]),
@@ -90,6 +92,7 @@ const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   update: new Set(["--json"]),
   switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
   launch: new Set(["--json"]),
+  watch: new Set(["--auto-switch"]),
   remove: new Set(["--yes", "--json"]),
   rename: new Set(["--json"]),
 };
@@ -242,8 +245,11 @@ Usage:
   codexm switch <name> [--force] [--json]
   codexm switch --auto [--dry-run] [--force] [--json]
   codexm launch [name] [--json]
+  codexm watch [--auto-switch]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
+
+Global flags: --help, --version, --debug
 
 Notes:
   codexm list refreshes quota data, shows the current managed account, and marks current rows with "*".
@@ -408,6 +414,120 @@ function describeCurrentStatus(status: Awaited<ReturnType<AccountStore["getCurre
   }
 
   return lines.join("\n");
+}
+
+function createDebugLogger(
+  stream: NodeJS.WriteStream,
+  enabled: boolean,
+): (message: string) => void {
+  if (!enabled) {
+    return () => undefined;
+  }
+
+  return (message: string) => {
+    stream.write(`[debug] ${message}\n`);
+  };
+}
+
+interface AutoSwitchExecutionResult {
+  refreshResult: {
+    successes: AccountQuotaSummary[];
+    failures: Array<{ name: string; error: string }>;
+  };
+  selected: AutoSwitchCandidate;
+  candidates: AutoSwitchCandidate[];
+  quota: ReturnType<typeof toCliQuotaSummary> | null;
+  skipped: boolean;
+  result: Awaited<ReturnType<AccountStore["switchAccount"]>> | null;
+  warnings: string[];
+}
+
+async function performAutoSwitch(
+  store: AccountStore,
+  desktopLauncher: CodexDesktopLauncher,
+  options: {
+    dryRun: boolean;
+    force: boolean;
+    signal?: AbortSignal;
+    statusStream?: NodeJS.WriteStream;
+    statusDelayMs?: number;
+    statusIntervalMs?: number;
+    debugLog?: (message: string) => void;
+  },
+): Promise<AutoSwitchExecutionResult> {
+  options.debugLog?.(`switch: mode=auto dry_run=${options.dryRun} force=${options.force}`);
+  const refreshResult = await store.refreshAllQuotas();
+  const candidates = rankAutoSwitchCandidates(refreshResult.successes);
+  if (candidates.length === 0) {
+    throw new Error("No auto-switch candidate has both 5H and 1W quota data available.");
+  }
+
+  const selected = candidates[0];
+  const selectedQuota =
+    refreshResult.successes.find((account) => account.name === selected.name) ?? null;
+  const quota = selectedQuota ? toCliQuotaSummary(selectedQuota) : null;
+  const warnings = refreshResult.failures.map((failure) => `${failure.name}: ${failure.error}`);
+
+  if (options.dryRun) {
+    options.debugLog?.(
+      `switch: auto-selected target=${selected.name} candidates=${candidates.length} warnings=${warnings.length} dry_run=true`,
+    );
+    return {
+      refreshResult,
+      selected,
+      candidates,
+      quota,
+      skipped: false,
+      result: null,
+      warnings,
+    };
+  }
+
+  const currentStatus = await store.getCurrentStatus();
+  if (
+    selected.available === "available" &&
+    currentStatus.matched_accounts.includes(selected.name)
+  ) {
+    options.debugLog?.(
+      `switch: auto-selected target=${selected.name} candidates=${candidates.length} skipped=already_current_best`,
+    );
+    return {
+      refreshResult,
+      selected,
+      candidates,
+      quota,
+      skipped: true,
+      result: null,
+      warnings,
+    };
+  }
+
+  const result = await store.switchAccount(selected.name);
+  for (const warning of warnings) {
+    result.warnings.push(warning);
+  }
+  result.warnings = stripManagedDesktopWarning(result.warnings);
+
+  await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
+    force: options.force,
+    signal: options.signal,
+    statusStream: options.statusStream,
+    statusDelayMs: options.statusDelayMs,
+    statusIntervalMs: options.statusIntervalMs,
+  });
+  options.debugLog?.(
+    `switch: completed mode=auto target=${result.account.name} candidates=${candidates.length} warnings=${result.warnings.length}`,
+  );
+
+  return {
+    refreshResult,
+    selected,
+    candidates,
+    quota,
+    skipped: false,
+    result,
+    warnings: result.warnings,
+  };
 }
 
 function formatUsagePercent(
@@ -838,6 +958,8 @@ export async function runCli(
     options.managedDesktopWaitStatusIntervalMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS;
   const parsed = parseArgs(argv);
   const json = parsed.flags.has("--json");
+  const debug = parsed.flags.has("--debug");
+  const debugLog = createDebugLogger(streams.stderr, debug);
 
   try {
     validateParsedArgs(parsed);
@@ -855,6 +977,9 @@ export async function runCli(
     switch (parsed.command) {
       case "current": {
         const result = await store.getCurrentStatus();
+        debugLog(
+          `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"}`,
+        );
         if (json) {
           writeJson(streams.stdout, result);
         } else {
@@ -868,6 +993,9 @@ export async function runCli(
         const result = await store.refreshAllQuotas(targetName);
         const current = await store.getCurrentStatus();
         const currentAccounts = new Set(current.matched_accounts);
+        debugLog(
+          `list: target=${targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} current_matches=${current.matched_accounts.length}`,
+        );
         if (json) {
           writeJson(streams.stdout, {
             ...toCliQuotaRefreshResult(result),
@@ -890,6 +1018,9 @@ export async function runCli(
         }
 
         const account = await store.saveCurrentAccount(name, parsed.flags.has("--force"));
+        debugLog(
+          `save: name=${account.name} auth_mode=${account.auth_mode} identity=${maskAccountId(account.identity)}`,
+        );
         const payload = {
           ok: true,
           action: "save",
@@ -941,6 +1072,9 @@ export async function runCli(
           quota,
           warnings,
         };
+        debugLog(
+          `update: name=${result.account.name} quota=${quota?.refresh_status ?? "unknown"} warnings=${warnings.length}`,
+        );
 
         if (json) {
           writeJson(streams.stdout, payload);
@@ -970,18 +1104,24 @@ export async function runCli(
             throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
           }
 
-          const refreshResult = await store.refreshAllQuotas();
-          const candidates = rankAutoSwitchCandidates(refreshResult.successes);
-          if (candidates.length === 0) {
-            throw new Error("No auto-switch candidate has both 5H and 1W quota data available.");
-          }
-
-          const selected = candidates[0];
-          const selectedQuota =
-            refreshResult.successes.find((account) => account.name === selected.name) ?? null;
-          const warnings = refreshResult.failures.map(
-            (failure) => `${failure.name}: ${failure.error}`,
-          );
+          const autoSwitch = await performAutoSwitch(store, desktopLauncher, {
+            dryRun,
+            force,
+            signal: interruptSignal,
+            statusStream: streams.stderr,
+            statusDelayMs: managedDesktopWaitStatusDelayMs,
+            statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+            debugLog,
+          });
+          const {
+            refreshResult,
+            selected,
+            candidates,
+            quota: selectedQuota,
+            skipped,
+            result,
+            warnings,
+          } = autoSwitch;
 
           if (dryRun) {
             const payload = {
@@ -1004,11 +1144,7 @@ export async function runCli(
             return refreshResult.failures.length === 0 ? 0 : 1;
           }
 
-          const currentStatus = await store.getCurrentStatus();
-          if (
-            selected.available === "available" &&
-            currentStatus.matched_accounts.includes(selected.name)
-          ) {
+          if (skipped) {
             const payload = {
               ok: true,
               action: "switch",
@@ -1022,7 +1158,7 @@ export async function runCli(
               },
               selected,
               candidates,
-              quota: selectedQuota ? toCliQuotaSummary(selectedQuota) : null,
+              quota: selectedQuota,
               warnings,
             };
 
@@ -1033,20 +1169,9 @@ export async function runCli(
             }
             return refreshResult.failures.length === 0 ? 0 : 1;
           }
-
-          const result = await store.switchAccount(selected.name);
-          for (const warning of warnings) {
-            result.warnings.push(warning);
+          if (!result) {
+            throw new Error("Auto switch completed without a target account result.");
           }
-          result.warnings = stripManagedDesktopWarning(result.warnings);
-
-          await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
-            force,
-            signal: interruptSignal,
-            statusStream: streams.stderr,
-            statusDelayMs: managedDesktopWaitStatusDelayMs,
-            statusIntervalMs: managedDesktopWaitStatusIntervalMs,
-          });
 
           const payload = {
             ok: true,
@@ -1061,7 +1186,7 @@ export async function runCli(
             },
             selected,
             candidates,
-            quota: selectedQuota ? toCliQuotaSummary(selectedQuota) : null,
+            quota: selectedQuota,
             backup_path: result.backup_path,
             warnings: result.warnings,
           };
@@ -1080,6 +1205,7 @@ export async function runCli(
           throw new Error("Usage: codexm switch <name> [--force]");
         }
 
+        debugLog(`switch: mode=manual target=${name} force=${force}`);
         const result = await store.switchAccount(name);
         result.warnings = stripManagedDesktopWarning(result.warnings);
         await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
@@ -1099,6 +1225,9 @@ export async function runCli(
         } catch (error) {
           result.warnings.push((error as Error).message);
         }
+        debugLog(
+          `switch: completed target=${result.account.name} warnings=${result.warnings.length} quota_refreshed=${quota !== null}`,
+        );
         const payload = {
           ok: true,
           action: "switch",
@@ -1146,8 +1275,11 @@ export async function runCli(
         if (!appPath) {
           throw new Error("Codex Desktop not found at /Applications/Codex.app.");
         }
+        debugLog(`launch: requested_account=${name ?? "current"}`);
+        debugLog(`launch: using app path ${appPath}`);
 
         const runningApps = await desktopLauncher.listRunningApps();
+        debugLog(`launch: running_desktop_instances=${runningApps.length}`);
         if (runningApps.length > 0) {
           const managedDesktopState = await desktopLauncher.readManagedState();
           const canRelaunchGracefully = isOnlyManagedDesktopInstanceRunning(
@@ -1184,6 +1316,7 @@ export async function runCli(
           warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
           switchedAccount = switchResult.account;
           switchBackupPath = switchResult.backup_path;
+          debugLog(`launch: pre-switched account=${switchResult.account.name}`);
         }
 
         try {
@@ -1200,9 +1333,13 @@ export async function runCli(
             );
           }
           await desktopLauncher.writeManagedState(managedState);
+          debugLog(
+            `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
+          );
         } catch (error) {
           if (switchedAccount) {
             await restoreLaunchBackup(store, switchBackupPath).catch(() => undefined);
+            debugLog(`launch: restored previous auth after failure for account=${switchedAccount.name}`);
           }
           throw error;
         }
@@ -1246,6 +1383,90 @@ export async function runCli(
         return 0;
       }
 
+      case "watch": {
+        if (parsed.positionals.length > 0) {
+          throw new Error("Usage: codexm watch [--auto-switch]");
+        }
+
+        const autoSwitch = parsed.flags.has("--auto-switch");
+
+        if (!(await desktopLauncher.isManagedDesktopRunning())) {
+          throw new Error("No codexm-managed Codex Desktop session is running.");
+        }
+
+        let watchExitCode = 0;
+        let switchInFlight = false;
+        let lastSwitchStartedAt = 0;
+        const WATCH_SWITCH_COOLDOWN_MS = 5_000;
+
+        debugLog("watch: starting managed desktop quota watch");
+        debugLog(`watch: auto-switch ${autoSwitch ? "enabled" : "disabled"}`);
+
+        await desktopLauncher.watchManagedQuotaSignals({
+          signal: interruptSignal,
+          debugLogger: debug
+            ? (line) => {
+                streams.stderr.write(`${line}\n`);
+              }
+            : undefined,
+          onQuotaSignal: async (quotaSignal: ManagedQuotaSignal) => {
+            debugLog(
+              `watch: quota signal matched reason=${quotaSignal.reason} requestId=${quotaSignal.requestId}`,
+            );
+
+            if (!autoSwitch) {
+              return;
+            }
+
+            const now = Date.now();
+            if (switchInFlight || now - lastSwitchStartedAt < WATCH_SWITCH_COOLDOWN_MS) {
+              debugLog(
+                `watch: skipped auto switch for requestId=${quotaSignal.requestId} because another switch is already in progress`,
+              );
+              return;
+            }
+
+            switchInFlight = true;
+            lastSwitchStartedAt = now;
+
+            try {
+              const autoSwitch = await performAutoSwitch(store, desktopLauncher, {
+                dryRun: false,
+                force: false,
+                signal: interruptSignal,
+                statusStream: streams.stderr,
+                statusDelayMs: managedDesktopWaitStatusDelayMs,
+                statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+                debugLog,
+              });
+
+              if (autoSwitch.skipped) {
+                streams.stdout.write(
+                  `${describeAutoSwitchNoop(autoSwitch.selected, autoSwitch.warnings)}\n`,
+                );
+              } else if (autoSwitch.result) {
+                streams.stdout.write(
+                  `${describeAutoSwitchSelection(
+                    autoSwitch.selected,
+                    false,
+                    autoSwitch.result.backup_path,
+                    autoSwitch.result.warnings,
+                  )}\n`,
+                );
+              }
+
+              if (autoSwitch.refreshResult.failures.length > 0) {
+                watchExitCode = 1;
+              }
+            } finally {
+              switchInFlight = false;
+            }
+          },
+        });
+
+        return watchExitCode;
+      }
+
       case "remove": {
         const name = parsed.positionals[0];
         if (!name) {
@@ -1254,6 +1475,7 @@ export async function runCli(
 
         const confirmed =
           parsed.flags.has("--yes") || (await confirmRemoval(name, streams));
+        debugLog(`remove: target=${name} confirmed=${confirmed}`);
         if (!confirmed) {
           if (json) {
             writeJson(streams.stdout, {
@@ -1285,6 +1507,7 @@ export async function runCli(
         }
 
         const account = await store.renameAccount(oldName, newName);
+        debugLog(`rename: from=${oldName} to=${newName} identity=${maskAccountId(account.identity)}`);
         if (json) {
           writeJson(streams.stdout, {
             ok: true,
