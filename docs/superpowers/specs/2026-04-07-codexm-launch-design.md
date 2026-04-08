@@ -19,12 +19,14 @@
 同时保留对 `switch` 的用户提示优化：
 
 - 如果运行中的 Codex Desktop 是用户手工打开的，`switch` 仍然提示现有桌面实例可能持有旧登录态
-- 如果运行中的 Codex Desktop 是由 `codexm launch` 拉起并被 `codexm` 识别为受管实例，则 `switch` 不再重复提示该 warning，而是 best-effort 触发一次 `codex-app-server-restart` 让切换立即生效
+- 如果运行中的 Codex Desktop 是由 `codexm launch` 拉起并被 `codexm` 识别为受管实例，则 `switch` 不再重复提示该 warning，而是默认等待当前 thread 结束，再 best-effort 触发一次 `codex-app-server-restart` 让切换生效
+- `switch --force` 跳过等待，立即触发该 restart
 
 这条刷新路径的代价也需要明确：
 
 - 受管 Desktop 上的 `switch` 是通过重启 Codex app server 生效的
-- 因此会打断当前 Desktop 会话里正在进行的 thread / 运行中的交互
+- 默认 `switch` 会前台等待当前 thread 结束，再执行该 restart
+- `switch --force` 会立即打断当前 Desktop 会话里正在进行的 thread / 运行中的交互
 
 ## 2. 目标
 
@@ -35,8 +37,9 @@
 - 用统一参数启动新的 Codex Desktop 实例
 - 不修改原始 `Codex.app`
 - 让 `switch` 能区分用户手工打开的 Desktop 与 `codexm launch` 拉起的受管 Desktop
-- 让 `switch` 在受管 Desktop 上 best-effort 触发一次 app-server restart
-- 明确该刷新机制会中断当前受管 Desktop 里的进行中 thread
+- 让 `switch` 在受管 Desktop 上默认等待当前 thread 完成后再 best-effort 触发一次 app-server restart
+- 支持 `switch --force` 立即触发 app-server restart
+- 明确该刷新机制会在强制模式下中断当前受管 Desktop 里的进行中 thread
 
 这个命令解决的是“以目标账号启动一个新 Desktop 实例”，不是“给已运行实例做热刷新”。
 

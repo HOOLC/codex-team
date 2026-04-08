@@ -52,7 +52,11 @@ function createDesktopLauncherStub(overrides: Partial<{
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
-  restartManagedAppServer: () => Promise<boolean>;
+  applyManagedSwitch: (options?: {
+    force?: boolean;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }) => Promise<boolean>;
 }> = {}): CodexDesktopLauncher {
   return {
     findInstalledApp: overrides.findInstalledApp ?? (async () => "/Applications/Codex.app"),
@@ -63,7 +67,7 @@ function createDesktopLauncherStub(overrides: Partial<{
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
-    restartManagedAppServer: overrides.restartManagedAppServer ?? (async () => false),
+    applyManagedSwitch: overrides.applyManagedSwitch ?? (async () => false),
   };
 }
 
@@ -698,7 +702,7 @@ wire_api = "responses"
         stdout: stdout.stream,
         stderr: stderr.stream,
         desktopLauncher: createDesktopLauncherStub({
-          restartManagedAppServer: async () => false,
+          applyManagedSwitch: async () => false,
           listRunningApps: async () => [{ pid: 321, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
         }),
       });
@@ -724,24 +728,72 @@ wire_api = "responses"
 
       const stdout = captureWritable();
       const stderr = captureWritable();
-      const calls: string[] = [];
+      const calls: Array<{ force?: boolean; timeoutMs?: number }> = [];
 
       const exitCode = await runCli(["switch", "switch-managed"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
         desktopLauncher: createDesktopLauncherStub({
-          restartManagedAppServer: async () => {
-            calls.push("restart");
+          applyManagedSwitch: async (options) => {
+            calls.push({ ...options });
             return true;
           },
         }),
       });
 
       expect(exitCode).toBe(0);
-      expect(calls).toEqual(["restart"]);
+      expect(calls).toEqual([{ force: false, timeoutMs: 120_000 }]);
       expect(stdout.read()).not.toContain("Existing sessions may still hold the previous login state.");
       expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch reports wait progress while refreshing a managed Desktop session", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-progress");
+      await runCli(["save", "switch-progress", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "switch-progress", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 5,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          applyManagedSwitch: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        ok: true,
+        action: "switch",
+        account: {
+          name: "switch-progress",
+        },
+      });
+      expect(stderr.read()).toContain(
+        "Waiting for the current Codex Desktop thread to finish before applying the switch...",
+      );
+      expect(stderr.read()).toContain("Still waiting for the current Codex Desktop thread to finish");
+      expect(stderr.read()).toContain("Applied the switch to the managed Codex Desktop session.");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -767,7 +819,7 @@ wire_api = "responses"
         stdout: stdout.stream,
         stderr: stderr.stream,
         desktopLauncher: createDesktopLauncherStub({
-          restartManagedAppServer: async () => {
+          applyManagedSwitch: async () => {
             throw new Error("restart failed");
           },
         }),
@@ -811,6 +863,121 @@ wire_api = "responses"
 
       expect(exitCode).toBe(0);
       expect(stdout.read()).toContain('Switched to "switch-inspection"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch --force immediately restarts a codexm-managed Desktop session", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-force");
+      await runCli(["save", "switch-force", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const calls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+
+      const exitCode = await runCli(["switch", "switch-force", "--force"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async (options) => {
+            calls.push({ ...options });
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual([{ force: true, timeoutMs: 120_000 }]);
+      expect(stdout.read()).toContain('Switched to "switch-force"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch does not roll back local auth when managed Desktop refresh is interrupted", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-interrupt-a");
+      await runCli(["save", "switch-interrupt-a", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-switch-interrupt-b");
+      await runCli(["save", "switch-interrupt-b", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const interruptController = new AbortController();
+      setTimeout(() => {
+        interruptController.abort();
+      }, 0);
+
+      const exitCode = await runCli(["switch", "switch-interrupt-a", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        interruptSignal: interruptController.signal,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async (options) =>
+            await new Promise<boolean>((_resolve, reject) => {
+              if (options?.signal?.aborted) {
+                const error = new Error("Managed Codex Desktop refresh was interrupted.");
+                error.name = "AbortError";
+                reject(error);
+                return;
+              }
+
+              options?.signal?.addEventListener(
+                "abort",
+                () => {
+                  const error = new Error("Managed Codex Desktop refresh was interrupted.");
+                  error.name = "AbortError";
+                  reject(error);
+                },
+                { once: true },
+              );
+            }),
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      const payload = JSON.parse(stdout.read());
+      expect(payload).toMatchObject({
+        ok: true,
+        action: "switch",
+        account: {
+          name: "switch-interrupt-a",
+          account_id: "acct-switch-interrupt-a",
+        },
+      });
+      expect(payload.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Refreshing the running codexm-managed Codex Desktop session was interrupted",
+          ),
+        ]),
+      );
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-switch-interrupt-a");
       expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
@@ -1024,6 +1191,10 @@ wire_api = "responses"
       const switchStdout = captureWritable();
       const switchCode = await runCli(["switch", "alpha", "--json"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async () => false,
+          listRunningApps: async () => [],
+        }),
         stdout: switchStdout.stream,
         stderr: captureWritable().stream,
       });
@@ -1293,6 +1464,10 @@ wire_api = "responses"
       const switchStdout = captureWritable();
       const switchCode = await runCli(["switch", "--auto", "--json"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async () => false,
+          listRunningApps: async () => [],
+        }),
         stdout: switchStdout.stream,
         stderr: captureWritable().stream,
       });

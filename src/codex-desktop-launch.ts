@@ -15,9 +15,11 @@ const DEFAULT_CODEX_DESKTOP_STATE_PATH = join(
 const CODEX_BINARY_SUFFIX = "/Contents/MacOS/Codex";
 const CODEX_APP_NAME = "Codex";
 const CODEX_LOCAL_HOST_ID = "local";
+export const DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS = 120_000;
 const CODEX_APP_SERVER_RESTART_EXPRESSION =
   'window.electronBridge.sendMessageFromView({ type: "codex-app-server-restart", hostId: "local" })';
 const DEVTOOLS_REQUEST_TIMEOUT_MS = 5_000;
+const DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS = 10_000;
 
 export interface ExecFileLike {
   (
@@ -70,7 +72,11 @@ export interface CodexDesktopLauncher {
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;
   isManagedDesktopRunning(): Promise<boolean>;
-  restartManagedAppServer(): Promise<boolean>;
+  applyManagedSwitch(options?: {
+    force?: boolean;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<boolean>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,6 +89,49 @@ function isNonEmptyString(value: unknown): value is string {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createAbortError(): Error {
+  const error = new Error("Managed Codex Desktop refresh was interrupted.");
+  error.name = "AbortError";
+  return error;
+}
+
+async function waitForPromiseOrAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) {
+    return await promise;
+  }
+
+  if (signal.aborted) {
+    throw createAbortError();
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(createAbortError());
+    };
+
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    void promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 async function pathExistsViaStat(
@@ -177,6 +226,7 @@ async function evaluateDevtoolsExpression(
   createWebSocketImpl: CreateWebSocketLike,
   webSocketDebuggerUrl: string,
   expression: string,
+  timeoutMs: number,
 ): Promise<void> {
   const socket = createWebSocketImpl(webSocketDebuggerUrl);
 
@@ -185,7 +235,7 @@ async function evaluateDevtoolsExpression(
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for Codex Desktop devtools response."));
-    }, DEVTOOLS_REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
 
     const cleanup = () => {
       clearTimeout(timeout);
@@ -252,6 +302,229 @@ async function evaluateDevtoolsExpression(
       reject(new Error("Codex Desktop devtools connection closed before replying."));
     };
   });
+}
+
+function buildManagedSwitchExpression(options?: {
+  force?: boolean;
+  timeoutMs?: number;
+}): string {
+  const force = options?.force === true;
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS;
+
+  return `(async () => {
+  const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
+  const force = ${JSON.stringify(force)};
+  const timeoutMs = ${JSON.stringify(timeoutMs)};
+  const fallbackPollIntervalMs = 2000;
+  const mutationDebounceMs = 50;
+
+  const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  const toError = (value, fallback) => {
+    if (value instanceof Error) {
+      return value;
+    }
+
+    const message =
+      typeof value === "string"
+        ? value
+        : isRecord(value) && typeof value.message === "string"
+          ? value.message
+          : fallback;
+    return new Error(message);
+  };
+
+  const getRootContainer = () => {
+    const root = document.getElementById("root");
+    if (!root) {
+      throw new Error("Codex Desktop root container is unavailable.");
+    }
+
+    return root;
+  };
+
+  const getRootFiber = () => {
+    const root = getRootContainer();
+
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith("__reactContainer$"));
+    if (!fiberKey) {
+      throw new Error("Could not locate the Codex Desktop React container.");
+    }
+
+    return root[fiberKey];
+  };
+
+  const postMessage = async (message) => {
+    if (!window.electronBridge || typeof window.electronBridge.sendMessageFromView !== "function") {
+      throw new Error("Codex Desktop bridge is unavailable.");
+    }
+
+    await window.electronBridge.sendMessageFromView(message);
+  };
+
+  const restart = async () => {
+    await postMessage({
+      type: "codex-app-server-restart",
+      hostId,
+    });
+  };
+
+  const collectActiveThreadIds = () => {
+    const conversations = new Map();
+
+    const visit = (fiber) => {
+      if (!fiber) {
+        return;
+      }
+
+      const props = fiber.memoizedProps;
+      if (isRecord(props) && isRecord(props.conversation)) {
+        const conversation = props.conversation;
+        const id = typeof conversation.id === "string" ? conversation.id : null;
+        const threadRuntimeStatus =
+          isRecord(conversation.threadRuntimeStatus) &&
+          typeof conversation.threadRuntimeStatus.type === "string"
+            ? conversation.threadRuntimeStatus.type
+            : null;
+        const turns = Array.isArray(conversation.turns) ? conversation.turns : [];
+        const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+        const lastTurnStatus =
+          isRecord(lastTurn) && typeof lastTurn.status === "string"
+            ? lastTurn.status
+            : null;
+
+        if (id) {
+          conversations.set(id, {
+            threadRuntimeStatus,
+            lastTurnStatus,
+          });
+        }
+      }
+
+      if (fiber.child) {
+        visit(fiber.child);
+      }
+
+      if (fiber.sibling) {
+        visit(fiber.sibling);
+      }
+    };
+
+    visit(getRootFiber());
+
+    return Array.from(conversations.entries())
+      .filter(
+        ([, status]) =>
+          status.threadRuntimeStatus === "active" || status.lastTurnStatus === "inProgress",
+      )
+      .map(([threadId]) => threadId);
+  };
+
+  if (force) {
+    await restart();
+    return { mode: "force" };
+  }
+
+  let activeThreadIds = collectActiveThreadIds();
+  if (activeThreadIds.length === 0) {
+    await restart();
+    return { mode: "immediate" };
+  }
+
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    let mutationHandle = null;
+    let fallbackHandle = null;
+    let observer = null;
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutHandle);
+      if (mutationHandle !== null) {
+        window.clearTimeout(mutationHandle);
+      }
+      if (fallbackHandle !== null) {
+        window.clearInterval(fallbackHandle);
+      }
+      observer?.disconnect();
+    };
+
+    const finishWithError = (error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const finishWithRestart = async () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+
+      try {
+        await restart();
+        resolve(undefined);
+      } catch (error) {
+        reject(toError(error, "Failed to restart the Codex app server."));
+      }
+    };
+
+    const checkThreads = async () => {
+      if (settled) {
+        return;
+      }
+
+      try {
+        activeThreadIds = collectActiveThreadIds();
+        if (activeThreadIds.length === 0) {
+          await finishWithRestart();
+          return;
+        }
+      } catch (error) {
+        finishWithError(toError(error, "Failed to refresh active thread state."));
+      }
+    };
+
+    const timeoutHandle = window.setTimeout(() => {
+      finishWithError(
+        new Error("Timed out waiting for the current Codex thread to finish."),
+      );
+    }, timeoutMs);
+
+    const scheduleCheck = () => {
+      if (settled || mutationHandle !== null) {
+        return;
+      }
+
+      mutationHandle = window.setTimeout(() => {
+        mutationHandle = null;
+        void checkThreads();
+      }, mutationDebounceMs);
+    };
+
+    observer = new MutationObserver(() => {
+      scheduleCheck();
+    });
+    observer.observe(getRootContainer(), {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+
+    fallbackHandle = window.setInterval(() => {
+      void checkThreads();
+    }, fallbackPollIntervalMs);
+
+    void checkThreads();
+  });
+
+  return { mode: "waited" };
+})()`;
 }
 
 export function createCodexDesktopLauncher(options: {
@@ -385,7 +658,11 @@ export function createCodexDesktopLauncher(options: {
     return isManagedDesktopProcess(runningApps, state);
   }
 
-  async function restartManagedAppServer(): Promise<boolean> {
+  async function applyManagedSwitch(options?: {
+    force?: boolean;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<boolean> {
     const state = await readManagedState();
     if (!state) {
       return false;
@@ -426,10 +703,25 @@ export function createCodexDesktopLauncher(options: {
       throw new Error("Could not find the local Codex Desktop devtools target.");
     }
 
-    await evaluateDevtoolsExpression(
-      createWebSocketImpl,
-      localTarget.webSocketDebuggerUrl,
-      CODEX_APP_SERVER_RESTART_EXPRESSION,
+    const devtoolsTimeoutMs =
+      options?.force === true
+        ? DEVTOOLS_REQUEST_TIMEOUT_MS
+        : Math.max(
+            DEVTOOLS_REQUEST_TIMEOUT_MS,
+            (options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS) +
+              DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS,
+          );
+
+    await waitForPromiseOrAbort(
+      evaluateDevtoolsExpression(
+        createWebSocketImpl,
+        localTarget.webSocketDebuggerUrl,
+        options?.force === true
+          ? CODEX_APP_SERVER_RESTART_EXPRESSION
+          : buildManagedSwitchExpression(options),
+        devtoolsTimeoutMs,
+      ),
+      options?.signal,
     );
     return true;
   }
@@ -443,6 +735,6 @@ export function createCodexDesktopLauncher(options: {
     writeManagedState,
     clearManagedState,
     isManagedDesktopRunning,
-    restartManagedAppServer,
+    applyManagedSwitch,
   };
 }
