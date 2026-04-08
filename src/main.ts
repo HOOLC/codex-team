@@ -247,6 +247,7 @@ Usage:
 
 Notes:
   codexm list refreshes quota data, shows the current managed account, and marks current rows with "*".
+  Run codexm launch from an external terminal if you need to restart Codex Desktop.
   Unknown commands and flags fail fast; close matches include a suggestion.
 
 Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
@@ -257,6 +258,8 @@ const NON_MANAGED_DESKTOP_WARNING_PREFIX =
   '"codexm switch" updates local auth, but running Codex Desktop may still use the previous login state.';
 const NON_MANAGED_DESKTOP_FOLLOWUP_WARNING =
   'Use "codexm launch" to start Codex Desktop with the selected auth; future switches can apply immediately to that session.';
+const INTERNAL_LAUNCH_REFUSAL_MESSAGE =
+  'Refusing to run "codexm launch" from inside Codex Desktop because quitting the app would terminate this session. Run this command from an external terminal instead.';
 
 function stripManagedDesktopWarning(warnings: string[]): string[] {
   return warnings.filter(
@@ -1116,6 +1119,10 @@ export async function runCli(
 
         if (parsed.positionals.length > 1) {
           throw new Error("Usage: codexm launch [name] [--json]");
+        }
+
+        if (await desktopLauncher.isRunningInsideDesktopShell()) {
+          throw new Error(INTERNAL_LAUNCH_REFUSAL_MESSAGE);
         }
 
         const warnings: string[] = [];

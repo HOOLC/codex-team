@@ -52,6 +52,7 @@ function createDesktopLauncherStub(overrides: Partial<{
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
+  isRunningInsideDesktopShell: () => Promise<boolean>;
   applyManagedSwitch: (options?: {
     force?: boolean;
     timeoutMs?: number;
@@ -67,6 +68,7 @@ function createDesktopLauncherStub(overrides: Partial<{
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    isRunningInsideDesktopShell: overrides.isRunningInsideDesktopShell ?? (async () => false),
     applyManagedSwitch: overrides.applyManagedSwitch ?? (async () => false),
   };
 }
@@ -475,6 +477,41 @@ wire_api = "responses"
 
     expect(exitCode).toBe(1);
     expect(stderr.read()).toContain("Refusing to relaunch Codex Desktop in a non-interactive terminal.");
+  });
+
+  test("refuses launch from inside Codex Desktop before switching accounts", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-launch-target");
+      await runCli(["save", "launch-target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-original");
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["launch", "launch-target"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isRunningInsideDesktopShell: async () => true,
+        }),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain(
+        'Refusing to run "codexm launch" from inside Codex Desktop because quitting the app would terminate this session. Run this command from an external terminal instead.',
+      );
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-launch-original");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
   });
 
   test("fails when Codex Desktop is not installed", async () => {

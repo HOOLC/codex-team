@@ -66,6 +66,7 @@ export interface ManagedCodexDesktopState {
 export interface CodexDesktopLauncher {
   findInstalledApp(): Promise<string | null>;
   listRunningApps(): Promise<RunningCodexDesktop[]>;
+  isRunningInsideDesktopShell(): Promise<boolean>;
   quitRunningApps(): Promise<void>;
   launch(appPath: string): Promise<void>;
   readManagedState(): Promise<ManagedCodexDesktopState | null>;
@@ -143,6 +144,34 @@ async function pathExistsViaStat(
     return true;
   } catch {
     return false;
+  }
+}
+
+async function readProcessParentAndCommand(
+  execFileImpl: ExecFileLike,
+  pid: number,
+): Promise<{ ppid: number; command: string } | null> {
+  try {
+    const { stdout } = await execFileImpl("ps", ["-o", "ppid=,command=", "-p", String(pid)]);
+    const line = stdout
+      .split("\n")
+      .map((entry) => entry.trim())
+      .find((entry) => entry !== "");
+    if (!line) {
+      return null;
+    }
+
+    const match = line.match(/^(\d+)\s+(.+)$/);
+    if (!match) {
+      return null;
+    }
+
+    return {
+      ppid: Number(match[1]),
+      command: match[2],
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -599,6 +628,27 @@ export function createCodexDesktopLauncher(options: {
     return running;
   }
 
+  async function isRunningInsideDesktopShell(): Promise<boolean> {
+    let currentPid = process.ppid;
+    const visited = new Set<number>();
+
+    while (currentPid > 1 && !visited.has(currentPid)) {
+      visited.add(currentPid);
+      const processInfo = await readProcessParentAndCommand(execFileImpl, currentPid);
+      if (!processInfo) {
+        return false;
+      }
+
+      if (processInfo.command.includes(CODEX_BINARY_SUFFIX)) {
+        return true;
+      }
+
+      currentPid = processInfo.ppid;
+    }
+
+    return false;
+  }
+
   async function quitRunningApps(): Promise<void> {
     const running = await listRunningApps();
     if (running.length === 0) {
@@ -729,6 +779,7 @@ export function createCodexDesktopLauncher(options: {
   return {
     findInstalledApp,
     listRunningApps,
+    isRunningInsideDesktopShell,
     quitRunningApps,
     launch,
     readManagedState,

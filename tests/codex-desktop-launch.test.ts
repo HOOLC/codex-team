@@ -70,6 +70,56 @@ describe("codex-desktop-launch", () => {
     ]);
   });
 
+  test("detects when the current shell is descended from Codex Desktop", async () => {
+    const originalParentPid = process.ppid;
+    const launcher = createCodexDesktopLauncher({
+      execFileImpl: async (file, args = []) => {
+        if (file === "ps" && args.at(-1) === String(originalParentPid)) {
+          return {
+            stdout: `777 /bin/zsh\n`,
+            stderr: "",
+          };
+        }
+
+        if (file === "ps" && args.at(-1) === "777") {
+          return {
+            stdout: "1 /Applications/Codex.app/Contents/MacOS/Codex\n",
+            stderr: "",
+          };
+        }
+
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    });
+
+    await expect(launcher.isRunningInsideDesktopShell()).resolves.toBe(true);
+  });
+
+  test("returns false when the current shell is not descended from Codex Desktop", async () => {
+    const originalParentPid = process.ppid;
+    const launcher = createCodexDesktopLauncher({
+      execFileImpl: async (file, args = []) => {
+        if (file === "ps" && args.at(-1) === String(originalParentPid)) {
+          return {
+            stdout: "777 /bin/zsh\n",
+            stderr: "",
+          };
+        }
+
+        if (file === "ps" && args.at(-1) === "777") {
+          return {
+            stdout: "1 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal\n",
+            stderr: "",
+          };
+        }
+
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    });
+
+    await expect(launcher.isRunningInsideDesktopShell()).resolves.toBe(false);
+  });
+
   test("quits running Codex Desktop via osascript", async () => {
     const calls: Array<{ file: string; args: string[] }> = [];
     let psCalls = 0;
