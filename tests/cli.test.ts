@@ -13,6 +13,7 @@ import type {
   ManagedCodexDesktopState,
   RunningCodexDesktop,
 } from "../src/codex-desktop-launch.js";
+import type { WatchProcessManager, WatchProcessState } from "../src/watch-process.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -119,6 +120,37 @@ function createInteractiveStdin(): NodeJS.ReadStream & {
   };
 
   return stream;
+}
+
+function createWatchProcessManagerStub(overrides: Partial<{
+  startDetached: (options: { autoSwitch: boolean; debug: boolean }) => Promise<WatchProcessState>;
+  getStatus: () => Promise<{ running: boolean; state: WatchProcessState | null }>;
+  stop: () => Promise<{ running: boolean; state: WatchProcessState | null; stopped: boolean }>;
+}> = {}): WatchProcessManager {
+  return {
+    startDetached:
+      overrides.startDetached ??
+      (async () => ({
+        pid: 43210,
+        started_at: "2026-04-08T13:58:00.000Z",
+        log_path: "/tmp/watch.log",
+        auto_switch: false,
+        debug: false,
+      })),
+    getStatus:
+      overrides.getStatus ??
+      (async () => ({
+        running: false,
+        state: null,
+      })),
+    stop:
+      overrides.stop ??
+      (async () => ({
+        running: false,
+        state: null,
+        stopped: false,
+      })),
+  };
 }
 
 describe("CLI", () => {
@@ -859,6 +891,148 @@ wire_api = "responses"
 
       expect(exitCode).toBe(1);
       expect(stderr.read()).toContain("No codexm-managed Codex Desktop session is running.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --status reports when no background watch is running", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--status"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Watch: not running");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --detach starts a background watcher", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--detach", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: false,
+              debug: true,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: false,
+        debug: true,
+      });
+      expect(stdout.read()).toContain("Started background watch (pid 43210).");
+      expect(stdout.read()).toContain("Log: /tmp/watch.log");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --detach --auto-switch starts a background auto-switch watcher", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+
+      const exitCode = await runCli(["watch", "--detach", "--auto-switch"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              debug: false,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: true,
+        debug: false,
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --stop stops the background watcher", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["watch", "--stop"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        watchProcessManager: createWatchProcessManagerStub({
+          stop: async () => ({
+            running: false,
+            stopped: true,
+            state: {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              debug: false,
+            },
+          }),
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Stopped background watch (pid 43210).");
     } finally {
       await cleanupTempHome(homeDir);
     }
