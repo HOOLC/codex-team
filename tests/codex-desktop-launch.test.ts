@@ -1054,7 +1054,7 @@ describe("codex-desktop-launch", () => {
                             {
                               type: "string",
                               value:
-                                '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"UsageLimitExceeded"}}}}',
+                                '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}}',
                             },
                           ],
                         },
@@ -1104,7 +1104,7 @@ describe("codex-desktop-launch", () => {
           requestId: "rpc:notification:error",
           reason: "rpc_notification",
           bodySnippet:
-            '{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"UsageLimitExceeded"}}}',
+            '{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}',
         },
       ]);
     } finally {

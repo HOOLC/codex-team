@@ -210,8 +210,95 @@ describe("CLI", () => {
     expect(output).toContain("codexm --version");
     expect(output).toContain("codexm launch [name] [--json]");
     expect(output).toContain("codexm watch [--auto-switch]");
+    expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(stderr.read()).toBe("");
+  });
+
+  test("prints a zsh completion script with dynamic account completion", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-completion-zsh");
+      const store = createAccountStore(homeDir);
+      await store.saveCurrentAccount("plus-main");
+      await writeCurrentAuth(homeDir, "acct-completion-zsh-team");
+      await store.saveCurrentAccount("team.ops");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "zsh"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const script = stdout.read();
+      expect(script).toContain("#compdef codexm");
+      expect(script).toContain("current");
+      expect(script).toContain("watch");
+      expect(script).toContain("completion");
+      expect(script).toContain("--auto-switch");
+      expect(script).toContain("codexm completion --accounts");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("prints a bash completion script with dynamic account completion", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "bash"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const script = stdout.read();
+      expect(script).toContain("_codexm()");
+      expect(script).toContain("COMPREPLY=");
+      expect(script).toContain("codexm completion --accounts");
+      expect(script).toContain("--detach");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("prints saved account names for hidden completion account queries", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-completion-accounts");
+      const store = createAccountStore(homeDir);
+      await store.saveCurrentAccount("plus-main");
+      await writeCurrentAuth(homeDir, "acct-completion-accounts-team");
+      await store.saveCurrentAccount("team.ops");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "--accounts"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read().trim().split("\n")).toEqual(["plus-main", "team.ops"]);
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
   });
 
   test("accepts --debug for existing commands and writes current debug output", async () => {
@@ -1648,6 +1735,7 @@ wire_api = "responses"
       await cleanupTempHome(homeDir);
     }
   });
+
   test("watch reports connection loss and recovery while reconnecting", async () => {
     const homeDir = await createTempHome();
 
@@ -1823,6 +1911,7 @@ wire_api = "responses"
               reason: "rpc_response",
               bodySnippet:
                 '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+              shouldAutoSwitch: true,
             });
           },
           applyManagedSwitch: async (options) => {
@@ -2362,6 +2451,7 @@ wire_api = "responses"
       expect(lines[0]).toBe("Current managed account: quota-main");
       expect(output).not.toContain("CREDITS");
       expect(output).toContain("AVAILABLE");
+      expect(output).toContain("CURRENT SCORE");
       expect(output).toContain("available");
       expect(output).toContain("* quota-main");
       expect(output).toContain("  quota-backup");
@@ -2376,6 +2466,78 @@ wire_api = "responses"
       expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
       expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
       expect(tableLines[0]?.indexOf("PLAN TYPE")).toBe(tableLines[3]?.indexOf("plus"));
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list --verbose includes auto-switch score breakdown columns", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+            return jsonResponse({
+              plan_type: accountId === "acct-cli-verbose-team" ? "team" : "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: accountId === "acct-cli-verbose-team" ? 40 : 20,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: accountId === "acct-cli-verbose-team" ? 600 : 300,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: accountId === "acct-cli-verbose-team" ? 35 : 30,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-verbose-plus");
+      await runCli(["save", "quota-plus", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-verbose-team");
+      await runCli(["save", "quota-team", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list", "--verbose"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+      const output = listStdout.read();
+      expect(output).toContain("CURRENT SCORE");
+      expect(output).toContain("1H SCORE");
+      expect(output).toContain("5H->1W 1H");
+      expect(output).toContain("1W 1H");
+      expect(output).toContain("1W:5H");
+      expect(output).toContain("quota-plus");
+      expect(output).toContain("quota-team");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2597,6 +2759,7 @@ wire_api = "responses"
     const homeDir = await createTempHome();
 
     try {
+      const nowSeconds = Math.floor(Date.now() / 1000);
       const store = createAccountStore(homeDir, {
         fetchImpl: async (input, init) => {
           const url = String(input);
@@ -2615,13 +2778,13 @@ wire_api = "responses"
                   used_percent: 60,
                   limit_window_seconds: 18_000,
                   reset_after_seconds: 500,
-                  reset_at: 1_773_868_641,
+                  reset_at: nowSeconds + 500,
                 },
                 secondary_window: {
                   used_percent: 70,
                   limit_window_seconds: 604_800,
                   reset_after_seconds: 6_000,
-                  reset_at: 1_773_890_040,
+                  reset_at: nowSeconds + 6_000,
                 },
               },
               credits: {
@@ -2640,13 +2803,13 @@ wire_api = "responses"
                   used_percent: 50,
                   limit_window_seconds: 18_000,
                   reset_after_seconds: 500,
-                  reset_at: 1_773_860_000,
+                  reset_at: nowSeconds + 500,
                 },
                 secondary_window: {
                   used_percent: 80,
                   limit_window_seconds: 604_800,
                   reset_after_seconds: 6_000,
-                  reset_at: 1_773_880_000,
+                  reset_at: nowSeconds + 6_000,
                 },
               },
               credits: {
@@ -2664,13 +2827,13 @@ wire_api = "responses"
                 used_percent: 100,
                 limit_window_seconds: 18_000,
                 reset_after_seconds: 500,
-                reset_at: 1_773_868_641,
+                reset_at: nowSeconds + 500,
               },
               secondary_window: {
                 used_percent: 10,
                 limit_window_seconds: 604_800,
                 reset_after_seconds: 6_000,
-                reset_at: 1_773_890_040,
+                reset_at: nowSeconds + 6_000,
               },
             },
             credits: {
@@ -2711,19 +2874,26 @@ wire_api = "responses"
       });
 
       expect(dryRunCode).toBe(0);
-      expect(JSON.parse(dryRunStdout.read())).toMatchObject({
+      const dryRunPayload = JSON.parse(dryRunStdout.read());
+      expect(dryRunPayload).toMatchObject({
         ok: true,
         action: "switch",
         mode: "auto",
         dry_run: true,
         selected: {
-          name: "beta",
+          name: "alpha",
           available: "available",
-          effective_score: 50,
-          remain_5h: 50,
-          remain_1w_eq_5h: 60,
+          current_score: 13.33,
+          remain_5h: 40,
+          remain_1w: 30,
+          remain_5h_in_1w_units: 13.33,
+          five_hour_windows_per_week: 3,
         },
       });
+      expect(dryRunPayload.selected.score_1h).toBeCloseTo(30, 2);
+      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(91.67, 2);
+      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(30.56, 2);
+      expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(30, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-gamma");
 
@@ -2739,31 +2909,34 @@ wire_api = "responses"
       });
 
       expect(switchCode).toBe(0);
-      expect(JSON.parse(switchStdout.read())).toMatchObject({
+      const switchPayload = JSON.parse(switchStdout.read());
+      expect(switchPayload).toMatchObject({
         ok: true,
         action: "switch",
         mode: "auto",
         account: {
-          name: "beta",
-          account_id: "acct-auto-beta",
+          name: "alpha",
+          account_id: "acct-auto-alpha",
         },
         selected: {
-          name: "beta",
-          effective_score: 50,
+          name: "alpha",
+          current_score: 13.33,
+          five_hour_windows_per_week: 3,
         },
         quota: {
           available: "available",
           refresh_status: "ok",
           five_hour: {
-            used_percent: 50,
+            used_percent: 60,
           },
           one_week: {
-            used_percent: 80,
+            used_percent: 70,
           },
         },
       });
+      expect(switchPayload.selected.score_1h).toBeCloseTo(30, 2);
 
-      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-beta");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-alpha");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2815,15 +2988,205 @@ wire_api = "responses"
     expect(rankAutoSwitchCandidates([singleWindowAccount, twoWindowAccount])).toMatchObject([
       {
         name: "alpha",
-        effective_score: 80,
+        current_score: 26.67,
+        score_1h: 26.67,
         remain_5h: 80,
-        remain_1w_eq_5h: null,
+        remain_1w: null,
+        remain_5h_in_1w_units: 26.67,
+        projected_5h_1h: 80,
+        projected_5h_in_1w_units_1h: 26.67,
+        five_hour_windows_per_week: 3,
       },
       {
         name: "beta",
-        effective_score: 40,
+        current_score: 13.33,
+        score_1h: 13.33,
         remain_5h: 40,
-        remain_1w_eq_5h: 90,
+        remain_1w: 30,
+        remain_5h_in_1w_units: 13.33,
+        projected_5h_1h: 40,
+        projected_5h_in_1w_units_1h: 13.33,
+        projected_1w_1h: 30,
+        five_hour_windows_per_week: 3,
+      },
+    ]);
+  });
+
+  test("auto switch scoring converts 5h remaining by plan-relative window size", () => {
+    const plusAccount: AccountQuotaSummary = {
+      name: "plus",
+      account_id: "acct-plus",
+      user_id: null,
+      identity: "acct-plus",
+      plan_type: "plus",
+      credits_balance: 5,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 50,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+    };
+
+    const teamAccount: AccountQuotaSummary = {
+      name: "team",
+      account_id: "acct-team",
+      user_id: null,
+      identity: "acct-team",
+      plan_type: "team",
+      credits_balance: 5,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 50,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+    };
+
+    expect(rankAutoSwitchCandidates([plusAccount, teamAccount])).toMatchObject([
+      {
+        name: "plus",
+        current_score: 26.67,
+        score_1h: 26.67,
+        remain_1w: 50,
+        remain_5h_in_1w_units: 26.67,
+        projected_5h_in_1w_units_1h: 26.67,
+        projected_1w_1h: 50,
+        five_hour_windows_per_week: 3,
+      },
+      {
+        name: "team",
+        current_score: 10,
+        score_1h: 10,
+        remain_1w: 50,
+        remain_5h_in_1w_units: 10,
+        projected_5h_in_1w_units_1h: 10,
+        projected_1w_1h: 50,
+        five_hour_windows_per_week: 8,
+      },
+    ]);
+  });
+
+  test("auto switch scoring prefers earlier reset when projected availability is higher", () => {
+    const earlyResetAccount: AccountQuotaSummary = {
+      name: "early-reset",
+      account_id: "acct-early-reset",
+      user_id: null,
+      identity: "acct-early-reset",
+      plan_type: "plus",
+      credits_balance: 2,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 40,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T00:05:00.000Z",
+      },
+      one_week: null,
+    };
+
+    const lateResetAccount: AccountQuotaSummary = {
+      name: "late-reset",
+      account_id: "acct-late-reset",
+      user_id: null,
+      identity: "acct-late-reset",
+      plan_type: "plus",
+      credits_balance: 2,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 35,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T04:30:00.000Z",
+      },
+      one_week: null,
+    };
+
+    expect(rankAutoSwitchCandidates([earlyResetAccount, lateResetAccount])).toMatchObject([
+      {
+        name: "early-reset",
+        remain_5h: 60,
+        current_score: 20,
+        projected_5h_1h: 96.67,
+      },
+      {
+        name: "late-reset",
+        remain_5h: 65,
+        current_score: 21.67,
+        projected_5h_1h: 65,
+      },
+    ]);
+  });
+
+  test("auto switch scoring keeps a clearly better current score ahead of a near-reset zero balance", () => {
+    const nearResetButEmpty: AccountQuotaSummary = {
+      name: "near-reset-empty",
+      account_id: "acct-near-reset-empty",
+      user_id: null,
+      identity: "acct-near-reset-empty",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 100,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T00:05:00.000Z",
+      },
+      one_week: null,
+    };
+
+    const modestButAvailable: AccountQuotaSummary = {
+      name: "modest-available",
+      account_id: "acct-modest-available",
+      user_id: null,
+      identity: "acct-modest-available",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 70,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T04:30:00.000Z",
+      },
+      one_week: null,
+    };
+
+    expect(rankAutoSwitchCandidates([nearResetButEmpty, modestButAvailable])).toMatchObject([
+      {
+        name: "modest-available",
+        current_score: 10,
+        score_1h: 10,
+      },
+      {
+        name: "near-reset-empty",
+        current_score: 0,
+        score_1h: 30.56,
       },
     ]);
   });

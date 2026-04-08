@@ -88,12 +88,6 @@ export interface ManagedWatchStatusEvent {
   error: string | null;
 }
 
-export interface ManagedWatchStatusEvent {
-  type: "disconnected" | "reconnected";
-  attempt: number;
-  error: string | null;
-}
-
 export interface ManagedCurrentQuotaSnapshot {
   plan_type: string | null;
   credits_balance: number | null;
@@ -413,7 +407,7 @@ function hasStructuredQuotaError(value: unknown, depth = 0): boolean {
     return false;
   }
 
-  if (value.codexErrorInfo === "UsageLimitExceeded") {
+  if (value.codexErrorInfo === "usageLimitExceeded") {
     return true;
   }
 
@@ -796,7 +790,7 @@ function extractRpcQuotaSignal(
       });
     }
     if (
-      (method === "error" && hasStructuredQuotaError(event.params))
+      method === "error" && hasStructuredQuotaError(event.params)
     ) {
       return buildRpcQuotaSignal({
         event,
@@ -835,7 +829,9 @@ function extractRpcQuotaSignal(
     });
   }
 
-  if (hasStructuredQuotaError(message?.error)) {
+  if (
+    hasStructuredQuotaError(message?.error)
+  ) {
     return buildRpcQuotaSignal({
       event,
       requestId: `rpc:${responseId}`,
@@ -1536,7 +1532,7 @@ export function createCodexDesktopLauncher(options: {
     signal?: AbortSignal;
     debugLogger?: (line: string) => void;
     onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
-    signaledRequests: Set<string>;
+    dedupeState: { lastFingerprint: string | null };
     onReady?: () => Promise<void> | void;
   }): Promise<void> {
     const state = await readManagedState();
@@ -1688,10 +1684,16 @@ export function createCodexDesktopLauncher(options: {
       };
 
       const emitQuotaSignal = async (signal: ManagedQuotaSignal) => {
-        if (sessionOptions.signaledRequests.has(signal.requestId)) {
+        const fingerprint = JSON.stringify({
+          url: signal.url,
+          reason: signal.reason,
+          shouldAutoSwitch: signal.shouldAutoSwitch,
+          bodySnippet: signal.bodySnippet,
+        });
+        if (sessionOptions.dedupeState.lastFingerprint === fingerprint) {
           return;
         }
-        sessionOptions.signaledRequests.add(signal.requestId);
+        sessionOptions.dedupeState.lastFingerprint = fingerprint;
         await sessionOptions.onQuotaSignal?.(signal);
       };
 
@@ -1803,7 +1805,7 @@ export function createCodexDesktopLauncher(options: {
     onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
     onStatus?: (event: ManagedWatchStatusEvent) => Promise<void> | void;
   }): Promise<void> {
-    const signaledRequests = new Set<string>();
+    const dedupeState = { lastFingerprint: null as string | null };
     let reconnectAttempt = 0;
 
     while (true) {
@@ -1816,7 +1818,7 @@ export function createCodexDesktopLauncher(options: {
           signal: options?.signal,
           debugLogger: options?.debugLogger,
           onQuotaSignal: options?.onQuotaSignal,
-          signaledRequests,
+          dedupeState,
           onReady: async () => {
             if (reconnectAttempt > 0) {
               await options?.onStatus?.({
