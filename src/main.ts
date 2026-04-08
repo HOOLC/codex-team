@@ -617,7 +617,7 @@ function describeQuotaAccounts(
       refresh_status: account.status,
     })),
     [
-      { key: "name", label: "NAME" },
+      { key: "name", label: "  NAME" },
       { key: "account_id", label: "IDENTITY" },
       { key: "plan_type", label: "PLAN TYPE" },
       { key: "available", label: "AVAILABLE" },

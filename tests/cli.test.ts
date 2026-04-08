@@ -1146,8 +1146,9 @@ wire_api = "responses"
 
       const output = listStdout.read();
       const lines = output.trimEnd().split("\n");
-      const tableStartIndex = lines.findIndex((line) => line.startsWith("NAME"));
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
       const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
+      const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
       expect(output).not.toContain("CREDITS");
@@ -1162,7 +1163,9 @@ wire_api = "responses"
         dayjs.utc("2026-03-19T03:14:00.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
       expect(tableLines).toHaveLength(4);
-      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(tableLines[2]?.indexOf("acct-c"));
+      expect(currentRow).toBeDefined();
+      expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
+      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
       expect(tableLines[0]?.indexOf("PLAN TYPE")).toBe(tableLines[3]?.indexOf("plus"));
     } finally {
       await cleanupTempHome(homeDir);
