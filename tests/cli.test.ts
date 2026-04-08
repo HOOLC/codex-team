@@ -708,8 +708,13 @@ wire_api = "responses"
       });
 
       expect(exitCode).toBe(0);
-      expect(stdout.read()).toContain("Existing sessions may still hold the previous login state.");
-      expect(stdout.read()).toContain('Use "codexm launch" to start Codex Desktop with the selected auth.');
+      const output = stdout.read();
+      expect(output).toContain(
+        'Warning: "codexm switch" updates local auth, but running Codex Desktop may still use the previous login state.',
+      );
+      expect(output).toContain(
+        'Warning: Use "codexm launch" to start Codex Desktop with the selected auth; future switches can apply immediately to that session.',
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }
