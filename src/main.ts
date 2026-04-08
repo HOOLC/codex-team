@@ -21,6 +21,10 @@ import {
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
 } from "./codex-desktop-launch.js";
+import {
+  createWatchProcessManager,
+  type WatchProcessManager,
+} from "./watch-process.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -34,6 +38,7 @@ interface CliStreams {
 interface RunCliOptions extends Partial<CliStreams> {
   store?: AccountStore;
   desktopLauncher?: CodexDesktopLauncher;
+  watchProcessManager?: WatchProcessManager;
   interruptSignal?: AbortSignal;
   managedDesktopWaitStatusDelayMs?: number;
   managedDesktopWaitStatusIntervalMs?: number;
@@ -92,7 +97,7 @@ const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   update: new Set(["--json"]),
   switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
   launch: new Set(["--json"]),
-  watch: new Set(["--auto-switch"]),
+  watch: new Set(["--auto-switch", "--detach", "--status", "--stop"]),
   remove: new Set(["--yes", "--json"]),
   rename: new Set(["--json"]),
 };
@@ -245,7 +250,7 @@ Usage:
   codexm switch <name> [--force] [--json]
   codexm switch --auto [--dry-run] [--force] [--json]
   codexm launch [name] [--json]
-  codexm watch [--auto-switch]
+  codexm watch [--auto-switch] [--detach] [--status] [--stop]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
 
@@ -951,6 +956,8 @@ export async function runCli(
   };
   const store = options.store ?? createAccountStore();
   const desktopLauncher = options.desktopLauncher ?? createCodexDesktopLauncher();
+  const watchProcessManager =
+    options.watchProcessManager ?? createWatchProcessManager(store.paths.codexTeamDir);
   const interruptSignal = options.interruptSignal;
   const managedDesktopWaitStatusDelayMs =
     options.managedDesktopWaitStatusDelayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
@@ -1385,13 +1392,55 @@ export async function runCli(
 
       case "watch": {
         if (parsed.positionals.length > 0) {
-          throw new Error("Usage: codexm watch [--auto-switch]");
+          throw new Error("Usage: codexm watch [--auto-switch] [--detach] [--status] [--stop]");
         }
 
         const autoSwitch = parsed.flags.has("--auto-switch");
+        const detach = parsed.flags.has("--detach");
+        const status = parsed.flags.has("--status");
+        const stop = parsed.flags.has("--stop");
+        const modeCount = [detach, status, stop].filter(Boolean).length;
+
+        if (modeCount > 1 || ((status || stop) && autoSwitch)) {
+          throw new Error("Usage: codexm watch [--auto-switch] [--detach] [--status] [--stop]");
+        }
+
+        if (status) {
+          const watchStatus = await watchProcessManager.getStatus();
+          if (!watchStatus.running || !watchStatus.state) {
+            streams.stdout.write("Watch: not running\n");
+          } else {
+            streams.stdout.write(`Watch: running (pid ${watchStatus.state.pid})\n`);
+            streams.stdout.write(
+              `Auto-switch: ${watchStatus.state.auto_switch ? "enabled" : "disabled"}\n`,
+            );
+            streams.stdout.write(`Log: ${watchStatus.state.log_path}\n`);
+          }
+          return 0;
+        }
+
+        if (stop) {
+          const stopResult = await watchProcessManager.stop();
+          if (!stopResult.stopped || !stopResult.state) {
+            streams.stdout.write("Watch: not running\n");
+          } else {
+            streams.stdout.write(`Stopped background watch (pid ${stopResult.state.pid}).\n`);
+          }
+          return 0;
+        }
 
         if (!(await desktopLauncher.isManagedDesktopRunning())) {
           throw new Error("No codexm-managed Codex Desktop session is running.");
+        }
+
+        if (detach) {
+          const detachedState = await watchProcessManager.startDetached({
+            autoSwitch,
+            debug,
+          });
+          streams.stdout.write(`Started background watch (pid ${detachedState.pid}).\n`);
+          streams.stdout.write(`Log: ${detachedState.log_path}\n`);
+          return 0;
         }
 
         let watchExitCode = 0;
