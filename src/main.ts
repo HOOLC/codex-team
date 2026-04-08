@@ -17,6 +17,7 @@ import {
   type CodexDesktopLauncher,
   type ManagedCodexDesktopState,
   type RunningCodexDesktop,
+  DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
 } from "./codex-desktop-launch.js";
 
@@ -32,6 +33,9 @@ interface CliStreams {
 interface RunCliOptions extends Partial<CliStreams> {
   store?: AccountStore;
   desktopLauncher?: CodexDesktopLauncher;
+  interruptSignal?: AbortSignal;
+  managedDesktopWaitStatusDelayMs?: number;
+  managedDesktopWaitStatusIntervalMs?: number;
 }
 
 interface ParsedArgs {
@@ -115,8 +119,8 @@ Usage:
   codexm list [name] [--json]
   codexm save <name> [--force] [--json]
   codexm update [--json]
-  codexm switch <name> [--json]
-  codexm switch --auto [--dry-run] [--json]
+  codexm switch <name> [--force] [--json]
+  codexm switch --auto [--dry-run] [--force] [--json]
   codexm launch [name] [--json]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
@@ -133,20 +137,106 @@ function stripManagedDesktopWarning(warnings: string[]): string[] {
   );
 }
 
+const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS = 1_000;
+const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS = 5_000;
+
+function startManagedDesktopWaitReporter(
+  stream: NodeJS.WriteStream,
+  options: {
+    delayMs?: number;
+    intervalMs?: number;
+  } = {},
+): {
+  stop: (result: "success" | "cancelled") => void;
+} {
+  const delayMs = options.delayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
+  const intervalMs = options.intervalMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS;
+  const startedAt = Date.now();
+  let started = false;
+  let intervalHandle: NodeJS.Timeout | null = null;
+
+  const timeoutHandle = setTimeout(() => {
+    started = true;
+    stream.write(
+      "Waiting for the current Codex Desktop thread to finish before applying the switch...\n",
+    );
+
+    intervalHandle = setInterval(() => {
+      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+      stream.write(
+        `Still waiting for the current Codex Desktop thread to finish (${elapsedSeconds}s elapsed)...\n`,
+      );
+    }, intervalMs);
+    intervalHandle.unref?.();
+  }, delayMs);
+  timeoutHandle.unref?.();
+
+  return {
+    stop: (result) => {
+      clearTimeout(timeoutHandle);
+      if (intervalHandle) {
+        clearInterval(intervalHandle);
+      }
+
+      if (started && result === "success") {
+        stream.write("Applied the switch to the managed Codex Desktop session.\n");
+      }
+    },
+  };
+}
+
 async function refreshManagedDesktopAfterSwitch(
   warnings: string[],
   desktopLauncher: CodexDesktopLauncher,
+  options: {
+    force?: boolean;
+    signal?: AbortSignal;
+    statusStream?: NodeJS.WriteStream;
+    statusDelayMs?: number;
+    statusIntervalMs?: number;
+  } = {},
 ): Promise<void> {
+  let reporter: ReturnType<typeof startManagedDesktopWaitReporter> | null = null;
+  if (options.force !== true && options.statusStream) {
+    try {
+      if (await desktopLauncher.isManagedDesktopRunning()) {
+        reporter = startManagedDesktopWaitReporter(options.statusStream, {
+          delayMs: options.statusDelayMs,
+          intervalMs: options.statusIntervalMs,
+        });
+      }
+    } catch {
+      // Keep status reporting best-effort, same as the rest of Desktop inspection.
+    }
+  }
+
   try {
-    if (await desktopLauncher.restartManagedAppServer()) {
+    if (
+      await desktopLauncher.applyManagedSwitch({
+        force: options.force === true,
+        signal: options.signal,
+        timeoutMs: DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
+      })
+    ) {
+      reporter?.stop("success");
       return;
     }
   } catch (error) {
+    reporter?.stop("cancelled");
+    if ((error as Error).name === "AbortError") {
+      warnings.push(
+        "Refreshing the running codexm-managed Codex Desktop session was interrupted after the local auth switched. Relaunch Codex Desktop or rerun switch --force to apply the change immediately.",
+      );
+      return;
+    }
+
     warnings.push(
       `Failed to refresh the running codexm-managed Codex Desktop session: ${(error as Error).message}`,
     );
     return;
   }
+
+  reporter?.stop("cancelled");
 
   try {
     const runningApps = await desktopLauncher.listRunningApps();
@@ -585,6 +675,11 @@ export async function runCli(
   };
   const store = options.store ?? createAccountStore();
   const desktopLauncher = options.desktopLauncher ?? createCodexDesktopLauncher();
+  const interruptSignal = options.interruptSignal;
+  const managedDesktopWaitStatusDelayMs =
+    options.managedDesktopWaitStatusDelayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
+  const managedDesktopWaitStatusIntervalMs =
+    options.managedDesktopWaitStatusIntervalMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS;
   const parsed = parseArgs(argv);
   const json = parsed.flags.has("--json");
 
@@ -696,15 +791,16 @@ export async function runCli(
       case "switch": {
         const auto = parsed.flags.has("--auto");
         const dryRun = parsed.flags.has("--dry-run");
+        const force = parsed.flags.has("--force");
         const name = parsed.positionals[0];
 
         if (dryRun && !auto) {
-          throw new Error("Usage: codexm switch --auto [--dry-run] [--json]");
+          throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
         }
 
         if (auto) {
           if (name) {
-            throw new Error("Usage: codexm switch --auto [--dry-run] [--json]");
+            throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
           }
 
           const refreshResult = await store.refreshAllQuotas();
@@ -777,7 +873,13 @@ export async function runCli(
           }
           result.warnings = stripManagedDesktopWarning(result.warnings);
 
-          await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher);
+          await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
+            force,
+            signal: interruptSignal,
+            statusStream: streams.stderr,
+            statusDelayMs: managedDesktopWaitStatusDelayMs,
+            statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+          });
 
           const payload = {
             ok: true,
@@ -808,12 +910,18 @@ export async function runCli(
         }
 
         if (!name) {
-          throw new Error("Usage: codexm switch <name>");
+          throw new Error("Usage: codexm switch <name> [--force]");
         }
 
         const result = await store.switchAccount(name);
         result.warnings = stripManagedDesktopWarning(result.warnings);
-        await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher);
+        await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
+          force,
+          signal: interruptSignal,
+          statusStream: streams.stderr,
+          statusDelayMs: managedDesktopWaitStatusDelayMs,
+          statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+        });
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         try {
           await store.refreshQuotaForAccount(result.account.name);
