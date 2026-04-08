@@ -253,11 +253,15 @@ Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
 `);
 }
 
+const NON_MANAGED_DESKTOP_WARNING_PREFIX = "Detected running codex processes (";
+
+function formatNonManagedDesktopWarning(pids: number[]): string {
+  return `${NON_MANAGED_DESKTOP_WARNING_PREFIX}${pids.join(", ")}). Existing sessions may still hold the previous login state. Use "codexm launch" to start Codex Desktop with the selected auth.`;
+}
+
 function stripManagedDesktopWarning(warnings: string[]): string[] {
   return warnings.filter(
-    (warning) =>
-      !warning.startsWith("Detected running codex processes (") ||
-      !warning.endsWith("Existing sessions may still hold the previous login state."),
+    (warning) => !warning.startsWith(NON_MANAGED_DESKTOP_WARNING_PREFIX),
   );
 }
 
@@ -369,7 +373,7 @@ async function refreshManagedDesktopAfterSwitch(
     }
 
     warnings.push(
-      `Detected running codex processes (${runningApps.map((app) => app.pid).join(", ")}). Existing sessions may still hold the previous login state.`,
+      formatNonManagedDesktopWarning(runningApps.map((app) => app.pid)),
     );
   } catch {
     // Keep Desktop detection best-effort so switch success does not depend on local process inspection.
