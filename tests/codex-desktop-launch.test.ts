@@ -418,6 +418,119 @@ describe("codex-desktop-launch", () => {
     }
   });
 
+  test("reads the current managed quota snapshot over the bridge MCP channel", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const sentMessages: string[] = [];
+
+    try {
+      const launcher = createCodexDesktopLauncher({
+        statePath,
+        execFileImpl: async (file) => {
+          if (file === "ps") {
+            return {
+              stdout:
+                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223\n",
+              stderr: "",
+            };
+          }
+
+          throw new Error(`unexpected command: ${file}`);
+        },
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              type: "page",
+              url: "app://-/index.html?hostId=local",
+              webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/page/1",
+            },
+          ],
+        }),
+        createWebSocketImpl: () => {
+          const socket = {
+            onopen: null as (() => void) | null,
+            onmessage: null as ((event: { data: unknown }) => void) | null,
+            onerror: null as ((event: unknown) => void) | null,
+            onclose: null as (() => void) | null,
+            send(data: string) {
+              sentMessages.push(data);
+              const payload = JSON.parse(data) as { id: number };
+              queueMicrotask(() => {
+                socket.onmessage?.({
+                  data: JSON.stringify({
+                    id: payload.id,
+                    result: {
+                      result: {
+                        type: "object",
+                        value: {
+                          rateLimits: {
+                            planType: "plus",
+                            primary: {
+                              usedPercent: 12,
+                              resetsAt: 1_773_868_641,
+                            },
+                            secondary: {
+                              usedPercent: 47,
+                              resetsAt: 1_773_890_040,
+                            },
+                            credits: {
+                              hasCredits: true,
+                              unlimited: false,
+                              balance: "11",
+                            },
+                          },
+                        },
+                      },
+                    },
+                  }),
+                });
+              });
+            },
+            close() {
+              return;
+            },
+          };
+
+          queueMicrotask(() => {
+            socket.onopen?.();
+          });
+
+          return socket;
+        },
+      });
+
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
+        managed_by_codexm: true,
+        started_at: "2026-04-07T00:00:00.000Z",
+      });
+
+      await expect(launcher.readManagedCurrentQuota()).resolves.toMatchObject({
+        plan_type: "plus",
+        credits_balance: 11,
+        unlimited: false,
+        five_hour: {
+          used_percent: 12,
+          reset_at: "2026-03-18T21:17:21.000Z",
+        },
+        one_week: {
+          used_percent: 47,
+          reset_at: "2026-03-19T03:14:00.000Z",
+        },
+      });
+      expect(sentMessages).toHaveLength(1);
+      expect(sentMessages[0]).toContain('"method":"Runtime.evaluate"');
+      expect(sentMessages[0]).toContain("account/rateLimits/read");
+      expect(sentMessages[0]).toContain('\\"mcp-request\\"');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("waits for a managed desktop thread to finish by polling MCP thread state", async () => {
     const homeDir = await createTempHome();
     const statePath = join(homeDir, ".codex-team", "desktop-state.json");

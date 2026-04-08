@@ -77,6 +77,23 @@ export interface ManagedQuotaSignal {
   bodySnippet: string | null;
 }
 
+export interface ManagedCurrentQuotaSnapshot {
+  plan_type: string | null;
+  credits_balance: number | null;
+  unlimited: boolean;
+  five_hour: {
+    used_percent: number;
+    window_seconds: number;
+    reset_at: string | null;
+  } | null;
+  one_week: {
+    used_percent: number;
+    window_seconds: number;
+    reset_at: string | null;
+  } | null;
+  fetched_at: string;
+}
+
 export interface CodexDesktopLauncher {
   findInstalledApp(): Promise<string | null>;
   listRunningApps(): Promise<RunningCodexDesktop[]>;
@@ -87,6 +104,7 @@ export interface CodexDesktopLauncher {
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;
   isManagedDesktopRunning(): Promise<boolean>;
+  readManagedCurrentQuota(): Promise<ManagedCurrentQuotaSnapshot | null>;
   applyManagedSwitch(options?: {
     force?: boolean;
     timeoutMs?: number;
@@ -427,6 +445,170 @@ function buildManagedWatchProbeExpression(): string {
 })()`;
 }
 
+function buildManagedCurrentQuotaExpression(): string {
+  return `(async () => {
+  const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
+  const rpcTimeoutMs = 5000;
+
+  const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  const toError = (value, fallback) => {
+    if (value instanceof Error) {
+      return value;
+    }
+
+    const message =
+      typeof value === "string"
+        ? value
+        : isRecord(value) && typeof value.message === "string"
+          ? value.message
+          : fallback;
+    return new Error(message);
+  };
+
+  const postMessage = async (message) => {
+    if (!window.electronBridge || typeof window.electronBridge.sendMessageFromView !== "function") {
+      throw new Error("Codex Desktop bridge is unavailable.");
+    }
+
+    await window.electronBridge.sendMessageFromView(message);
+  };
+
+  const pendingResponses = new Map();
+  let nextRequestId = 1;
+
+  const onMessage = (event) => {
+    const data = event?.data;
+    if (!isRecord(data) || data.type !== "mcp-response" || !isRecord(data.message)) {
+      return;
+    }
+
+    const responseId =
+      typeof data.message.id === "string" || typeof data.message.id === "number"
+        ? String(data.message.id)
+        : null;
+    if (!responseId) {
+      return;
+    }
+
+    const pending = pendingResponses.get(responseId);
+    if (!pending) {
+      return;
+    }
+
+    pendingResponses.delete(responseId);
+    window.clearTimeout(pending.timeoutHandle);
+
+    if (isRecord(data.message.error)) {
+      pending.reject(toError(data.message.error, "Codex Desktop bridge request failed."));
+      return;
+    }
+
+    pending.resolve(data.message.result);
+  };
+
+  window.addEventListener("message", onMessage);
+
+  const sendRpcRequest = async (method, params = {}) => {
+    const requestId = "codexm-current-" + String(nextRequestId++);
+
+    return await new Promise((resolve, reject) => {
+      const timeoutHandle = window.setTimeout(() => {
+        pendingResponses.delete(requestId);
+        reject(new Error("Timed out waiting for Codex Desktop bridge response."));
+      }, rpcTimeoutMs);
+
+      pendingResponses.set(requestId, {
+        resolve,
+        reject,
+        timeoutHandle,
+      });
+
+      void postMessage({
+        type: "mcp-request",
+        hostId,
+        request: {
+          id: requestId,
+          method,
+          params,
+        },
+      }).catch((error) => {
+        pendingResponses.delete(requestId);
+        window.clearTimeout(timeoutHandle);
+        reject(toError(error, "Failed to send Codex Desktop bridge request."));
+      });
+    });
+  };
+
+  try {
+    const result = await sendRpcRequest("account/rateLimits/read", {});
+    return isRecord(result) ? result : null;
+  } finally {
+    for (const pending of pendingResponses.values()) {
+      window.clearTimeout(pending.timeoutHandle);
+    }
+    pendingResponses.clear();
+    window.removeEventListener("message", onMessage);
+  }
+})()`;
+}
+
+function epochSecondsToIsoString(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return new Date(value * 1000).toISOString();
+}
+
+function normalizeManagedQuotaWindow(
+  value: unknown,
+  fallbackWindowSeconds: number,
+): ManagedCurrentQuotaSnapshot["five_hour"] {
+  if (!isRecord(value) || typeof value.usedPercent !== "number") {
+    return null;
+  }
+
+  const windowDurationMins =
+    typeof value.windowDurationMins === "number" && Number.isFinite(value.windowDurationMins)
+      ? value.windowDurationMins
+      : null;
+
+  return {
+    used_percent: value.usedPercent,
+    window_seconds: windowDurationMins === null ? fallbackWindowSeconds : windowDurationMins * 60,
+    reset_at: epochSecondsToIsoString(value.resetsAt),
+  };
+}
+
+function normalizeManagedCurrentQuotaSnapshot(value: unknown): ManagedCurrentQuotaSnapshot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const rateLimits = isRecord(value.rateLimits) ? value.rateLimits : null;
+  if (!rateLimits) {
+    return null;
+  }
+
+  const credits = isRecord(rateLimits.credits) ? rateLimits.credits : null;
+  const balanceValue = credits?.balance;
+  const creditsBalance =
+    typeof balanceValue === "string" && balanceValue.trim() !== ""
+      ? Number(balanceValue)
+      : typeof balanceValue === "number"
+        ? balanceValue
+        : null;
+
+  return {
+    plan_type: typeof rateLimits.planType === "string" ? rateLimits.planType : null,
+    credits_balance: Number.isFinite(creditsBalance) ? creditsBalance : null,
+    unlimited: credits?.unlimited === true,
+    five_hour: normalizeManagedQuotaWindow(rateLimits.primary, 18_000),
+    one_week: normalizeManagedQuotaWindow(rateLimits.secondary, 604_800),
+    fetched_at: new Date().toISOString(),
+  };
+}
+
 interface ProbeConsolePayload {
   kind?: unknown;
   message?: unknown;
@@ -686,6 +868,95 @@ async function evaluateDevtoolsExpression(
 
       cleanup();
       resolve();
+    };
+
+    socket.onerror = () => {
+      cleanup();
+      reject(new Error("Failed to communicate with Codex Desktop devtools."));
+    };
+
+    socket.onclose = () => {
+      cleanup();
+      reject(new Error("Codex Desktop devtools connection closed before replying."));
+    };
+  });
+}
+
+async function evaluateDevtoolsExpressionWithResult<T>(
+  createWebSocketImpl: CreateWebSocketLike,
+  webSocketDebuggerUrl: string,
+  expression: string,
+  timeoutMs: number,
+): Promise<T> {
+  const socket = createWebSocketImpl(webSocketDebuggerUrl);
+
+  return await new Promise<T>((resolve, reject) => {
+    const requestId = 1;
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for Codex Desktop devtools response."));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      socket.close();
+    };
+
+    socket.onopen = () => {
+      socket.send(
+        JSON.stringify({
+          id: requestId,
+          method: "Runtime.evaluate",
+          params: {
+            expression,
+            awaitPromise: true,
+            returnByValue: true,
+          },
+        }),
+      );
+    };
+
+    socket.onmessage = (event) => {
+      if (typeof event.data !== "string") {
+        return;
+      }
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      if (!isRecord(payload) || payload.id !== requestId) {
+        return;
+      }
+
+      if (isRecord(payload.error)) {
+        cleanup();
+        reject(new Error(String(payload.error.message ?? "Codex Desktop devtools request failed.")));
+        return;
+      }
+
+      const result = isRecord(payload.result) ? payload.result : null;
+      if (!result || !isRecord(result.result)) {
+        cleanup();
+        reject(new Error("Codex Desktop devtools request returned an invalid result."));
+        return;
+      }
+
+      if (isRecord(result.exceptionDetails)) {
+        cleanup();
+        reject(new Error("Codex Desktop rejected the devtools request."));
+        return;
+      }
+
+      cleanup();
+      resolve(result.result.value as T);
     };
 
     socket.onerror = () => {
@@ -1142,6 +1413,28 @@ export function createCodexDesktopLauncher(options: {
     return isManagedDesktopProcess(runningApps, state);
   }
 
+  async function readManagedCurrentQuota(): Promise<ManagedCurrentQuotaSnapshot | null> {
+    const state = await readManagedState();
+    if (!state) {
+      return null;
+    }
+
+    const runningApps = await listRunningApps();
+    if (!isManagedDesktopProcess(runningApps, state)) {
+      return null;
+    }
+
+    const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
+    const rawResult = await evaluateDevtoolsExpressionWithResult<unknown>(
+      createWebSocketImpl,
+      webSocketDebuggerUrl,
+      buildManagedCurrentQuotaExpression(),
+      DEVTOOLS_REQUEST_TIMEOUT_MS,
+    );
+
+    return normalizeManagedCurrentQuotaSnapshot(rawResult);
+  }
+
   async function applyManagedSwitch(options?: {
     force?: boolean;
     timeoutMs?: number;
@@ -1390,6 +1683,7 @@ export function createCodexDesktopLauncher(options: {
     writeManagedState,
     clearManagedState,
     isManagedDesktopRunning,
+    readManagedCurrentQuota,
     applyManagedSwitch,
     watchManagedQuotaSignals,
   };

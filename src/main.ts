@@ -15,6 +15,7 @@ import {
 import {
   createCodexDesktopLauncher,
   type CodexDesktopLauncher,
+  type ManagedCurrentQuotaSnapshot,
   type ManagedCodexDesktopState,
   type ManagedQuotaSignal,
   type RunningCodexDesktop,
@@ -91,7 +92,7 @@ const COMMAND_NAMES = [
 const GLOBAL_FLAGS = new Set(["--help", "--version", "--debug"]);
 
 const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
-  current: new Set(["--json"]),
+  current: new Set(["--json", "--refresh"]),
   list: new Set(["--json"]),
   save: new Set(["--force", "--json"]),
   update: new Set(["--json"]),
@@ -243,7 +244,7 @@ function printHelp(stream: NodeJS.WriteStream): void {
 Usage:
   codexm --version
   codexm --help
-  codexm current [--json]
+  codexm current [--refresh] [--json]
   codexm list [name] [--json]
   codexm save <name> [--force] [--json]
   codexm update [--json]
@@ -257,6 +258,8 @@ Usage:
 Global flags: --help, --version, --debug
 
 Notes:
+  codexm current shows live usage when a managed Codex Desktop session is available.
+  codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.
   codexm list refreshes quota data, shows the current managed account, and marks current rows with "*".
   Run codexm launch from an external terminal if you need to restart Codex Desktop.
   Unknown commands and flags fail fast; close matches include a suggestion.
@@ -396,7 +399,44 @@ async function refreshManagedDesktopAfterSwitch(
   }
 }
 
-function describeCurrentStatus(status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>): string {
+function describeCurrentUsageSummary(
+  quota: ReturnType<typeof toCliQuotaSummary> | null,
+  unavailableReason: string | null,
+  sourceLabel?: string,
+): string {
+  if (quota === null) {
+    return unavailableReason ? `Usage: ${unavailableReason}` : "Usage: unavailable";
+  }
+
+  if (quota.refresh_status !== "ok") {
+    if (quota.refresh_status === "unsupported") {
+      return "Usage: unsupported";
+    }
+
+    return `Usage: ${quota.refresh_status}${quota.error_message ? ` | ${quota.error_message}` : ""}`;
+  }
+
+  return [
+    `Usage: ${quota.available ?? "unknown"}`,
+    `5H ${quota.five_hour?.used_percent ?? "-"}% used`,
+    `1W ${quota.one_week?.used_percent ?? "-"}% used`,
+    sourceLabel ??
+      `fetched ${
+        quota.fetched_at
+          ? dayjs.utc(quota.fetched_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm")
+          : "unknown"
+      }`,
+  ].join(" | ");
+}
+
+function describeCurrentStatus(
+  status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
+  usage?: {
+    quota: ReturnType<typeof toCliQuotaSummary> | null;
+    unavailableReason: string | null;
+    sourceLabel?: string;
+  },
+): string {
   const lines: string[] = [];
 
   if (!status.exists) {
@@ -418,6 +458,12 @@ function describeCurrentStatus(status: Awaited<ReturnType<AccountStore["getCurre
     lines.push(`Warning: ${warning}`);
   }
 
+  if (usage) {
+    lines.push(
+      describeCurrentUsageSummary(usage.quota, usage.unavailableReason, usage.sourceLabel),
+    );
+  }
+
   return lines.join("\n");
 }
 
@@ -432,6 +478,25 @@ function createDebugLogger(
   return (message: string) => {
     stream.write(`[debug] ${message}\n`);
   };
+}
+
+async function tryReadManagedCurrentQuota(
+  desktopLauncher: CodexDesktopLauncher,
+  debugLog?: (message: string) => void,
+): Promise<ReturnType<typeof toCliQuotaSummary> | null> {
+  try {
+    const quota = await desktopLauncher.readManagedCurrentQuota();
+    if (!quota) {
+      debugLog?.("current: managed MCP quota unavailable");
+      return null;
+    }
+
+    debugLog?.("current: using managed MCP quota");
+    return toCliQuotaSummaryFromManagedCurrentQuota(quota);
+  } catch (error) {
+    debugLog?.(`current: managed MCP quota read failed: ${(error as Error).message}`);
+    return null;
+  }
 }
 
 interface AutoSwitchExecutionResult {
@@ -596,6 +661,36 @@ function toCliQuotaRefreshResult(result: {
     successes: result.successes.map(toCliQuotaSummary),
     failures: result.failures,
   };
+}
+
+function toCliQuotaSummaryFromManagedCurrentQuota(quota: ManagedCurrentQuotaSnapshot) {
+  const normalizeWindow = (
+    window: ManagedCurrentQuotaSnapshot["five_hour"] | ManagedCurrentQuotaSnapshot["one_week"],
+  ): AccountQuotaSummary["five_hour"] =>
+    window
+      ? {
+          used_percent: window.used_percent,
+          window_seconds: window.window_seconds,
+          ...(window.reset_at ? { reset_at: window.reset_at } : {}),
+        }
+      : null;
+
+  const account: AccountQuotaSummary = {
+    name: "__current__",
+    account_id: "__current__",
+    user_id: null,
+    identity: "__current__",
+    plan_type: quota.plan_type,
+    credits_balance: quota.credits_balance,
+    status: "ok",
+    fetched_at: quota.fetched_at,
+    error_message: null,
+    unlimited: quota.unlimited,
+    five_hour: normalizeWindow(quota.five_hour),
+    one_week: normalizeWindow(quota.one_week),
+  };
+
+  return toCliQuotaSummary(account);
 }
 
 function computeRemainingPercent(usedPercent: number | undefined): number | null {
@@ -983,14 +1078,77 @@ export async function runCli(
 
     switch (parsed.command) {
       case "current": {
+        const refresh = parsed.flags.has("--refresh");
         const result = await store.getCurrentStatus();
+        let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
+        let usageUnavailableReason: string | null = null;
+        let usageSourceLabel: string | null = null;
+
+        if (!refresh && result.exists && result.matched_accounts.length === 1) {
+          quota = await tryReadManagedCurrentQuota(desktopLauncher, debugLog);
+          if (quota) {
+            usageSourceLabel = "live";
+          }
+        }
+
+        if (refresh) {
+          if (!result.exists) {
+            usageUnavailableReason = "unavailable (current auth is missing)";
+          } else if (result.matched_accounts.length === 0) {
+            usageUnavailableReason = "unavailable (current auth is unmanaged)";
+          } else if (result.matched_accounts.length > 1) {
+            usageUnavailableReason = "unavailable (current auth matches multiple managed accounts)";
+          } else {
+            const currentName = result.matched_accounts[0];
+            quota = await tryReadManagedCurrentQuota(desktopLauncher, debugLog);
+            if (quota) {
+              usageSourceLabel = "refreshed via mcp";
+            } else {
+              const quotaResult = await store.refreshQuotaForAccount(currentName);
+              const quotaList = await store.listQuotaSummaries();
+              const matched =
+                quotaList.accounts.find((account) => account.name === quotaResult.account.name) ??
+                null;
+              quota = matched ? toCliQuotaSummary(matched) : null;
+              if (quota) {
+                usageSourceLabel = "refreshed via api";
+              }
+            }
+          }
+        }
+
         debugLog(
-          `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"}`,
+          `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"} refresh=${refresh} quota_refreshed=${quota !== null} quota_source=${usageSourceLabel ?? "none"}`,
         );
         if (json) {
-          writeJson(streams.stdout, result);
+          writeJson(
+            streams.stdout,
+            refresh || quota
+              ? {
+                  ...result,
+                  quota,
+                }
+              : result,
+          );
         } else {
-          streams.stdout.write(`${describeCurrentStatus(result)}\n`);
+          streams.stdout.write(
+            `${describeCurrentStatus(
+              result,
+              refresh
+                ? {
+                    quota,
+                    unavailableReason: usageUnavailableReason,
+                    sourceLabel: usageSourceLabel ?? undefined,
+                  }
+                : quota
+                  ? {
+                      quota,
+                      unavailableReason: usageUnavailableReason,
+                      sourceLabel: usageSourceLabel ?? undefined,
+                    }
+                  : undefined,
+            )}\n`,
+          );
         }
         return 0;
       }

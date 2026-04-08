@@ -10,6 +10,7 @@ import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store.js";
 import type {
   CodexDesktopLauncher,
+  ManagedCurrentQuotaSnapshot,
   ManagedCodexDesktopState,
   RunningCodexDesktop,
 } from "../src/codex-desktop-launch.js";
@@ -53,6 +54,7 @@ function createDesktopLauncherStub(overrides: Partial<{
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
+  readManagedCurrentQuota: () => Promise<ManagedCurrentQuotaSnapshot | null>;
   isRunningInsideDesktopShell: () => Promise<boolean>;
   applyManagedSwitch: (options?: {
     force?: boolean;
@@ -82,6 +84,7 @@ function createDesktopLauncherStub(overrides: Partial<{
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    readManagedCurrentQuota: overrides.readManagedCurrentQuota ?? (async () => null),
     isRunningInsideDesktopShell: overrides.isRunningInsideDesktopShell ?? (async () => false),
     applyManagedSwitch: overrides.applyManagedSwitch ?? (async () => false),
     watchManagedQuotaSignals: overrides.watchManagedQuotaSignals ?? (async () => undefined),
@@ -243,6 +246,238 @@ describe("CLI", () => {
         exists: true,
         managed: true,
         matched_accounts: ["cli-main"],
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current best-effort shows live usage when managed MCP quota is available", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-cli-current-live");
+      await runCli(["save", "current-live", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 11,
+            unlimited: false,
+            five_hour: {
+              used_percent: 12,
+              window_seconds: 18_000,
+              reset_at: "2026-03-18T21:17:21.000Z",
+            },
+            one_week: {
+              used_percent: 47,
+              window_seconds: 604_800,
+              reset_at: "2026-03-19T03:14:00.000Z",
+            },
+            fetched_at: "2026-04-08T13:28:00.000Z",
+          }),
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: current-live");
+      expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | live");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --refresh shows a one-line usage summary for the current managed account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 12,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 400,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 47,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh");
+      await runCli(["save", "current-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: current-main");
+      expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | refreshed via api");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --refresh prefers managed MCP quota over the usage API", async () => {
+    const homeDir = await createTempHome();
+    let fetchCalled = false;
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          fetchCalled = true;
+          return textResponse("unexpected", 500);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-mcp");
+      await runCli(["save", "current-mcp", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 11,
+            unlimited: false,
+            five_hour: {
+              used_percent: 9,
+              window_seconds: 18_000,
+              reset_at: "2026-03-18T21:17:21.000Z",
+            },
+            one_week: {
+              used_percent: 31,
+              window_seconds: 604_800,
+              reset_at: "2026-03-19T03:14:00.000Z",
+            },
+            fetched_at: "2026-04-08T13:29:00.000Z",
+          }),
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(fetchCalled).toBe(false);
+      expect(stdout.read()).toContain("Usage: available | 5H 9% used | 1W 31% used | refreshed via mcp");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --refresh --json includes refreshed quota data", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 15,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 400,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 45,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-json");
+      await runCli(["save", "current-json", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh", "--json"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        exists: true,
+        managed: true,
+        matched_accounts: ["current-json"],
+        quota: {
+          available: "available",
+          refresh_status: "ok",
+          credits_balance: 11,
+          five_hour: {
+            used_percent: 15,
+          },
+          one_week: {
+            used_percent: 45,
+          },
+        },
       });
     } finally {
       await cleanupTempHome(homeDir);
