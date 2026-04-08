@@ -709,6 +709,7 @@ wire_api = "responses"
 
       expect(exitCode).toBe(0);
       expect(stdout.read()).toContain("Existing sessions may still hold the previous login state.");
+      expect(stdout.read()).toContain('Use "codexm launch" to start Codex Desktop with the selected auth.');
     } finally {
       await cleanupTempHome(homeDir);
     }
