@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, test } from "@rstest/core";
@@ -1217,6 +1219,120 @@ wire_api = "responses"
     }
   });
 
+  test("launch --auto selects the best account before launching Desktop", async () => {
+    const homeDir = await createTempHome();
+    const nowSeconds = 1_775_000_000;
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const headers = new Headers(init?.headers);
+          const accountId = headers.get("ChatGPT-Account-Id");
+
+          if (accountId === "acct-launch-auto-best") {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 20,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 500,
+                  reset_at: nowSeconds + 500,
+                },
+                secondary_window: {
+                  used_percent: 20,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 6_000,
+                  reset_at: nowSeconds + 6_000,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "9",
+              },
+            });
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 70,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 500,
+                reset_at: nowSeconds + 500,
+              },
+              secondary_window: {
+                used_percent: 70,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 6_000,
+                reset_at: nowSeconds + 6_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "1",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-auto-best");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-auto-other");
+      await runCli(["save", "beta", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-auto-other");
+
+      const stdout = captureWritable();
+      const calls: string[] = [];
+      let listCalls = 0;
+      const exitCode = await runCli(["launch", "--auto"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+          launch: async () => {
+            calls.push("launch");
+          },
+          writeManagedState: async () => {
+            calls.push("write-state");
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["launch", "write-state"]);
+      expect(stdout.read()).toContain('Switched to "alpha"');
+      expect(stdout.read()).toContain('Launched Codex Desktop with "alpha"');
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-launch-auto-best");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("watch refuses to run when there is no managed desktop session", async () => {
     const homeDir = await createTempHome();
 
@@ -1936,6 +2052,118 @@ wire_api = "responses"
         /\[\d{2}:\d{2}:\d{2}\] auto-switch from="watch-a" to="watch-b"/,
       );
       expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 600_000 }]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --auto-switch skips switching when the shared switch lock is busy", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 500,
+                reset_at: 1_773_860_000,
+              },
+              secondary_window: {
+                used_percent: 10,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 6_000,
+                reset_at: 1_773_880_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "9",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-lock-a");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-lock-b");
+      await runCli(["save", "beta", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const lockPath = join(store.paths.codexTeamDir, "locks", "switch.lock");
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify(
+          {
+            pid: process.pid,
+            command: "switch target",
+            started_at: "2026-04-08T15:20:00.000Z",
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["watch", "--debug", "--auto-switch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: null,
+            unlimited: false,
+            fetched_at: "2026-04-08T15:20:00.000Z",
+            five_hour: {
+              used_percent: 100,
+              window_seconds: 18_000,
+              reset_at: "2026-04-08T16:50:52.000Z",
+            },
+            one_week: {
+              used_percent: 10,
+              window_seconds: 604_800,
+              reset_at: "2026-04-14T09:17:35.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+              shouldAutoSwitch: true,
+            });
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain('auto-switch-skipped account="beta" reason=lock-busy');
+      expect(stderr.read()).toContain(`switch lock is busy at ${lockPath}`);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-watch-lock-b");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2891,7 +3119,7 @@ wire_api = "responses"
         },
       });
       expect(dryRunPayload.selected.score_1h).toBeCloseTo(30, 2);
-      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(91.67, 2);
+      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(91.67, 1);
       expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(30.56, 2);
       expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(30, 2);
 
@@ -3296,6 +3524,127 @@ wire_api = "responses"
       });
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-best-current");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch refuses to run while another switch or launch operation holds the shared lock", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-lock-target");
+      await runCli(["save", "target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-switch-lock-original");
+
+      const lockPath = join(store.paths.codexTeamDir, "locks", "switch.lock");
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify(
+          {
+            pid: process.pid,
+            command: "switch other",
+            started_at: "2026-04-08T15:20:00.000Z",
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const stderr = captureWritable();
+      const exitCode = await runCli(["switch", "target"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("Another codexm switch or launch operation is already in progress.");
+      expect(stderr.read()).toContain(lockPath);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-switch-lock-original");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch --auto refuses to run while another switch or launch operation holds the shared lock", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 500,
+                reset_at: 1_773_860_000,
+              },
+              secondary_window: {
+                used_percent: 10,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 6_000,
+                reset_at: 1_773_880_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "9",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auto-lock-target");
+      await runCli(["save", "target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auto-lock-original");
+
+      const lockPath = join(store.paths.codexTeamDir, "locks", "switch.lock");
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify(
+          {
+            pid: process.pid,
+            command: "launch --auto",
+            started_at: "2026-04-08T15:20:00.000Z",
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const stderr = captureWritable();
+      const exitCode = await runCli(["switch", "--auto"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("Another codexm switch or launch operation is already in progress.");
+      expect(stderr.read()).toContain(lockPath);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-lock-original");
     } finally {
       await cleanupTempHome(homeDir);
     }

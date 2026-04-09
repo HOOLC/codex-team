@@ -1,4 +1,4 @@
-import { copyFile, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { stdin as defaultStdin, stdout as defaultStdout, stderr as defaultStderr } from "node:process";
 import { join } from "node:path";
 import dayjs from "dayjs";
@@ -74,6 +74,20 @@ interface AutoSwitchCandidate {
   one_week_reset_at: string | null;
 }
 
+interface AutoSwitchSelection {
+  refreshResult: Awaited<ReturnType<AccountStore["refreshAllQuotas"]>>;
+  selected: AutoSwitchCandidate;
+  candidates: AutoSwitchCandidate[];
+  quota: ReturnType<typeof toCliQuotaSummary> | null;
+  warnings: string[];
+}
+
+interface SwitchLockOwner {
+  pid: number;
+  command: string;
+  started_at: string;
+}
+
 class CliUsageError extends Error {
   suggestion: string | null;
 
@@ -112,6 +126,8 @@ const AUTO_SWITCH_SCORING = {
 
 const AUTO_SWITCH_PROJECTION_HORIZON_SECONDS = 3_600;
 const AUTO_SWITCH_CURRENT_SCORE_TIEBREAK_DELTA = 5;
+const SWITCH_LOCKS_DIR_NAME = "locks";
+const SWITCH_LOCK_DIR_NAME = "switch.lock";
 
 const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   current: new Set(["--json", "--refresh"]),
@@ -119,7 +135,7 @@ const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   save: new Set(["--force", "--json"]),
   update: new Set(["--json"]),
   switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
-  launch: new Set(["--json"]),
+  launch: new Set(["--auto", "--json"]),
   watch: new Set(["--auto-switch", "--detach", "--status", "--stop"]),
   remove: new Set(["--yes", "--json"]),
   rename: new Set(["--json"]),
@@ -726,6 +742,14 @@ async function resolveWatchAccountLabel(store: AccountStore): Promise<string> {
 
   return "current";
 }
+
+async function resolveManagedAccountByName(
+  store: AccountStore,
+  name: string,
+): Promise<Awaited<ReturnType<AccountStore["listAccounts"]>>["accounts"][number] | null> {
+  const { accounts } = await store.listAccounts();
+  return accounts.find((account) => account.name === name) ?? null;
+}
 function describeCurrentStatus(
   status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
   usage?: {
@@ -830,18 +854,8 @@ async function performAutoSwitch(
   },
 ): Promise<AutoSwitchExecutionResult> {
   options.debugLog?.(`switch: mode=auto dry_run=${options.dryRun} force=${options.force}`);
-  const refreshResult = await store.refreshAllQuotas();
-  const candidates = rankAutoSwitchCandidates(refreshResult.successes);
-  if (candidates.length === 0) {
-    throw new Error("No auto-switch candidate has both 5H and 1W quota data available.");
-  }
-
-  const selected = candidates[0];
-  const selectedQuota =
-    refreshResult.successes.find((account) => account.name === selected.name) ?? null;
-  const quota = selectedQuota ? toCliQuotaSummary(selectedQuota) : null;
-  const warnings = refreshResult.failures.map((failure) => `${failure.name}: ${failure.error}`);
-
+  const selection = await selectAutoSwitchAccount(store);
+  const { refreshResult, selected, candidates, quota, warnings } = selection;
   if (options.dryRun) {
     options.debugLog?.(
       `switch: auto-selected target=${selected.name} candidates=${candidates.length} warnings=${warnings.length} dry_run=true`,
@@ -856,6 +870,48 @@ async function performAutoSwitch(
       warnings,
     };
   }
+
+  return performSelectedAutoSwitch(store, desktopLauncher, selection, options);
+}
+
+async function selectAutoSwitchAccount(store: AccountStore): Promise<AutoSwitchSelection> {
+  const refreshResult = await store.refreshAllQuotas();
+  const candidates = rankAutoSwitchCandidates(refreshResult.successes);
+  if (candidates.length === 0) {
+    throw new Error("No auto-switch candidate has both 5H and 1W quota data available.");
+  }
+
+  const selected = candidates[0];
+  const selectedQuota =
+    refreshResult.successes.find((account) => account.name === selected.name) ?? null;
+  const quota = selectedQuota ? toCliQuotaSummary(selectedQuota) : null;
+  const warnings = refreshResult.failures.map((failure) => `${failure.name}: ${failure.error}`);
+
+  return {
+    refreshResult,
+    selected,
+    candidates,
+    quota,
+    warnings,
+  };
+}
+
+async function performSelectedAutoSwitch(
+  store: AccountStore,
+  desktopLauncher: CodexDesktopLauncher,
+  selection: AutoSwitchSelection,
+  options: {
+    dryRun: boolean;
+    force: boolean;
+    signal?: AbortSignal;
+    statusStream?: NodeJS.WriteStream;
+    statusDelayMs?: number;
+    statusIntervalMs?: number;
+    timeoutMs?: number;
+    debugLog?: (message: string) => void;
+  },
+): Promise<AutoSwitchExecutionResult> {
+  const { refreshResult, selected, candidates, quota, warnings } = selection;
 
   const currentStatus = await store.getCurrentStatus();
   if (
@@ -903,6 +959,131 @@ async function performAutoSwitch(
     result,
     warnings: result.warnings,
   };
+}
+
+function getSwitchLockDir(store: AccountStore): string {
+  return join(store.paths.codexTeamDir, SWITCH_LOCKS_DIR_NAME, SWITCH_LOCK_DIR_NAME);
+}
+
+function getSwitchLockOwnerPath(store: AccountStore): string {
+  return join(getSwitchLockDir(store), "owner.json");
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ESRCH") {
+      return false;
+    }
+    return true;
+  }
+}
+
+async function readSwitchLockOwner(store: AccountStore): Promise<SwitchLockOwner | null> {
+  try {
+    const raw = await readFile(getSwitchLockOwnerPath(store), "utf8");
+    const parsed = JSON.parse(raw) as Partial<SwitchLockOwner>;
+    if (
+      typeof parsed.pid === "number" &&
+      typeof parsed.command === "string" &&
+      typeof parsed.started_at === "string"
+    ) {
+      return {
+        pid: parsed.pid,
+        command: parsed.command,
+        started_at: parsed.started_at,
+      };
+    }
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== "ENOENT") {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+async function tryAcquireSwitchLock(
+  store: AccountStore,
+  command: string,
+): Promise<
+  | { acquired: true; lockPath: string; release: () => Promise<void> }
+  | { acquired: false; lockPath: string; owner: SwitchLockOwner | null }
+> {
+  const locksDir = join(store.paths.codexTeamDir, SWITCH_LOCKS_DIR_NAME);
+  const lockPath = getSwitchLockDir(store);
+  const ownerPath = getSwitchLockOwnerPath(store);
+  await mkdir(locksDir, { recursive: true, mode: 0o700 });
+
+  const tryCreateLock = async (): Promise<boolean> => {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+      return true;
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code === "EEXIST") {
+        return false;
+      }
+      throw error;
+    }
+  };
+
+  let created = await tryCreateLock();
+  if (!created) {
+    const existingOwner = await readSwitchLockOwner(store);
+    if (!existingOwner || !isProcessAlive(existingOwner.pid)) {
+      await rm(lockPath, { recursive: true, force: true });
+      created = await tryCreateLock();
+    }
+  }
+
+  if (!created) {
+    return {
+      acquired: false,
+      lockPath,
+      owner: await readSwitchLockOwner(store),
+    };
+  }
+
+  const owner: SwitchLockOwner = {
+    pid: process.pid,
+    command,
+    started_at: new Date().toISOString(),
+  };
+
+  try {
+    await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (error) {
+    await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+
+  return {
+    acquired: true,
+    lockPath,
+    release: async () => {
+      await rm(lockPath, { recursive: true, force: true });
+    },
+  };
+}
+
+function describeBusySwitchLock(lockPath: string, owner: SwitchLockOwner | null): string {
+  let message = `Another codexm switch or launch operation is already in progress. Lock: ${lockPath}`;
+  if (owner) {
+    message += ` (pid ${owner.pid}, command ${JSON.stringify(owner.command)}, started ${owner.started_at})`;
+  }
+  return message;
 }
 
 function formatUsagePercent(
@@ -1794,15 +1975,37 @@ export async function runCli(
             throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
           }
 
-          const autoSwitch = await performAutoSwitch(store, desktopLauncher, {
-            dryRun,
-            force,
-            signal: interruptSignal,
-            statusStream: streams.stderr,
-            statusDelayMs: managedDesktopWaitStatusDelayMs,
-            statusIntervalMs: managedDesktopWaitStatusIntervalMs,
-            debugLog,
-          });
+          const autoSwitch = dryRun
+            ? await performAutoSwitch(store, desktopLauncher, {
+                dryRun,
+                force,
+                signal: interruptSignal,
+                statusStream: streams.stderr,
+                statusDelayMs: managedDesktopWaitStatusDelayMs,
+                statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+                debugLog,
+              })
+            : await (async () => {
+                const autoSwitchCommand = "switch --auto";
+                const lock = await tryAcquireSwitchLock(store, autoSwitchCommand);
+                if (!lock.acquired) {
+                  throw new Error(describeBusySwitchLock(lock.lockPath, lock.owner));
+                }
+
+                try {
+                  return await performAutoSwitch(store, desktopLauncher, {
+                    dryRun,
+                    force,
+                    signal: interruptSignal,
+                    statusStream: streams.stderr,
+                    statusDelayMs: managedDesktopWaitStatusDelayMs,
+                    statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+                    debugLog,
+                  });
+                } finally {
+                  await lock.release();
+                }
+              })();
           const {
             refreshResult,
             selected,
@@ -1896,15 +2099,28 @@ export async function runCli(
         }
 
         debugLog(`switch: mode=manual target=${name} force=${force}`);
-        const result = await store.switchAccount(name);
-        result.warnings = stripManagedDesktopWarning(result.warnings);
-        await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
-          force,
-          signal: interruptSignal,
-          statusStream: streams.stderr,
-          statusDelayMs: managedDesktopWaitStatusDelayMs,
-          statusIntervalMs: managedDesktopWaitStatusIntervalMs,
-        });
+        const switchCommand = `switch ${name}`;
+        const lock = await tryAcquireSwitchLock(store, switchCommand);
+        if (!lock.acquired) {
+          throw new Error(describeBusySwitchLock(lock.lockPath, lock.owner));
+        }
+
+        const result = await (async () => {
+          try {
+            const switched = await store.switchAccount(name);
+            switched.warnings = stripManagedDesktopWarning(switched.warnings);
+            await refreshManagedDesktopAfterSwitch(switched.warnings, desktopLauncher, {
+              force,
+              signal: interruptSignal,
+              statusStream: streams.stderr,
+              statusDelayMs: managedDesktopWaitStatusDelayMs,
+              statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+            });
+            return switched;
+          } finally {
+            await lock.release();
+          }
+        })();
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         try {
           await store.refreshQuotaForAccount(result.account.name);
@@ -1951,9 +2167,10 @@ export async function runCli(
 
       case "launch": {
         const name = parsed.positionals[0] ?? null;
+        const auto = parsed.flags.has("--auto");
 
-        if (parsed.positionals.length > 1) {
-          throw new Error("Usage: codexm launch [name] [--json]");
+        if (parsed.positionals.length > 1 || (auto && name)) {
+          throw new Error("Usage: codexm launch [name] [--auto] [--json]");
         }
 
         if (await desktopLauncher.isRunningInsideDesktopShell()) {
@@ -2001,37 +2218,82 @@ export async function runCli(
         let switchedAccount: Awaited<ReturnType<AccountStore["switchAccount"]>>["account"] | null =
           null;
         let switchBackupPath: string | null = null;
-        if (name) {
-          const switchResult = await store.switchAccount(name);
-          warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
-          switchedAccount = switchResult.account;
-          switchBackupPath = switchResult.backup_path;
-          debugLog(`launch: pre-switched account=${switchResult.account.name}`);
-        }
+        const requestedTargetName = name;
+        if (auto || requestedTargetName) {
+          const launchCommand = auto ? "launch --auto" : `launch ${requestedTargetName}`;
+          const lock = await tryAcquireSwitchLock(store, launchCommand);
+          if (!lock.acquired) {
+            throw new Error(describeBusySwitchLock(lock.lockPath, lock.owner));
+          }
 
-        try {
-          await desktopLauncher.launch(appPath);
-          const managedState = await resolveManagedDesktopState(
-            desktopLauncher,
-            appPath,
-            runningApps,
-          );
-          if (!managedState) {
-            await desktopLauncher.clearManagedState().catch(() => undefined);
-            throw new Error(
-              "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+          try {
+            const targetName = auto
+              ? (await selectAutoSwitchAccount(store)).selected.name
+              : requestedTargetName;
+            if (auto) {
+              debugLog(`launch: auto-selected account=${targetName ?? "current"}`);
+            }
+            const currentStatus = await store.getCurrentStatus();
+            if (targetName && !currentStatus.matched_accounts.includes(targetName)) {
+              const switchResult = await store.switchAccount(targetName);
+              warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
+              switchedAccount = switchResult.account;
+              switchBackupPath = switchResult.backup_path;
+              debugLog(`launch: pre-switched account=${switchResult.account.name}`);
+            } else if (targetName) {
+              switchedAccount = await resolveManagedAccountByName(store, targetName);
+            }
+
+            try {
+              await desktopLauncher.launch(appPath);
+              const managedState = await resolveManagedDesktopState(
+                desktopLauncher,
+                appPath,
+                runningApps,
+              );
+              if (!managedState) {
+                await desktopLauncher.clearManagedState().catch(() => undefined);
+                throw new Error(
+                  "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+                );
+              }
+              await desktopLauncher.writeManagedState(managedState);
+              debugLog(
+                `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
+              );
+            } catch (error) {
+              if (switchedAccount) {
+                await restoreLaunchBackup(store, switchBackupPath).catch(() => undefined);
+                debugLog(
+                  `launch: restored previous auth after failure for account=${switchedAccount.name}`,
+                );
+              }
+              throw error;
+            }
+          } finally {
+            await lock.release();
+          }
+        } else {
+          try {
+            await desktopLauncher.launch(appPath);
+            const managedState = await resolveManagedDesktopState(
+              desktopLauncher,
+              appPath,
+              runningApps,
             );
+            if (!managedState) {
+              await desktopLauncher.clearManagedState().catch(() => undefined);
+              throw new Error(
+                "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+              );
+            }
+            await desktopLauncher.writeManagedState(managedState);
+            debugLog(
+              `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
+            );
+          } catch (error) {
+            throw error;
           }
-          await desktopLauncher.writeManagedState(managedState);
-          debugLog(
-            `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
-          );
-        } catch (error) {
-          if (switchedAccount) {
-            await restoreLaunchBackup(store, switchBackupPath).catch(() => undefined);
-            debugLog(`launch: restored previous auth after failure for account=${switchedAccount.name}`);
-          }
-          throw error;
         }
 
         if (json) {
@@ -2177,8 +2439,20 @@ export async function runCli(
               return;
             }
 
+            const lock = await tryAcquireSwitchLock(store, "watch --auto-switch");
+            if (!lock.acquired) {
+              debugLog(`watch: switch lock is busy at ${lock.lockPath}`);
+              streams.stdout.write(
+                `${formatWatchLogLine(
+                  describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "lock-busy"),
+                )}\n`,
+              );
+              return;
+            }
+
             const now = Date.now();
             if (switchInFlight || now - lastSwitchStartedAt < WATCH_SWITCH_COOLDOWN_MS) {
+              await lock.release();
               debugLog(
                 `watch: skipped auto switch for requestId=${quotaSignal.requestId} because another switch is already in progress`,
               );
@@ -2226,6 +2500,7 @@ export async function runCli(
               }
             } finally {
               switchInFlight = false;
+              await lock.release();
             }
           },
         });
