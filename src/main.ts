@@ -14,6 +14,7 @@ import {
 } from "./account-store.js";
 import {
   createCodexDesktopLauncher,
+  type ManagedCurrentAccountSnapshot,
   type CodexDesktopLauncher,
   type ManagedCurrentQuotaSnapshot,
   type ManagedCodexDesktopState,
@@ -81,6 +82,11 @@ interface AutoSwitchSelection {
   candidates: AutoSwitchCandidate[];
   quota: ReturnType<typeof toCliQuotaSummary> | null;
   warnings: string[];
+}
+
+interface CurrentStatusView extends Awaited<ReturnType<AccountStore["getCurrentStatus"]>> {
+  source: "auth.json" | "mcp+auth.json";
+  runtime_differs_from_local: boolean;
 }
 
 interface SwitchLockOwner {
@@ -787,7 +793,7 @@ async function ensureDetachedWatch(
 }
 
 function describeCurrentStatus(
-  status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
+  status: CurrentStatusView,
   usage?: {
     quota: ReturnType<typeof toCliQuotaSummary> | null;
     unavailableReason: string | null;
@@ -800,8 +806,13 @@ function describeCurrentStatus(
     lines.push("Current auth: missing");
   } else {
     lines.push("Current auth: present");
+    lines.push(
+      `Source: ${status.source === "mcp+auth.json" ? "managed Desktop (mcp + auth.json)" : "local auth.json"}`,
+    );
     lines.push(`Auth mode: ${status.auth_mode}`);
-    lines.push(`Identity: ${maskAccountId(status.identity ?? "")}`);
+    if (status.identity) {
+      lines.push(`Identity: ${maskAccountId(status.identity)}`);
+    }
     if (status.matched_accounts.length === 0) {
       lines.push("Managed account: no (unmanaged)");
     } else if (status.matched_accounts.length === 1) {
@@ -860,6 +871,49 @@ async function tryReadManagedCurrentQuota(
     debugLog?.(`current: managed MCP quota read failed: ${(error as Error).message}`);
     return null;
   }
+}
+
+async function tryReadManagedCurrentAccount(
+  desktopLauncher: CodexDesktopLauncher,
+  debugLog?: (message: string) => void,
+): Promise<ManagedCurrentAccountSnapshot | null> {
+  try {
+    const account = await desktopLauncher.readManagedCurrentAccount();
+    if (!account) {
+      debugLog?.("current: managed MCP account unavailable");
+      return null;
+    }
+
+    debugLog?.("current: using managed MCP account");
+    return account;
+  } catch (error) {
+    debugLog?.(`current: managed MCP account read failed: ${(error as Error).message}`);
+    return null;
+  }
+}
+
+function buildCurrentStatusView(
+  localStatus: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
+  runtimeAccount: ManagedCurrentAccountSnapshot | null,
+): CurrentStatusView {
+  const warnings = [...localStatus.warnings];
+  let runtimeDiffersFromLocal = false;
+
+  if (runtimeAccount && runtimeAccount.auth_mode !== localStatus.auth_mode) {
+    runtimeDiffersFromLocal = true;
+    warnings.push("Managed Desktop auth differs from ~/.codex/auth.json.");
+  }
+
+  return {
+    ...localStatus,
+    exists:
+      localStatus.exists ||
+      (runtimeAccount !== null && runtimeAccount.auth_mode !== null),
+    auth_mode: runtimeAccount?.auth_mode ?? localStatus.auth_mode,
+    warnings,
+    source: runtimeAccount ? "mcp+auth.json" : "auth.json",
+    runtime_differs_from_local: runtimeDiffersFromLocal,
+  };
 }
 
 interface AutoSwitchExecutionResult {
@@ -1820,7 +1874,9 @@ export async function runCli(
 
       case "current": {
         const refresh = parsed.flags.has("--refresh");
-        const result = await store.getCurrentStatus();
+        const localStatus = await store.getCurrentStatus();
+        const runtimeAccount = await tryReadManagedCurrentAccount(desktopLauncher, debugLog);
+        const result = buildCurrentStatusView(localStatus, runtimeAccount);
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         let usageUnavailableReason: string | null = null;
         let usageSourceLabel: string | null = null;
@@ -1859,7 +1915,7 @@ export async function runCli(
         }
 
         debugLog(
-          `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"} refresh=${refresh} quota_refreshed=${quota !== null} quota_source=${usageSourceLabel ?? "none"}`,
+          `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"} source=${result.source} runtime_differs=${result.runtime_differs_from_local} refresh=${refresh} quota_refreshed=${quota !== null} quota_source=${usageSourceLabel ?? "none"}`,
         );
         if (json) {
           writeJson(

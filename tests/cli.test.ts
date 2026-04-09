@@ -12,6 +12,7 @@ import { rankAutoSwitchCandidates, runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store.js";
 import type { AccountQuotaSummary } from "../src/account-store.js";
 import type {
+  ManagedCurrentAccountSnapshot,
   CodexDesktopLauncher,
   ManagedCurrentQuotaSnapshot,
   ManagedCodexDesktopState,
@@ -57,6 +58,7 @@ function createDesktopLauncherStub(overrides: Partial<{
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
+  readManagedCurrentAccount: () => Promise<ManagedCurrentAccountSnapshot | null>;
   readManagedCurrentQuota: () => Promise<ManagedCurrentQuotaSnapshot | null>;
   isRunningInsideDesktopShell: () => Promise<boolean>;
   applyManagedSwitch: (options?: {
@@ -109,6 +111,7 @@ function createDesktopLauncherStub(overrides: Partial<{
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    readManagedCurrentAccount: overrides.readManagedCurrentAccount ?? (async () => null),
     readManagedCurrentQuota: overrides.readManagedCurrentQuota ?? (async () => null),
     isRunningInsideDesktopShell: overrides.isRunningInsideDesktopShell ?? (async () => false),
     applyManagedSwitch: overrides.applyManagedSwitch ?? (async () => false),
@@ -380,6 +383,12 @@ describe("CLI", () => {
       const exitCode = await runCli(["current"], {
         store,
         desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "current-live@example.com",
+            plan_type: "plus",
+            requires_openai_auth: true,
+          }),
           readManagedCurrentQuota: async () => ({
             plan_type: "plus",
             credits_balance: 11,
@@ -403,8 +412,81 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(0);
       const output = stdout.read();
+      expect(output).toContain("Source: managed Desktop (mcp + auth.json)");
       expect(output).toContain("Managed account: current-live");
       expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | live");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --json reports mcp+auth source when managed Desktop account is available", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-cli-current-source");
+      await runCli(["save", "current-source", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--json"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "current-source@example.com",
+            plan_type: "plus",
+            requires_openai_auth: true,
+          }),
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        exists: true,
+        managed: true,
+        matched_accounts: ["current-source"],
+        source: "mcp+auth.json",
+        runtime_differs_from_local: false,
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current warns when managed Desktop auth differs from local auth.json", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentApiKeyAuth(homeDir, "sk-cli-current-drift");
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "drift@example.com",
+            plan_type: "plus",
+            requires_openai_auth: true,
+          }),
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Source: managed Desktop (mcp + auth.json)");
+      expect(output).toContain("Auth mode: chatgpt");
+      expect(output).toContain("Warning: Managed Desktop auth differs from ~/.codex/auth.json.");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -622,6 +704,10 @@ wire_api = "responses"
       const currentStdout = captureWritable();
       const currentCode = await runCli(["current", "--json"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => null,
+          readManagedCurrentQuota: async () => null,
+        }),
         stdout: currentStdout.stream,
         stderr: captureWritable().stream,
       });

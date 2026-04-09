@@ -105,6 +105,13 @@ export interface ManagedCurrentQuotaSnapshot {
   fetched_at: string;
 }
 
+export interface ManagedCurrentAccountSnapshot {
+  auth_mode: string | null;
+  email: string | null;
+  plan_type: string | null;
+  requires_openai_auth: boolean | null;
+}
+
 export interface CodexDesktopLauncher {
   findInstalledApp(): Promise<string | null>;
   listRunningApps(): Promise<RunningCodexDesktop[]>;
@@ -115,6 +122,7 @@ export interface CodexDesktopLauncher {
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;
   isManagedDesktopRunning(): Promise<boolean>;
+  readManagedCurrentAccount(): Promise<ManagedCurrentAccountSnapshot | null>;
   readManagedCurrentQuota(): Promise<ManagedCurrentQuotaSnapshot | null>;
   applyManagedSwitch(options?: {
     force?: boolean;
@@ -564,6 +572,112 @@ function buildManagedCurrentQuotaExpression(): string {
 })()`;
 }
 
+function buildManagedCurrentAccountExpression(): string {
+  return `(async () => {
+  const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
+  const rpcTimeoutMs = ${DEVTOOLS_REQUEST_TIMEOUT_MS};
+  const pendingResponses = new Map();
+  let nextRequestId = 1;
+
+  const toError = (value, fallback) => {
+    if (value instanceof Error) {
+      return value;
+    }
+    if (value && typeof value === "object" && typeof value.message === "string") {
+      return new Error(value.message);
+    }
+    if (typeof value === "string" && value.trim() !== "") {
+      return new Error(value);
+    }
+    return new Error(fallback);
+  };
+
+  const postMessage = async (message) => {
+    if (
+      typeof window === "undefined" ||
+      !window.electronBridge ||
+      typeof window.electronBridge.sendMessageFromView !== "function"
+    ) {
+      throw new Error("Codex Desktop bridge is unavailable.");
+    }
+
+    return await window.electronBridge.sendMessageFromView(message);
+  };
+
+  const onMessage = (event) => {
+    const data = event && typeof event === "object" ? event.data : null;
+    if (!data || typeof data !== "object") {
+      return;
+    }
+
+    if (data.hostId !== hostId) {
+      return;
+    }
+
+    if (data.type === "mcp-response" && data.message && typeof data.message.id === "string") {
+      const pending = pendingResponses.get(data.message.id);
+      if (!pending) {
+        return;
+      }
+
+      pendingResponses.delete(data.message.id);
+      window.clearTimeout(pending.timeoutHandle);
+
+      if (data.message.error) {
+        pending.reject(toError(data.message.error, "Codex Desktop bridge request failed."));
+        return;
+      }
+
+      pending.resolve(data.message.result);
+    }
+  };
+
+  window.addEventListener("message", onMessage);
+
+  const sendRpcRequest = async (method, params = {}) => {
+    const requestId = "codexm-current-account-" + String(nextRequestId++);
+
+    return await new Promise((resolve, reject) => {
+      const timeoutHandle = window.setTimeout(() => {
+        pendingResponses.delete(requestId);
+        reject(new Error("Timed out waiting for Codex Desktop bridge response."));
+      }, rpcTimeoutMs);
+
+      pendingResponses.set(requestId, {
+        resolve,
+        reject,
+        timeoutHandle,
+      });
+
+      void postMessage({
+        type: "mcp-request",
+        hostId,
+        request: {
+          id: requestId,
+          method,
+          params,
+        },
+      }).catch((error) => {
+        pendingResponses.delete(requestId);
+        window.clearTimeout(timeoutHandle);
+        reject(toError(error, "Failed to send Codex Desktop bridge request."));
+      });
+    });
+  };
+
+  try {
+    const result = await sendRpcRequest("account/read", { refreshToken: false });
+    return result && typeof result === "object" ? result : null;
+  } finally {
+    for (const pending of pendingResponses.values()) {
+      window.clearTimeout(pending.timeoutHandle);
+    }
+    pendingResponses.clear();
+    window.removeEventListener("message", onMessage);
+  }
+})()`;
+}
+
 function epochSecondsToIsoString(value: unknown): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return null;
@@ -621,6 +735,29 @@ function normalizeManagedCurrentQuotaSnapshot(value: unknown): ManagedCurrentQuo
       604_800,
     ),
     fetched_at: new Date().toISOString(),
+  };
+}
+
+function normalizeManagedCurrentAccountSnapshot(value: unknown): ManagedCurrentAccountSnapshot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const account = isRecord(value.account) ? value.account : null;
+  const accountType = account?.type;
+  const authMode =
+    accountType === "apiKey"
+      ? "apikey"
+      : accountType === "chatgpt"
+        ? "chatgpt"
+        : null;
+
+  return {
+    auth_mode: authMode,
+    email: typeof account?.email === "string" ? account.email : null,
+    plan_type: typeof account?.planType === "string" ? account.planType : null,
+    requires_openai_auth:
+      typeof value.requiresOpenaiAuth === "boolean" ? value.requiresOpenaiAuth : null,
   };
 }
 
@@ -1466,6 +1603,28 @@ export function createCodexDesktopLauncher(options: {
     return isManagedDesktopProcess(runningApps, state);
   }
 
+  async function readManagedCurrentAccount(): Promise<ManagedCurrentAccountSnapshot | null> {
+    const state = await readManagedState();
+    if (!state) {
+      return null;
+    }
+
+    const runningApps = await listRunningApps();
+    if (!isManagedDesktopProcess(runningApps, state)) {
+      return null;
+    }
+
+    const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
+    const rawResult = await evaluateDevtoolsExpressionWithResult<unknown>(
+      createWebSocketImpl,
+      webSocketDebuggerUrl,
+      buildManagedCurrentAccountExpression(),
+      DEVTOOLS_REQUEST_TIMEOUT_MS,
+    );
+
+    return normalizeManagedCurrentAccountSnapshot(rawResult);
+  }
+
   async function readManagedCurrentQuota(): Promise<ManagedCurrentQuotaSnapshot | null> {
     const state = await readManagedState();
     if (!state) {
@@ -1857,6 +2016,7 @@ export function createCodexDesktopLauncher(options: {
     writeManagedState,
     clearManagedState,
     isManagedDesktopRunning,
+    readManagedCurrentAccount,
     readManagedCurrentQuota,
     applyManagedSwitch,
     watchManagedQuotaSignals,
