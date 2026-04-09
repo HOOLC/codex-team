@@ -25,6 +25,7 @@ import {
 } from "./codex-desktop-launch.js";
 import {
   createWatchProcessManager,
+  type WatchProcessState,
   type WatchProcessManager,
 } from "./watch-process.js";
 
@@ -135,8 +136,8 @@ const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   save: new Set(["--force", "--json"]),
   update: new Set(["--json"]),
   switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
-  launch: new Set(["--auto", "--json"]),
-  watch: new Set(["--auto-switch", "--detach", "--status", "--stop"]),
+  launch: new Set(["--auto", "--watch", "--no-auto-switch", "--json"]),
+  watch: new Set(["--no-auto-switch", "--detach", "--status", "--stop"]),
   remove: new Set(["--yes", "--json"]),
   rename: new Set(["--json"]),
   completion: new Set(["--accounts"]),
@@ -290,8 +291,8 @@ Usage:
   codexm update [--json]
   codexm switch <name> [--force] [--json]
   codexm switch --auto [--dry-run] [--force] [--json]
-  codexm launch [name] [--json]
-  codexm watch [--auto-switch] [--detach] [--status] [--stop]
+  codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]
+  codexm watch [--no-auto-switch] [--detach] [--status] [--stop]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
 
@@ -320,12 +321,12 @@ function describeCommandFlag(flag: string): string {
       return `${flag}[print saved account names for shell completion]`;
     case "--auto":
       return `${flag}[switch to the best available account]`;
-    case "--auto-switch":
-      return `${flag}[switch automatically after terminal quota events]`;
     case "--debug":
       return `${flag}[enable debug logging]`;
     case "--detach":
       return `${flag}[run watch in the background]`;
+    case "--no-auto-switch":
+      return `${flag}[watch without switching accounts automatically]`;
     case "--dry-run":
       return `${flag}[show the selected account without switching]`;
     case "--force":
@@ -340,6 +341,8 @@ function describeCommandFlag(flag: string): string {
       return `${flag}[show background watch status]`;
     case "--stop":
       return `${flag}[stop the background watch]`;
+    case "--watch":
+      return `${flag}[start a detached watch after launch]`;
     case "--version":
       return `${flag}[print the installed version]`;
     case "--yes":
@@ -750,6 +753,39 @@ async function resolveManagedAccountByName(
   const { accounts } = await store.listAccounts();
   return accounts.find((account) => account.name === name) ?? null;
 }
+
+async function ensureDetachedWatch(
+  watchProcessManager: WatchProcessManager,
+  options: { autoSwitch: boolean; debug: boolean },
+): Promise<
+  | { action: "started" | "restarted"; state: WatchProcessState }
+  | { action: "reused"; state: WatchProcessState }
+> {
+  const status = await watchProcessManager.getStatus();
+  if (status.running && status.state) {
+    if (
+      status.state.auto_switch === options.autoSwitch &&
+      status.state.debug === options.debug
+    ) {
+      return {
+        action: "reused",
+        state: status.state,
+      };
+    }
+
+    await watchProcessManager.stop();
+    return {
+      action: "restarted",
+      state: await watchProcessManager.startDetached(options),
+    };
+  }
+
+  return {
+    action: "started",
+    state: await watchProcessManager.startDetached(options),
+  };
+}
+
 function describeCurrentStatus(
   status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
   usage?: {
@@ -2168,9 +2204,15 @@ export async function runCli(
       case "launch": {
         const name = parsed.positionals[0] ?? null;
         const auto = parsed.flags.has("--auto");
+        const watch = parsed.flags.has("--watch");
+        const noAutoSwitch = parsed.flags.has("--no-auto-switch");
 
-        if (parsed.positionals.length > 1 || (auto && name)) {
-          throw new Error("Usage: codexm launch [name] [--auto] [--json]");
+        if (
+          parsed.positionals.length > 1 ||
+          (auto && name) ||
+          (noAutoSwitch && !watch)
+        ) {
+          throw new Error("Usage: codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
         }
 
         if (await desktopLauncher.isRunningInsideDesktopShell()) {
@@ -2178,6 +2220,7 @@ export async function runCli(
         }
 
         const warnings: string[] = [];
+        const watchAutoSwitch = !noAutoSwitch;
         const appPath = await desktopLauncher.findInstalledApp();
         if (!appPath) {
           throw new Error("Codex Desktop not found at /Applications/Codex.app.");
@@ -2296,6 +2339,16 @@ export async function runCli(
           }
         }
 
+        let detachedWatchResult:
+          | Awaited<ReturnType<typeof ensureDetachedWatch>>
+          | null = null;
+        if (watch) {
+          detachedWatchResult = await ensureDetachedWatch(watchProcessManager, {
+            autoSwitch: watchAutoSwitch,
+            debug,
+          });
+        }
+
         if (json) {
           writeJson(streams.stdout, {
             ok: true,
@@ -2312,6 +2365,16 @@ export async function runCli(
             launched_with_current_auth: switchedAccount === null,
             app_path: appPath,
             relaunched: runningApps.length > 0,
+            watch:
+              detachedWatchResult === null
+                ? null
+                : {
+                    action: detachedWatchResult.action,
+                    pid: detachedWatchResult.state.pid,
+                    started_at: detachedWatchResult.state.started_at,
+                    log_path: detachedWatchResult.state.log_path,
+                    auto_switch: detachedWatchResult.state.auto_switch,
+                  },
             warnings,
           });
         } else {
@@ -2328,6 +2391,18 @@ export async function runCli(
               ? `Launched Codex Desktop with "${switchedAccount.name}" (${maskAccountId(switchedAccount.identity)}).\n`
               : "Launched Codex Desktop with current auth.\n",
           );
+          if (detachedWatchResult) {
+            if (detachedWatchResult.action === "reused") {
+              streams.stdout.write(
+                `Background watch already running (pid ${detachedWatchResult.state.pid}).\n`,
+              );
+            } else {
+              streams.stdout.write(
+                `Started background watch (pid ${detachedWatchResult.state.pid}).\n`,
+              );
+              streams.stdout.write(`Log: ${detachedWatchResult.state.log_path}\n`);
+            }
+          }
           for (const warning of warnings) {
             streams.stdout.write(`Warning: ${warning}\n`);
           }
@@ -2337,17 +2412,17 @@ export async function runCli(
 
       case "watch": {
         if (parsed.positionals.length > 0) {
-          throw new Error("Usage: codexm watch [--auto-switch] [--detach] [--status] [--stop]");
+          throw new Error("Usage: codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
         }
 
-        const autoSwitch = parsed.flags.has("--auto-switch");
+        const autoSwitch = !parsed.flags.has("--no-auto-switch");
         const detach = parsed.flags.has("--detach");
         const status = parsed.flags.has("--status");
         const stop = parsed.flags.has("--stop");
         const modeCount = [detach, status, stop].filter(Boolean).length;
 
-        if (modeCount > 1 || ((status || stop) && autoSwitch)) {
-          throw new Error("Usage: codexm watch [--auto-switch] [--detach] [--status] [--stop]");
+        if (modeCount > 1 || ((status || stop) && parsed.flags.has("--no-auto-switch"))) {
+          throw new Error("Usage: codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
         }
 
         if (status) {
@@ -2439,7 +2514,7 @@ export async function runCli(
               return;
             }
 
-            const lock = await tryAcquireSwitchLock(store, "watch --auto-switch");
+            const lock = await tryAcquireSwitchLock(store, "watch");
             if (!lock.acquired) {
               debugLog(`watch: switch lock is busy at ${lock.lockPath}`);
               streams.stdout.write(

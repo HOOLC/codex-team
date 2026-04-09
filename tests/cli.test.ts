@@ -210,8 +210,8 @@ describe("CLI", () => {
     })();
 
     expect(output).toContain("codexm --version");
-    expect(output).toContain("codexm launch [name] [--json]");
-    expect(output).toContain("codexm watch [--auto-switch]");
+    expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
+    expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(stderr.read()).toBe("");
@@ -242,7 +242,7 @@ describe("CLI", () => {
       expect(script).toContain("current");
       expect(script).toContain("watch");
       expect(script).toContain("completion");
-      expect(script).toContain("--auto-switch");
+      expect(script).toContain("--no-auto-switch");
       expect(script).toContain("codexm completion --accounts");
       expect(stderr.read()).toBe("");
     } finally {
@@ -1333,6 +1333,57 @@ wire_api = "responses"
     }
   });
 
+  test("launch --watch starts a detached background watch with auto-switch enabled", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let listCalls = 0;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["launch", "--watch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              debug: false,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: true,
+        debug: false,
+      });
+      expect(stdout.read()).toContain("Started background watch (pid 43210).");
+      expect(stdout.read()).toContain("Launched Codex Desktop with current auth.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("watch refuses to run when there is no managed desktop session", async () => {
     const homeDir = await createTempHome();
 
@@ -1421,7 +1472,7 @@ wire_api = "responses"
     }
   });
 
-  test("watch --detach starts a background watcher", async () => {
+  test("watch --detach starts a background auto-switch watcher by default", async () => {
     const homeDir = await createTempHome();
     let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
 
@@ -1444,7 +1495,7 @@ wire_api = "responses"
               pid: 43210,
               started_at: "2026-04-08T13:58:00.000Z",
               log_path: "/tmp/watch.log",
-              auto_switch: false,
+              auto_switch: true,
               debug: true,
             };
           },
@@ -1453,7 +1504,7 @@ wire_api = "responses"
 
       expect(exitCode).toBe(0);
       expect(startedOptions).toEqual({
-        autoSwitch: false,
+        autoSwitch: true,
         debug: true,
       });
       expect(stdout.read()).toContain("Started background watch (pid 43210).");
@@ -1464,14 +1515,14 @@ wire_api = "responses"
     }
   });
 
-  test("watch --detach --auto-switch starts a background auto-switch watcher", async () => {
+  test("watch --detach --no-auto-switch starts a background watcher without auto-switch", async () => {
     const homeDir = await createTempHome();
     let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
 
     try {
       const store = createAccountStore(homeDir);
 
-      const exitCode = await runCli(["watch", "--detach", "--auto-switch"], {
+      const exitCode = await runCli(["watch", "--detach", "--no-auto-switch"], {
         store,
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
@@ -1485,7 +1536,7 @@ wire_api = "responses"
               pid: 43210,
               started_at: "2026-04-08T13:58:00.000Z",
               log_path: "/tmp/watch.log",
-              auto_switch: true,
+              auto_switch: false,
               debug: false,
             };
           },
@@ -1494,7 +1545,7 @@ wire_api = "responses"
 
       expect(exitCode).toBe(0);
       expect(startedOptions).toEqual({
-        autoSwitch: true,
+        autoSwitch: false,
         debug: false,
       });
     } finally {
@@ -1535,7 +1586,7 @@ wire_api = "responses"
     }
   });
 
-  test("watch prints quota updates without auto-switching by default", async () => {
+  test("watch --no-auto-switch prints quota updates even for terminal quota updates", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -1545,7 +1596,7 @@ wire_api = "responses"
       let applyManagedSwitchCalls = 0;
       let readManagedCurrentQuotaCalls = 0;
 
-      const exitCode = await runCli(["watch", "--debug"], {
+      const exitCode = await runCli(["watch", "--debug", "--no-auto-switch"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -1612,7 +1663,7 @@ wire_api = "responses"
     }
   });
 
-  test("watch prints non-exhausted rate limit updates without auto-switching", async () => {
+  test("watch --no-auto-switch prints non-exhausted rate limit updates without auto-switching", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -1621,7 +1672,7 @@ wire_api = "responses"
       const stderr = captureWritable();
       let applyManagedSwitchCalls = 0;
 
-      const exitCode = await runCli(["watch", "--debug"], {
+      const exitCode = await runCli(["watch", "--debug", "--no-auto-switch"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -1793,7 +1844,7 @@ wire_api = "responses"
     }
   });
 
-  test("watch --auto-switch does not switch on non-exhausted rate limit updates", async () => {
+  test("watch does not switch on non-exhausted rate limit updates", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -1801,7 +1852,7 @@ wire_api = "responses"
       const stdout = captureWritable();
       const stderr = captureWritable();
 
-      const exitCode = await runCli(["watch", "--debug", "--auto-switch"], {
+      const exitCode = await runCli(["watch", "--debug"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -1860,7 +1911,7 @@ wire_api = "responses"
       const stdout = captureWritable();
       const stderr = captureWritable();
 
-      const exitCode = await runCli(["watch"], {
+      const exitCode = await runCli(["watch", "--no-auto-switch"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -1921,7 +1972,7 @@ wire_api = "responses"
     }
   });
 
-  test("watch --auto-switch auto-switches on quota signals", async () => {
+  test("watch auto-switches on quota signals", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -2007,7 +2058,7 @@ wire_api = "responses"
       const stdout = captureWritable();
       const stderr = captureWritable();
 
-      const exitCode = await runCli(["watch", "--debug", "--auto-switch"], {
+      const exitCode = await runCli(["watch", "--debug"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -2057,7 +2108,7 @@ wire_api = "responses"
     }
   });
 
-  test("watch --auto-switch skips switching when the shared switch lock is busy", async () => {
+  test("watch skips switching when the shared switch lock is busy", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -2124,7 +2175,7 @@ wire_api = "responses"
 
       const stdout = captureWritable();
       const stderr = captureWritable();
-      const exitCode = await runCli(["watch", "--debug", "--auto-switch"], {
+      const exitCode = await runCli(["watch", "--debug"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,

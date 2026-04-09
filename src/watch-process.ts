@@ -164,7 +164,7 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
       const args = [
         cliEntryPath,
         "watch",
-        ...(options.autoSwitch ? ["--auto-switch"] : []),
+        ...(options.autoSwitch ? [] : ["--no-auto-switch"]),
         ...(options.debug ? ["--debug"] : []),
       ];
 
