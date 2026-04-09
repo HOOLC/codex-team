@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, test } from "@rstest/core";
@@ -6,13 +8,16 @@ import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
 import packageJson from "../package.json";
 
-import { runCli } from "../src/main.js";
+import { rankAutoSwitchCandidates, runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store.js";
+import type { AccountQuotaSummary } from "../src/account-store.js";
 import type {
   CodexDesktopLauncher,
+  ManagedCurrentQuotaSnapshot,
   ManagedCodexDesktopState,
   RunningCodexDesktop,
 } from "../src/codex-desktop-launch.js";
+import type { WatchProcessManager, WatchProcessState } from "../src/watch-process.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -46,28 +51,68 @@ function captureWritable(): {
 function createDesktopLauncherStub(overrides: Partial<{
   findInstalledApp: () => Promise<string | null>;
   listRunningApps: () => Promise<RunningCodexDesktop[]>;
-  quitRunningApps: () => Promise<void>;
+  quitRunningApps: (options?: { force?: boolean }) => Promise<void>;
   launch: (appPath: string) => Promise<void>;
   writeManagedState: (state: ManagedCodexDesktopState) => Promise<void>;
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
+  readManagedCurrentQuota: () => Promise<ManagedCurrentQuotaSnapshot | null>;
+  isRunningInsideDesktopShell: () => Promise<boolean>;
   applyManagedSwitch: (options?: {
     force?: boolean;
     timeoutMs?: number;
     signal?: AbortSignal;
   }) => Promise<boolean>;
+  watchManagedQuotaSignals: (options?: {
+    signal?: AbortSignal;
+    debugLogger?: (line: string) => void;
+    onStatus?: (event: {
+      type: "disconnected" | "reconnected";
+      attempt: number;
+      error: string | null;
+    }) => Promise<void> | void;
+    onQuotaSignal?: (signal: {
+      requestId: string;
+      url: string;
+      status: number | null;
+      reason: string;
+      bodySnippet: string | null;
+      shouldAutoSwitch: boolean;
+      quota?: {
+        plan_type: string | null;
+        credits_balance: number | null;
+        unlimited: boolean;
+        five_hour: {
+          used_percent: number;
+          window_seconds: number;
+          reset_at: string | null;
+        } | null;
+        one_week: {
+          used_percent: number;
+          window_seconds: number;
+          reset_at: string | null;
+        } | null;
+        fetched_at: string;
+      } | null;
+    }) => Promise<void> | void;
+  }) => Promise<void>;
 }> = {}): CodexDesktopLauncher {
   return {
     findInstalledApp: overrides.findInstalledApp ?? (async () => "/Applications/Codex.app"),
     listRunningApps: overrides.listRunningApps ?? (async () => []),
     quitRunningApps: overrides.quitRunningApps ?? (async () => undefined),
-    launch: overrides.launch ?? (async () => undefined),
+    launch:
+      overrides.launch ??
+      (async () => undefined),
     writeManagedState: overrides.writeManagedState ?? (async () => undefined),
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    readManagedCurrentQuota: overrides.readManagedCurrentQuota ?? (async () => null),
+    isRunningInsideDesktopShell: overrides.isRunningInsideDesktopShell ?? (async () => false),
     applyManagedSwitch: overrides.applyManagedSwitch ?? (async () => false),
+    watchManagedQuotaSignals: overrides.watchManagedQuotaSignals ?? (async () => undefined),
   };
 }
 
@@ -105,6 +150,37 @@ function createInteractiveStdin(): NodeJS.ReadStream & {
   return stream;
 }
 
+function createWatchProcessManagerStub(overrides: Partial<{
+  startDetached: (options: { autoSwitch: boolean; debug: boolean }) => Promise<WatchProcessState>;
+  getStatus: () => Promise<{ running: boolean; state: WatchProcessState | null }>;
+  stop: () => Promise<{ running: boolean; state: WatchProcessState | null; stopped: boolean }>;
+}> = {}): WatchProcessManager {
+  return {
+    startDetached:
+      overrides.startDetached ??
+      (async () => ({
+        pid: 43210,
+        started_at: "2026-04-08T13:58:00.000Z",
+        log_path: "/tmp/watch.log",
+        auto_switch: false,
+        debug: false,
+      })),
+    getStatus:
+      overrides.getStatus ??
+      (async () => ({
+        running: false,
+        state: null,
+      })),
+    stop:
+      overrides.stop ??
+      (async () => ({
+        running: false,
+        state: null,
+        stopped: false,
+      })),
+  };
+}
+
 describe("CLI", () => {
   test("prints version from --version", async () => {
     const stdout = captureWritable();
@@ -134,8 +210,122 @@ describe("CLI", () => {
     })();
 
     expect(output).toContain("codexm --version");
-    expect(output).toContain("codexm launch [name] [--json]");
+    expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
+    expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    expect(output).toContain("codexm completion <zsh|bash>");
+    expect(output).toContain("Global flags: --help, --version, --debug");
     expect(stderr.read()).toBe("");
+  });
+
+  test("prints a zsh completion script with dynamic account completion", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-completion-zsh");
+      const store = createAccountStore(homeDir);
+      await store.saveCurrentAccount("plus-main");
+      await writeCurrentAuth(homeDir, "acct-completion-zsh-team");
+      await store.saveCurrentAccount("team.ops");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "zsh"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const script = stdout.read();
+      expect(script).toContain("#compdef codexm");
+      expect(script).toContain("current");
+      expect(script).toContain("watch");
+      expect(script).toContain("completion");
+      expect(script).toContain("--no-auto-switch");
+      expect(script).toContain("codexm completion --accounts");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("prints a bash completion script with dynamic account completion", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "bash"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const script = stdout.read();
+      expect(script).toContain("_codexm()");
+      expect(script).toContain("COMPREPLY=");
+      expect(script).toContain("codexm completion --accounts");
+      expect(script).toContain("--detach");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("prints saved account names for hidden completion account queries", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-completion-accounts");
+      const store = createAccountStore(homeDir);
+      await store.saveCurrentAccount("plus-main");
+      await writeCurrentAuth(homeDir, "acct-completion-accounts-team");
+      await store.saveCurrentAccount("team.ops");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "--accounts"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read().trim().split("\n")).toEqual(["plus-main", "team.ops"]);
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("accepts --debug for existing commands and writes current debug output", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-debug-current");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["current", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Current auth: present");
+      expect(stderr.read()).toContain("[debug] current:");
+      expect(stderr.read()).toContain("matched_accounts=0");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
   });
 
   test("supports save and current in json mode", async () => {
@@ -168,6 +358,238 @@ describe("CLI", () => {
         exists: true,
         managed: true,
         matched_accounts: ["cli-main"],
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current best-effort shows live usage when managed MCP quota is available", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-cli-current-live");
+      await runCli(["save", "current-live", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 11,
+            unlimited: false,
+            five_hour: {
+              used_percent: 12,
+              window_seconds: 18_000,
+              reset_at: "2026-03-18T21:17:21.000Z",
+            },
+            one_week: {
+              used_percent: 47,
+              window_seconds: 604_800,
+              reset_at: "2026-03-19T03:14:00.000Z",
+            },
+            fetched_at: "2026-04-08T13:28:00.000Z",
+          }),
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: current-live");
+      expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | live");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --refresh shows a one-line usage summary for the current managed account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 12,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 400,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 47,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh");
+      await runCli(["save", "current-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: current-main");
+      expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | refreshed via api");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --refresh prefers managed MCP quota over the usage API", async () => {
+    const homeDir = await createTempHome();
+    let fetchCalled = false;
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          fetchCalled = true;
+          return textResponse("unexpected", 500);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-mcp");
+      await runCli(["save", "current-mcp", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 11,
+            unlimited: false,
+            five_hour: {
+              used_percent: 9,
+              window_seconds: 18_000,
+              reset_at: "2026-03-18T21:17:21.000Z",
+            },
+            one_week: {
+              used_percent: 31,
+              window_seconds: 604_800,
+              reset_at: "2026-03-19T03:14:00.000Z",
+            },
+            fetched_at: "2026-04-08T13:29:00.000Z",
+          }),
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(fetchCalled).toBe(false);
+      expect(stdout.read()).toContain("Usage: available | 5H 9% used | 1W 31% used | refreshed via mcp");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --refresh --json includes refreshed quota data", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 15,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 400,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 45,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-json");
+      await runCli(["save", "current-json", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh", "--json"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        exists: true,
+        managed: true,
+        matched_accounts: ["current-json"],
+        quota: {
+          available: "available",
+          refresh_status: "ok",
+          credits_balance: 11,
+          five_hour: {
+            used_percent: 15,
+          },
+          one_week: {
+            used_percent: 45,
+          },
+        },
       });
     } finally {
       await cleanupTempHome(homeDir);
@@ -410,6 +832,38 @@ wire_api = "responses"
     }
   });
 
+  test("prints debug details during launch when --debug is enabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let listCalls = 0;
+
+      const exitCode = await runCli(["launch", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 501, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+          launch: async () => undefined,
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain("[debug] launch: using app path /Applications/Codex.app");
+      expect(stderr.read()).toContain("[debug] launch: recorded managed desktop pid=501 port=9223");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("switches account before launch when account is provided", async () => {
     const homeDir = await createTempHome();
 
@@ -477,6 +931,41 @@ wire_api = "responses"
     expect(stderr.read()).toContain("Refusing to relaunch Codex Desktop in a non-interactive terminal.");
   });
 
+  test("refuses launch from inside Codex Desktop before switching accounts", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-launch-target");
+      await runCli(["save", "launch-target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-original");
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["launch", "launch-target"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isRunningInsideDesktopShell: async () => true,
+        }),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain(
+        'Refusing to run "codexm launch" from inside Codex Desktop because quitting the app would terminate this session. Run this command from an external terminal instead.',
+      );
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-launch-original");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("fails when Codex Desktop is not installed", async () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
@@ -523,7 +1012,7 @@ wire_api = "responses"
     }
   });
 
-  test("aborts relaunch when the user rejects confirmation", async () => {
+  test("aborts non-managed relaunch when the user rejects force-kill confirmation", async () => {
     const stdin = createInteractiveStdin();
     const stdout = captureWritable();
     const stderr = captureWritable();
@@ -549,11 +1038,12 @@ wire_api = "responses"
 
     expect(exitCode).toBe(1);
     expect(calls).toEqual([]);
+    expect(stdout.read()).toContain("Force-kill it and relaunch with the selected auth?");
     expect(stdout.read()).toContain("Aborted.");
     expect(stderr.read()).toBe("");
   });
 
-  test("relaunches an existing Desktop instance after confirmation", async () => {
+  test("force-kills a non-managed Desktop instance after confirmation", async () => {
     const stdin = createInteractiveStdin();
     const stdout = captureWritable();
     const stderr = captureWritable();
@@ -571,8 +1061,55 @@ wire_api = "responses"
             ? [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }]
             : [{ pid: 456, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
         },
-        quitRunningApps: async () => {
-          calls.push("quit");
+        quitRunningApps: async (options) => {
+          calls.push(options?.force === true ? "quit:force" : "quit");
+        },
+        launch: async () => {
+          calls.push("launch");
+        },
+        writeManagedState: async () => {
+          calls.push("write-state");
+        },
+      }),
+    });
+
+    stdin.emitInput("y\n");
+    const exitCode = await launchPromise;
+
+    expect(exitCode).toBe(0);
+    expect(calls).toEqual(["quit:force", "launch", "write-state"]);
+    expect(stdout.read()).toContain("Force-kill it and relaunch with the selected auth?");
+    expect(stdout.read()).toContain("Closed existing Codex Desktop instance and launched a new one.");
+    expect(stderr.read()).toBe("");
+  });
+
+  test("relaunches a codexm-managed Desktop instance without force-kill", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+    const calls: string[] = [];
+    let listCalls = 0;
+
+    const launchPromise = runCli(["launch"], {
+      stdin,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub({
+        listRunningApps: async () => {
+          listCalls += 1;
+          return listCalls <= 2
+            ? [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }]
+            : [{ pid: 456, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+        },
+        readManagedState: async () => ({
+          pid: 123,
+          app_path: "/Applications/Codex.app",
+          remote_debugging_port: 9223,
+          managed_by_codexm: true,
+          started_at: "2026-04-08T00:00:00.000Z",
+        }),
+        quitRunningApps: async (options) => {
+          calls.push(options?.force === true ? "quit:force" : "quit");
         },
         launch: async () => {
           calls.push("launch");
@@ -588,7 +1125,7 @@ wire_api = "responses"
 
     expect(exitCode).toBe(0);
     expect(calls).toEqual(["quit", "launch", "write-state"]);
-    expect(stdout.read()).toContain("Closed existing Codex Desktop instance and launched a new one.");
+    expect(stdout.read()).toContain("Close it and relaunch with the selected auth?");
     expect(stderr.read()).toBe("");
   });
 
@@ -604,8 +1141,8 @@ wire_api = "responses"
       stderr: stderr.stream,
       desktopLauncher: createDesktopLauncherStub({
         listRunningApps: async () => [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
-        quitRunningApps: async () => {
-          calls.push("quit");
+        quitRunningApps: async (options) => {
+          calls.push(options?.force === true ? "quit:force" : "quit");
           throw new Error("quit failed");
         },
         launch: async () => {
@@ -618,7 +1155,7 @@ wire_api = "responses"
     const exitCode = await launchPromise;
 
     expect(exitCode).toBe(1);
-    expect(calls).toEqual(["quit"]);
+    expect(calls).toEqual(["quit:force"]);
     expect(stderr.read()).toContain("quit failed");
   });
 
@@ -677,6 +1214,1007 @@ wire_api = "responses"
 
       expect(exitCode).toBe(1);
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-launch-original");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launch --auto selects the best account before launching Desktop", async () => {
+    const homeDir = await createTempHome();
+    const nowSeconds = 1_775_000_000;
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const headers = new Headers(init?.headers);
+          const accountId = headers.get("ChatGPT-Account-Id");
+
+          if (accountId === "acct-launch-auto-best") {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 20,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 500,
+                  reset_at: nowSeconds + 500,
+                },
+                secondary_window: {
+                  used_percent: 20,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 6_000,
+                  reset_at: nowSeconds + 6_000,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "9",
+              },
+            });
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 70,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 500,
+                reset_at: nowSeconds + 500,
+              },
+              secondary_window: {
+                used_percent: 70,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 6_000,
+                reset_at: nowSeconds + 6_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "1",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-auto-best");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-auto-other");
+      await runCli(["save", "beta", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-launch-auto-other");
+
+      const stdout = captureWritable();
+      const calls: string[] = [];
+      let listCalls = 0;
+      const exitCode = await runCli(["launch", "--auto"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+          launch: async () => {
+            calls.push("launch");
+          },
+          writeManagedState: async () => {
+            calls.push("write-state");
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["launch", "write-state"]);
+      expect(stdout.read()).toContain('Switched to "alpha"');
+      expect(stdout.read()).toContain('Launched Codex Desktop with "alpha"');
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-launch-auto-best");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launch --watch starts a detached background watch with auto-switch enabled", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let listCalls = 0;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["launch", "--watch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              debug: false,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: true,
+        debug: false,
+      });
+      expect(stdout.read()).toContain("Started background watch (pid 43210).");
+      expect(stdout.read()).toContain("Launched Codex Desktop with current auth.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch refuses to run when there is no managed desktop session", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => false,
+        }),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("No codexm-managed Codex Desktop session is running.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --status reports when no background watch is running", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--status"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Watch: not running");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --status reports running background watch details", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["watch", "--status"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: true,
+            state: {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              debug: false,
+            },
+          }),
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Watch: running (pid 43210)");
+      expect(output).toContain("Started at: 2026-04-08T13:58:00.000Z");
+      expect(output).toContain("Auto-switch: enabled");
+      expect(output).toContain("Log: /tmp/watch.log");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --detach starts a background auto-switch watcher by default", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--detach", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              debug: true,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: true,
+        debug: true,
+      });
+      expect(stdout.read()).toContain("Started background watch (pid 43210).");
+      expect(stdout.read()).toContain("Log: /tmp/watch.log");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --detach --no-auto-switch starts a background watcher without auto-switch", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+
+      const exitCode = await runCli(["watch", "--detach", "--no-auto-switch"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: false,
+              debug: false,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: false,
+        debug: false,
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --stop stops the background watcher", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["watch", "--stop"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        watchProcessManager: createWatchProcessManagerStub({
+          stop: async () => ({
+            running: false,
+            stopped: true,
+            state: {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              debug: false,
+            },
+          }),
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Stopped background watch (pid 43210).");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --no-auto-switch prints quota updates even for terminal quota updates", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let applyManagedSwitchCalls = 0;
+      let readManagedCurrentQuotaCalls = 0;
+
+      const exitCode = await runCli(["watch", "--debug", "--no-auto-switch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => {
+            readManagedCurrentQuotaCalls += 1;
+            throw new Error("watch should use quota carried by account/rateLimits/read");
+          },
+          watchManagedQuotaSignals: async (options) => {
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"from_view","event":{"type":"mcp-request","request":{"id":"req-1","method":"account/rateLimits/read","params":{}}}}}',
+            );
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"for_view","event":{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}}}',
+            );
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+              shouldAutoSwitch: true,
+              quota: {
+                plan_type: "team",
+                credits_balance: null,
+                unlimited: false,
+                fetched_at: "2026-04-08T15:20:00.000Z",
+                five_hour: {
+                  used_percent: 72,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-08T16:50:52.000Z",
+                },
+                one_week: {
+                  used_percent: 63,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-14T09:17:35.000Z",
+                },
+              },
+            });
+          },
+          applyManagedSwitch: async () => {
+            applyManagedSwitchCalls += 1;
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain('"method":"Bridge.message"');
+      expect(stderr.read()).toContain('"type":"mcp-request"');
+      expect(stderr.read()).toContain('"type":"mcp-response"');
+      expect(stderr.read()).toContain(
+        '[debug] watch: quota signal matched reason=rpc_response requestId=rpc:req-1',
+      );
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=28% left 1W=37% left/,
+      );
+      expect(readManagedCurrentQuotaCalls).toBe(0);
+      expect(applyManagedSwitchCalls).toBe(0);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --no-auto-switch prints non-exhausted rate limit updates without auto-switching", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let applyManagedSwitchCalls = 0;
+
+      const exitCode = await runCli(["watch", "--debug", "--no-auto-switch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "team",
+            credits_balance: null,
+            unlimited: false,
+            fetched_at: "2026-04-08T15:20:00.000Z",
+            five_hour: {
+              used_percent: 72,
+              window_seconds: 18_000,
+              reset_at: "2026-04-08T16:50:52.000Z",
+            },
+            one_week: {
+              used_percent: 63,
+              window_seconds: 604_800,
+              reset_at: "2026-04-14T09:17:35.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"for_view","event":{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":72},"secondary":{"usedPercent":63}}}}}}',
+            );
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:notification:account/rateLimits/updated",
+              url: "mcp:account/rateLimits/updated",
+              status: null,
+              reason: "rpc_notification",
+              bodySnippet:
+                '{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":72},"secondary":{"usedPercent":63}}}}',
+              shouldAutoSwitch: false,
+              quota: {
+                plan_type: "team",
+                credits_balance: null,
+                unlimited: false,
+                fetched_at: "2026-04-08T15:20:00.000Z",
+                five_hour: {
+                  used_percent: 72,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-08T16:50:52.000Z",
+                },
+                one_week: {
+                  used_percent: 63,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-14T09:17:35.000Z",
+                },
+              },
+            });
+          },
+          applyManagedSwitch: async () => {
+            applyManagedSwitchCalls += 1;
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain('"method":"account/rateLimits/updated"');
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=28% left 1W=37% left/,
+      );
+      expect(applyManagedSwitchCalls).toBe(0);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch suppresses duplicate quota output when different MCP events read the same quota", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: null,
+            unlimited: false,
+            fetched_at: "2026-04-08T15:20:00.000Z",
+            five_hour: {
+              used_percent: 3,
+              window_seconds: 18_000,
+              reset_at: "2026-04-08T16:50:52.000Z",
+            },
+            one_week: {
+              used_percent: 30,
+              window_seconds: 604_800,
+              reset_at: "2026-04-14T09:17:35.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":3},"secondaryWindow":{"usedPercent":30}}}}}',
+              shouldAutoSwitch: false,
+              quota: {
+                plan_type: "plus",
+                credits_balance: null,
+                unlimited: false,
+                fetched_at: "2026-04-08T15:20:00.000Z",
+                five_hour: {
+                  used_percent: 3,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-08T16:50:52.000Z",
+                },
+                one_week: {
+                  used_percent: 30,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-14T09:17:35.000Z",
+                },
+              },
+            });
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:notification:account/rateLimits/updated",
+              url: "mcp:account/rateLimits/updated",
+              status: null,
+              reason: "rpc_notification",
+              bodySnippet:
+                '{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":3},"secondary":{"usedPercent":30}}}}',
+              shouldAutoSwitch: false,
+              quota: {
+                plan_type: "plus",
+                credits_balance: null,
+                unlimited: false,
+                fetched_at: "2026-04-08T15:20:00.000Z",
+                five_hour: {
+                  used_percent: 3,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-08T16:50:52.000Z",
+                },
+                one_week: {
+                  used_percent: 30,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-14T09:17:35.000Z",
+                },
+              },
+            });
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      const quotaLines = stdout
+        .read()
+        .split("\n")
+        .filter((line) => line.includes("quota account="));
+      expect(quotaLines).toHaveLength(1);
+      expect(quotaLines[0]).toMatch(
+        /^\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=97% left 1W=70% left$/,
+      );
+      expect(stderr.read()).toContain(
+        '[debug] watch: quota output unchanged for requestId=rpc:notification:account/rateLimits/updated',
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch does not switch on non-exhausted rate limit updates", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "team",
+            credits_balance: null,
+            unlimited: false,
+            fetched_at: "2026-04-08T15:20:00.000Z",
+            five_hour: {
+              used_percent: 72,
+              window_seconds: 18_000,
+              reset_at: "2026-04-08T16:50:52.000Z",
+            },
+            one_week: {
+              used_percent: 63,
+              window_seconds: 604_800,
+              reset_at: "2026-04-14T09:17:35.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:notification:account/rateLimits/updated",
+              url: "mcp:account/rateLimits/updated",
+              status: null,
+              reason: "rpc_notification",
+              bodySnippet:
+                '{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":72},"secondary":{"usedPercent":63}}}}',
+              shouldAutoSwitch: false,
+            });
+          },
+          applyManagedSwitch: async () => true,
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=28% left 1W=37% left/,
+      );
+      expect(stdout.read()).not.toContain('Auto-switched to');
+      expect(stderr.read()).toContain('[debug] watch: auto-switch enabled');
+      expect(stderr.read()).toContain(
+        '[debug] watch: skipping auto switch for requestId=rpc:notification:account/rateLimits/updated because the event is informational only',
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch reports connection loss and recovery while reconnecting", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--no-auto-switch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "team",
+            credits_balance: null,
+            unlimited: false,
+            fetched_at: "2026-04-08T15:20:00.000Z",
+            five_hour: {
+              used_percent: 72,
+              window_seconds: 18_000,
+              reset_at: "2026-04-08T16:50:52.000Z",
+            },
+            one_week: {
+              used_percent: 63,
+              window_seconds: 604_800,
+              reset_at: "2026-04-14T09:17:35.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onStatus?.({
+              type: "disconnected",
+              attempt: 1,
+              error: "Codex Desktop devtools watch connection closed unexpectedly.",
+            });
+            await options?.onStatus?.({
+              type: "reconnected",
+              attempt: 1,
+              error: null,
+            });
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+              shouldAutoSwitch: true,
+            });
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] reconnect-lost account="current" attempt=1 error="Codex Desktop devtools watch connection closed unexpectedly\."/,
+      );
+      expect(stderr.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] reconnect-ok account="current" attempt=1/,
+      );
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=28% left 1W=37% left/,
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch auto-switches on quota signals", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            const headers = new Headers(init?.headers);
+            const accountId = headers.get("ChatGPT-Account-Id");
+
+            if (accountId === "acct-watch-a") {
+              return jsonResponse({
+                plan_type: "plus",
+                rate_limit: {
+                  primary_window: {
+                    used_percent: 100,
+                    limit_window_seconds: 18_000,
+                    reset_after_seconds: 500,
+                    reset_at: 1_773_868_641,
+                  },
+                  secondary_window: {
+                    used_percent: 100,
+                    limit_window_seconds: 604_800,
+                    reset_after_seconds: 6_000,
+                    reset_at: 1_773_890_040,
+                  },
+                },
+                credits: {
+                  has_credits: false,
+                  unlimited: false,
+                  balance: "0",
+                },
+              });
+            }
+
+            if (accountId === "acct-watch-b") {
+              return jsonResponse({
+                plan_type: "plus",
+                rate_limit: {
+                  primary_window: {
+                    used_percent: 20,
+                    limit_window_seconds: 18_000,
+                    reset_after_seconds: 500,
+                    reset_at: 1_773_868_641,
+                  },
+                  secondary_window: {
+                    used_percent: 30,
+                    limit_window_seconds: 604_800,
+                    reset_after_seconds: 6_000,
+                    reset_at: 1_773_890_040,
+                  },
+                },
+                credits: {
+                  has_credits: true,
+                  unlimited: false,
+                  balance: "3",
+                },
+              });
+            }
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-a");
+      await runCli(["save", "watch-a", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-b");
+      await runCli(["save", "watch-b", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-a");
+
+      const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          watchManagedQuotaSignals: async (options) => {
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"from_view","event":{"type":"mcp-request","request":{"id":"req-1","method":"account/rateLimits/read","params":{}}}}}',
+            );
+            options?.debugLogger?.(
+              '{"method":"Bridge.message","params":{"direction":"for_view","event":{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}}}',
+            );
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+              shouldAutoSwitch: true,
+            });
+          },
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain('"method":"Bridge.message"');
+      expect(stderr.read()).toContain('"type":"mcp-request"');
+      expect(stderr.read()).toContain('"type":"mcp-response"');
+      expect(stderr.read()).toContain(
+        '[debug] watch: quota signal matched reason=rpc_response requestId=rpc:req-1',
+      );
+      expect(stderr.read()).toContain('[debug] watch: auto-switch enabled');
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="watch-a" status=unavailable/,
+      );
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] auto-switch from="watch-a" to="watch-b"/,
+      );
+      expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 600_000 }]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch skips switching when the shared switch lock is busy", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 500,
+                reset_at: 1_773_860_000,
+              },
+              secondary_window: {
+                used_percent: 10,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 6_000,
+                reset_at: 1_773_880_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "9",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-lock-a");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-lock-b");
+      await runCli(["save", "beta", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const lockPath = join(store.paths.codexTeamDir, "locks", "switch.lock");
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify(
+          {
+            pid: process.pid,
+            command: "switch target",
+            started_at: "2026-04-08T15:20:00.000Z",
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["watch", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: null,
+            unlimited: false,
+            fetched_at: "2026-04-08T15:20:00.000Z",
+            five_hour: {
+              used_percent: 100,
+              window_seconds: 18_000,
+              reset_at: "2026-04-08T16:50:52.000Z",
+            },
+            one_week: {
+              used_percent: 10,
+              window_seconds: 604_800,
+              reset_at: "2026-04-14T09:17:35.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-1","result":{"rateLimits":{"primaryWindow":{"usedPercent":100}}}}}',
+              shouldAutoSwitch: true,
+            });
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain('auto-switch-skipped account="beta" reason=lock-busy');
+      expect(stderr.read()).toContain(`switch lock is busy at ${lockPath}`);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-watch-lock-b");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -907,6 +2445,39 @@ wire_api = "responses"
       expect(calls).toEqual([{ force: true, timeoutMs: 120_000 }]);
       expect(stdout.read()).toContain('Switched to "switch-force"');
       expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch prints debug details when --debug is enabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-debug");
+      await runCli(["save", "switch-debug", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "switch-debug", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async () => true,
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain('Switched to "switch-debug"');
+      expect(stderr.read()).toContain("[debug] switch: mode=manual target=switch-debug force=false");
+      expect(stderr.read()).toContain("[debug] switch: completed target=switch-debug");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1159,6 +2730,7 @@ wire_api = "responses"
       expect(lines[0]).toBe("Current managed account: quota-main");
       expect(output).not.toContain("CREDITS");
       expect(output).toContain("AVAILABLE");
+      expect(output).toContain("CURRENT SCORE");
       expect(output).toContain("available");
       expect(output).toContain("* quota-main");
       expect(output).toContain("  quota-backup");
@@ -1173,6 +2745,78 @@ wire_api = "responses"
       expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
       expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
       expect(tableLines[0]?.indexOf("PLAN TYPE")).toBe(tableLines[3]?.indexOf("plus"));
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list --verbose includes auto-switch score breakdown columns", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+            return jsonResponse({
+              plan_type: accountId === "acct-cli-verbose-team" ? "team" : "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: accountId === "acct-cli-verbose-team" ? 40 : 20,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: accountId === "acct-cli-verbose-team" ? 600 : 300,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: accountId === "acct-cli-verbose-team" ? 35 : 30,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-verbose-plus");
+      await runCli(["save", "quota-plus", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-verbose-team");
+      await runCli(["save", "quota-team", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list", "--verbose"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+      const output = listStdout.read();
+      expect(output).toContain("CURRENT SCORE");
+      expect(output).toContain("1H SCORE");
+      expect(output).toContain("5H->1W 1H");
+      expect(output).toContain("1W 1H");
+      expect(output).toContain("1W:5H");
+      expect(output).toContain("quota-plus");
+      expect(output).toContain("quota-team");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1394,6 +3038,7 @@ wire_api = "responses"
     const homeDir = await createTempHome();
 
     try {
+      const nowSeconds = Math.floor(Date.now() / 1000);
       const store = createAccountStore(homeDir, {
         fetchImpl: async (input, init) => {
           const url = String(input);
@@ -1412,13 +3057,13 @@ wire_api = "responses"
                   used_percent: 60,
                   limit_window_seconds: 18_000,
                   reset_after_seconds: 500,
-                  reset_at: 1_773_868_641,
+                  reset_at: nowSeconds + 500,
                 },
                 secondary_window: {
                   used_percent: 70,
                   limit_window_seconds: 604_800,
                   reset_after_seconds: 6_000,
-                  reset_at: 1_773_890_040,
+                  reset_at: nowSeconds + 6_000,
                 },
               },
               credits: {
@@ -1437,13 +3082,13 @@ wire_api = "responses"
                   used_percent: 50,
                   limit_window_seconds: 18_000,
                   reset_after_seconds: 500,
-                  reset_at: 1_773_860_000,
+                  reset_at: nowSeconds + 500,
                 },
                 secondary_window: {
                   used_percent: 80,
                   limit_window_seconds: 604_800,
                   reset_after_seconds: 6_000,
-                  reset_at: 1_773_880_000,
+                  reset_at: nowSeconds + 6_000,
                 },
               },
               credits: {
@@ -1461,13 +3106,13 @@ wire_api = "responses"
                 used_percent: 100,
                 limit_window_seconds: 18_000,
                 reset_after_seconds: 500,
-                reset_at: 1_773_868_641,
+                reset_at: nowSeconds + 500,
               },
               secondary_window: {
                 used_percent: 10,
                 limit_window_seconds: 604_800,
                 reset_after_seconds: 6_000,
-                reset_at: 1_773_890_040,
+                reset_at: nowSeconds + 6_000,
               },
             },
             credits: {
@@ -1508,19 +3153,26 @@ wire_api = "responses"
       });
 
       expect(dryRunCode).toBe(0);
-      expect(JSON.parse(dryRunStdout.read())).toMatchObject({
+      const dryRunPayload = JSON.parse(dryRunStdout.read());
+      expect(dryRunPayload).toMatchObject({
         ok: true,
         action: "switch",
         mode: "auto",
         dry_run: true,
         selected: {
-          name: "beta",
+          name: "alpha",
           available: "available",
-          effective_score: 50,
-          remain_5h: 50,
-          remain_1w_eq_5h: 60,
+          current_score: 13.33,
+          remain_5h: 40,
+          remain_1w: 30,
+          remain_5h_in_1w_units: 13.33,
+          five_hour_windows_per_week: 3,
         },
       });
+      expect(dryRunPayload.selected.score_1h).toBeCloseTo(30, 2);
+      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(91.67, 1);
+      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(30.56, 2);
+      expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(30, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-gamma");
 
@@ -1536,34 +3188,286 @@ wire_api = "responses"
       });
 
       expect(switchCode).toBe(0);
-      expect(JSON.parse(switchStdout.read())).toMatchObject({
+      const switchPayload = JSON.parse(switchStdout.read());
+      expect(switchPayload).toMatchObject({
         ok: true,
         action: "switch",
         mode: "auto",
         account: {
-          name: "beta",
-          account_id: "acct-auto-beta",
+          name: "alpha",
+          account_id: "acct-auto-alpha",
         },
         selected: {
-          name: "beta",
-          effective_score: 50,
+          name: "alpha",
+          current_score: 13.33,
+          five_hour_windows_per_week: 3,
         },
         quota: {
           available: "available",
           refresh_status: "ok",
           five_hour: {
-            used_percent: 50,
+            used_percent: 60,
           },
           one_week: {
-            used_percent: 80,
+            used_percent: 70,
           },
         },
       });
+      expect(switchPayload.selected.score_1h).toBeCloseTo(30, 2);
 
-      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-beta");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-alpha");
     } finally {
       await cleanupTempHome(homeDir);
     }
+  });
+
+  test("auto switch keeps candidates with only one quota window", () => {
+    const singleWindowAccount: AccountQuotaSummary = {
+      name: "alpha",
+      account_id: "acct-single-window",
+      user_id: null,
+      identity: "acct-single-window",
+      plan_type: "plus",
+      credits_balance: 9,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T01:00:00.000Z",
+      },
+      one_week: null,
+    };
+
+    const twoWindowAccount: AccountQuotaSummary = {
+      name: "beta",
+      account_id: "acct-two-window",
+      user_id: null,
+      identity: "acct-two-window",
+      plan_type: "plus",
+      credits_balance: 3,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 60,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T02:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 70,
+        window_seconds: 604_800,
+        reset_at: "2026-04-09T00:00:00.000Z",
+      },
+    };
+
+    expect(rankAutoSwitchCandidates([singleWindowAccount, twoWindowAccount])).toMatchObject([
+      {
+        name: "alpha",
+        current_score: 26.67,
+        score_1h: 26.67,
+        remain_5h: 80,
+        remain_1w: null,
+        remain_5h_in_1w_units: 26.67,
+        projected_5h_1h: 80,
+        projected_5h_in_1w_units_1h: 26.67,
+        five_hour_windows_per_week: 3,
+      },
+      {
+        name: "beta",
+        current_score: 13.33,
+        score_1h: 13.33,
+        remain_5h: 40,
+        remain_1w: 30,
+        remain_5h_in_1w_units: 13.33,
+        projected_5h_1h: 40,
+        projected_5h_in_1w_units_1h: 13.33,
+        projected_1w_1h: 30,
+        five_hour_windows_per_week: 3,
+      },
+    ]);
+  });
+
+  test("auto switch scoring converts 5h remaining by plan-relative window size", () => {
+    const plusAccount: AccountQuotaSummary = {
+      name: "plus",
+      account_id: "acct-plus",
+      user_id: null,
+      identity: "acct-plus",
+      plan_type: "plus",
+      credits_balance: 5,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 50,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+    };
+
+    const teamAccount: AccountQuotaSummary = {
+      name: "team",
+      account_id: "acct-team",
+      user_id: null,
+      identity: "acct-team",
+      plan_type: "team",
+      credits_balance: 5,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 50,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+    };
+
+    expect(rankAutoSwitchCandidates([plusAccount, teamAccount])).toMatchObject([
+      {
+        name: "plus",
+        current_score: 26.67,
+        score_1h: 26.67,
+        remain_1w: 50,
+        remain_5h_in_1w_units: 26.67,
+        projected_5h_in_1w_units_1h: 26.67,
+        projected_1w_1h: 50,
+        five_hour_windows_per_week: 3,
+      },
+      {
+        name: "team",
+        current_score: 10,
+        score_1h: 10,
+        remain_1w: 50,
+        remain_5h_in_1w_units: 10,
+        projected_5h_in_1w_units_1h: 10,
+        projected_1w_1h: 50,
+        five_hour_windows_per_week: 8,
+      },
+    ]);
+  });
+
+  test("auto switch scoring prefers earlier reset when projected availability is higher", () => {
+    const earlyResetAccount: AccountQuotaSummary = {
+      name: "early-reset",
+      account_id: "acct-early-reset",
+      user_id: null,
+      identity: "acct-early-reset",
+      plan_type: "plus",
+      credits_balance: 2,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 40,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T00:05:00.000Z",
+      },
+      one_week: null,
+    };
+
+    const lateResetAccount: AccountQuotaSummary = {
+      name: "late-reset",
+      account_id: "acct-late-reset",
+      user_id: null,
+      identity: "acct-late-reset",
+      plan_type: "plus",
+      credits_balance: 2,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 35,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T04:30:00.000Z",
+      },
+      one_week: null,
+    };
+
+    expect(rankAutoSwitchCandidates([earlyResetAccount, lateResetAccount])).toMatchObject([
+      {
+        name: "early-reset",
+        remain_5h: 60,
+        current_score: 20,
+        projected_5h_1h: 96.67,
+      },
+      {
+        name: "late-reset",
+        remain_5h: 65,
+        current_score: 21.67,
+        projected_5h_1h: 65,
+      },
+    ]);
+  });
+
+  test("auto switch scoring keeps a clearly better current score ahead of a near-reset zero balance", () => {
+    const nearResetButEmpty: AccountQuotaSummary = {
+      name: "near-reset-empty",
+      account_id: "acct-near-reset-empty",
+      user_id: null,
+      identity: "acct-near-reset-empty",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 100,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T00:05:00.000Z",
+      },
+      one_week: null,
+    };
+
+    const modestButAvailable: AccountQuotaSummary = {
+      name: "modest-available",
+      account_id: "acct-modest-available",
+      user_id: null,
+      identity: "acct-modest-available",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 70,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T04:30:00.000Z",
+      },
+      one_week: null,
+    };
+
+    expect(rankAutoSwitchCandidates([nearResetButEmpty, modestButAvailable])).toMatchObject([
+      {
+        name: "modest-available",
+        current_score: 10,
+        score_1h: 10,
+      },
+      {
+        name: "near-reset-empty",
+        current_score: 0,
+        score_1h: 30.56,
+      },
+    ]);
   });
 
   test("skips auto switch when current account is already the best available account", async () => {
@@ -1671,6 +3575,127 @@ wire_api = "responses"
       });
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-best-current");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch refuses to run while another switch or launch operation holds the shared lock", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-lock-target");
+      await runCli(["save", "target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-switch-lock-original");
+
+      const lockPath = join(store.paths.codexTeamDir, "locks", "switch.lock");
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify(
+          {
+            pid: process.pid,
+            command: "switch other",
+            started_at: "2026-04-08T15:20:00.000Z",
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const stderr = captureWritable();
+      const exitCode = await runCli(["switch", "target"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("Another codexm switch or launch operation is already in progress.");
+      expect(stderr.read()).toContain(lockPath);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-switch-lock-original");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch --auto refuses to run while another switch or launch operation holds the shared lock", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 500,
+                reset_at: 1_773_860_000,
+              },
+              secondary_window: {
+                used_percent: 10,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 6_000,
+                reset_at: 1_773_880_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "9",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auto-lock-target");
+      await runCli(["save", "target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auto-lock-original");
+
+      const lockPath = join(store.paths.codexTeamDir, "locks", "switch.lock");
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify(
+          {
+            pid: process.pid,
+            command: "launch --auto",
+            started_at: "2026-04-08T15:20:00.000Z",
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const stderr = captureWritable();
+      const exitCode = await runCli(["switch", "--auto"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("Another codexm switch or launch operation is already in progress.");
+      expect(stderr.read()).toContain(lockPath);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-lock-original");
     } finally {
       await cleanupTempHome(homeDir);
     }

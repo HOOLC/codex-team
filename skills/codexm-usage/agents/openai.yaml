@@ -1,0 +1,7 @@
+interface:
+  display_name: "codexm"
+  short_description: "Use codexm to manage Codex accounts, usage, and Desktop watch behavior"
+  default_prompt: "Use $codexm-usage to help manage Codex login snapshots, current usage, Codex Desktop account switching, and quota watch behavior with codexm."
+
+policy:
+  allow_implicit_invocation: true
