@@ -8,10 +8,6 @@ import packageJson from "../package.json";
 
 import { maskAccountId } from "./auth-snapshot.js";
 import {
-  getSnapshotIdentity,
-  parseAuthSnapshot,
-} from "./auth-snapshot.js";
-import {
   AccountStore,
   type AccountQuotaSummary,
   createAccountStore,
@@ -23,9 +19,7 @@ import {
   type ManagedQuotaSignal,
   type ManagedWatchActivitySignal,
   type ManagedWatchStatusEvent,
-  type RuntimeAccountSnapshot,
   type RuntimeQuotaSnapshot,
-  type RuntimeReadSource,
   type RunningCodexDesktop,
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
@@ -39,6 +33,40 @@ import {
   createCodexLoginProvider,
   type CodexLoginProvider,
 } from "./codex-login.js";
+import {
+  CliUsageError,
+  parseArgs,
+  type ParsedArgs,
+  validateParsedArgs,
+} from "./cli/args.js";
+import {
+  printHelp,
+} from "./cli/help.js";
+import {
+  describeAutoSwitchNoop,
+  describeAutoSwitchSelection,
+  isTerminalWatchQuota,
+  rankAutoSwitchCandidates,
+  toCliQuotaSummary,
+  toCliQuotaSummaryFromRuntimeQuota,
+  type AutoSwitchCandidate,
+} from "./cli/quota.js";
+import { writeJson } from "./cli/output.js";
+import {
+  handleAddCommand,
+  handleRemoveCommand,
+  handleRenameCommand,
+  handleSaveCommand,
+  handleUpdateCommand,
+} from "./commands/account-management.js";
+import { handleCompletionCommand } from "./commands/completion.js";
+import {
+  handleCurrentCommand,
+  handleDoctorCommand,
+  handleListCommand,
+} from "./commands/inspection.js";
+
+export { rankAutoSwitchCandidates } from "./cli/quota.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -61,34 +89,6 @@ interface RunCliOptions extends Partial<CliStreams> {
   watchQuotaIdleReadIntervalMs?: number;
 }
 
-interface ParsedArgs {
-  command: string | null;
-  positionals: string[];
-  flags: Set<string>;
-}
-
-interface AutoSwitchCandidate {
-  name: string;
-  account_id: string;
-  identity: string;
-  plan_type: string | null;
-  available: string | null;
-  refresh_status: "ok";
-  current_score: number;
-  score_1h: number;
-  projected_5h_1h: number | null;
-  projected_5h_in_1w_units_1h: number | null;
-  projected_1w_1h: number | null;
-  remain_5h: number | null;
-  remain_5h_in_1w_units: number | null;
-  remain_1w: number | null;
-  five_hour_windows_per_week: number;
-  five_hour_used: number | null;
-  one_week_used: number | null;
-  five_hour_reset_at: string | null;
-  one_week_reset_at: string | null;
-}
-
 interface AutoSwitchSelection {
   refreshResult: Awaited<ReturnType<AccountStore["refreshAllQuotas"]>>;
   selected: AutoSwitchCandidate;
@@ -97,479 +97,13 @@ interface AutoSwitchSelection {
   warnings: string[];
 }
 
-interface CurrentStatusView extends Awaited<ReturnType<AccountStore["getCurrentStatus"]>> {
-  source: "auth.json" | "desktop-runtime" | "direct-runtime";
-  runtime_differs_from_local: boolean;
-}
-
-interface CurrentRuntimeAccountView {
-  snapshot: RuntimeAccountSnapshot;
-  source: RuntimeReadSource;
-}
-
-interface CurrentRuntimeQuotaView {
-  quota: ReturnType<typeof toCliQuotaSummary>;
-  source: RuntimeReadSource;
-}
-
-interface DoctorCurrentAuthView {
-  status: "ok" | "missing" | "invalid";
-  auth_mode: string | null;
-  identity: string | null;
-  matched_accounts: string[];
-  managed: boolean;
-  error: string | null;
-}
-
-interface DoctorRuntimeView {
-  status: "ok" | "unavailable" | "error";
-  account: RuntimeAccountSnapshot | null;
-  quota: ReturnType<typeof toCliQuotaSummary> | null;
-  error: string | null;
-}
-
-interface DoctorDesktopRuntimeView {
-  status: "ok" | "unavailable" | "error";
-  account: RuntimeAccountSnapshot | null;
-  quota: ReturnType<typeof toCliQuotaSummary> | null;
-  error: string | null;
-  differs_from_local: boolean | null;
-  differs_from_direct: boolean | null;
-}
-
-interface CliDoctorReport {
-  healthy: boolean;
-  store: Awaited<ReturnType<AccountStore["doctor"]>>;
-  current_auth: DoctorCurrentAuthView;
-  direct_runtime: DoctorRuntimeView;
-  desktop_runtime: DoctorDesktopRuntimeView;
-  warnings: string[];
-  issues: string[];
-}
-
 interface SwitchLockOwner {
   pid: number;
   command: string;
   started_at: string;
 }
-
-class CliUsageError extends Error {
-  suggestion: string | null;
-
-  constructor(message: string, suggestion: string | null = null) {
-    super(message);
-    this.name = "CliUsageError";
-    this.suggestion = suggestion;
-  }
-}
-
-const COMMAND_NAMES = [
-  "current",
-  "doctor",
-  "list",
-  "add",
-  "save",
-  "update",
-  "switch",
-  "launch",
-  "watch",
-  "remove",
-  "rename",
-  "completion",
-] as const;
-
-const GLOBAL_FLAGS = new Set(["--help", "--version", "--debug"]);
-
-const AUTO_SWITCH_SCORING = {
-  // Approximate how many plan-relative 5H windows fit into the same 1W budget.
-  // 1W is treated as the shared unit across plans; a larger factor means the
-  // plan's 5H window is smaller, so the same weekly budget covers more 5H windows.
-  defaultFiveHourWindowsPerWeek: 3,
-  fiveHourWindowsPerWeekByPlan: {
-    plus: 3,
-    team: 8,
-  },
-} as const;
-
-const AUTO_SWITCH_PROJECTION_HORIZON_SECONDS = 3_600;
-const AUTO_SWITCH_CURRENT_SCORE_TIEBREAK_DELTA = 5;
 const SWITCH_LOCKS_DIR_NAME = "locks";
 const SWITCH_LOCK_DIR_NAME = "switch.lock";
-
-const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
-  current: new Set(["--json", "--refresh"]),
-  doctor: new Set(["--json"]),
-  list: new Set(["--json", "--verbose"]),
-  add: new Set(["--device-auth", "--with-api-key", "--force", "--json"]),
-  save: new Set(["--force", "--json"]),
-  update: new Set(["--json"]),
-  switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
-  launch: new Set(["--auto", "--watch", "--no-auto-switch", "--json"]),
-  watch: new Set(["--no-auto-switch", "--detach", "--status", "--stop"]),
-  remove: new Set(["--yes", "--json"]),
-  rename: new Set(["--json"]),
-  completion: new Set(["--accounts"]),
-};
-
-function parseArgs(argv: string[]): ParsedArgs {
-  const flags = new Set<string>();
-  const positionals: string[] = [];
-
-  for (const arg of argv) {
-    if (arg.startsWith("--")) {
-      flags.add(arg);
-    } else {
-      positionals.push(arg);
-    }
-  }
-
-  return {
-    command: positionals[0] ?? null,
-    positionals: positionals.slice(1),
-    flags,
-  };
-}
-
-function writeJson(stream: NodeJS.WriteStream, value: unknown): void {
-  stream.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-function levenshteinDistance(left: string, right: string): number {
-  if (left === right) {
-    return 0;
-  }
-
-  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-
-  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
-    let diagonal = previous[0];
-    previous[0] = leftIndex;
-
-    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
-      const nextDiagonal = previous[rightIndex];
-      const cost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
-      previous[rightIndex] = Math.min(
-        previous[rightIndex] + 1,
-        previous[rightIndex - 1] + 1,
-        diagonal + cost,
-      );
-      diagonal = nextDiagonal;
-    }
-  }
-
-  return previous[right.length];
-}
-
-function findClosestSuggestion(value: string, candidates: string[]): string | null {
-  let bestCandidate: string | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (const candidate of candidates) {
-    const distance = levenshteinDistance(value, candidate);
-    if (distance < bestDistance) {
-      bestCandidate = candidate;
-      bestDistance = distance;
-    }
-  }
-
-  const threshold = Math.max(2, Math.ceil(value.length / 3));
-  return bestDistance <= threshold ? bestCandidate : null;
-}
-
-function validateParsedArgs(parsed: ParsedArgs): void {
-  if (parsed.command && !COMMAND_NAMES.includes(parsed.command as (typeof COMMAND_NAMES)[number])) {
-    throw new CliUsageError(
-      `Unknown command "${parsed.command}".`,
-      findClosestSuggestion(parsed.command, [...COMMAND_NAMES]),
-    );
-  }
-
-  const allowedFlags = new Set<string>(GLOBAL_FLAGS);
-  if (parsed.command) {
-    for (const flag of COMMAND_FLAGS[parsed.command as keyof typeof COMMAND_FLAGS]) {
-      allowedFlags.add(flag);
-    }
-  }
-
-  for (const flag of parsed.flags) {
-    if (!allowedFlags.has(flag)) {
-      const commandContext = parsed.command ? ` for command "${parsed.command}"` : "";
-      throw new CliUsageError(
-        `Unknown flag "${flag}"${commandContext}.`,
-        findClosestSuggestion(flag, [...allowedFlags]),
-      );
-    }
-  }
-}
-
-function formatTable(
-  rows: Array<Record<string, string>>,
-  columns: Array<{ key: string; label: string }>,
-): string {
-  if (rows.length === 0) {
-    return "";
-  }
-
-  const widths = columns.map(({ key, label }) =>
-    Math.max(label.length, ...rows.map((row) => row[key].length)),
-  );
-
-  const renderRow = (row: Record<string, string>) =>
-    columns
-      .map(({ key }, index) => row[key].padEnd(widths[index]))
-      .join("  ")
-      .trimEnd();
-
-  const header = renderRow(
-    Object.fromEntries(columns.map(({ key, label }) => [key, label])),
-  );
-  const separator = widths.map((width) => "-".repeat(width)).join("  ");
-
-  return [header, separator, ...rows.map(renderRow)].join("\n");
-}
-
-function describeCurrentListStatus(
-  status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
-): string {
-  if (!status.exists) {
-    return "Current auth: missing";
-  }
-
-  if (status.matched_accounts.length === 0) {
-    return "Current auth: unmanaged";
-  }
-
-  if (status.matched_accounts.length === 1) {
-    return `Current managed account: ${status.matched_accounts[0]}`;
-  }
-
-  return `Current managed account: multiple (${status.matched_accounts.join(", ")})`;
-}
-
-function printHelp(stream: NodeJS.WriteStream): void {
-  stream.write(`codexm - manage multiple Codex ChatGPT auth snapshots
-
-Usage:
-  codexm --version
-  codexm --help
-  codexm completion <zsh|bash>
-  codexm current [--refresh] [--json]
-  codexm doctor [--json]
-  codexm list [name] [--verbose] [--json]
-  codexm add <name> [--device-auth|--with-api-key] [--force] [--json]
-  codexm save <name> [--force] [--json]
-  codexm update [--json]
-  codexm switch <name> [--force] [--json]
-  codexm switch --auto [--dry-run] [--force] [--json]
-  codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]
-  codexm watch [--no-auto-switch] [--detach] [--status] [--stop]
-  codexm remove <name> [--yes] [--json]
-  codexm rename <old> <new> [--json]
-
-Global flags: --help, --version, --debug
-
-Notes:
-  codexm current shows live usage when a managed Codex Desktop session is available.
-  codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.
-  codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.
-  codexm list refreshes quota data, shows the current managed account, and marks current rows with "*"; use --verbose to expand score inputs.
-  Run codexm launch from an external terminal if you need to restart Codex Desktop.
-  Unknown commands and flags fail fast; close matches include a suggestion.
-
-Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
-`);
-}
-
-const COMPLETION_ACCOUNT_COMMANDS = new Set(["launch", "list", "remove", "rename", "switch"] as const);
-
-function quoteBashWords(words: readonly string[]): string {
-  return words.join(" ");
-}
-
-function describeCommandFlag(flag: string): string {
-  switch (flag) {
-    case "--accounts":
-      return `${flag}:print saved account names for shell completion`;
-    case "--auto":
-      return `${flag}:switch to the best available account`;
-    case "--debug":
-      return `${flag}:enable debug logging`;
-    case "--detach":
-      return `${flag}:run watch in the background`;
-    case "--device-auth":
-      return `${flag}:add account with device-code login`;
-    case "--no-auto-switch":
-      return `${flag}:watch without switching accounts automatically`;
-    case "--dry-run":
-      return `${flag}:show the selected account without switching`;
-    case "--force":
-      return `${flag}:skip confirmation and force the action`;
-    case "--help":
-      return `${flag}:show help`;
-    case "--json":
-      return `${flag}:print JSON output`;
-    case "--refresh":
-      return `${flag}:refresh quota data before printing`;
-    case "--status":
-      return `${flag}:show background watch status`;
-    case "--stop":
-      return `${flag}:stop the background watch`;
-    case "--watch":
-      return `${flag}:start a detached watch after launch`;
-    case "--with-api-key":
-      return `${flag}:add account by reading an API key from stdin`;
-    case "--version":
-      return `${flag}:print the installed version`;
-    case "--yes":
-      return `${flag}:skip removal confirmation`;
-    default:
-      return `${flag}:option`;
-  }
-}
-
-function buildCompletionZshScript(): string {
-  const commands = COMMAND_NAMES.map((command) => `'${command}:${command} command'`).join("\n    ");
-  // `_describe` expects `name:description`; if we pass `--flag[description]`,
-  // zsh treats the whole string as the inserted completion candidate.
-  const globalFlags = [...GLOBAL_FLAGS].map(describeCommandFlag).map((flag) => `'${flag}'`).join("\n    ");
-
-  const commandCases = COMMAND_NAMES.map((command) => {
-    const flags = [...COMMAND_FLAGS[command]]
-      .map(describeCommandFlag)
-      .map((flag) => `'${flag}'`)
-      .join(" ");
-    return `    ${command})
-      command_flags=(${flags})
-      ;;`;
-  }).join("\n");
-
-  const accountCommandPattern = [...COMPLETION_ACCOUNT_COMMANDS].join("|");
-
-  return `#compdef codexm
-
-_codexm() {
-  local -a commands global_flags command_flags accounts
-  local command=\${words[2]}
-
-  commands=(
-    ${commands}
-  )
-  global_flags=(
-    ${globalFlags}
-  )
-
-  if (( CURRENT == 2 )); then
-    _describe -t commands 'command' commands
-    _describe -t flags 'global flag' global_flags
-    return 0
-  fi
-
-  if [[ \$command == completion ]]; then
-    _describe -t completion-target 'completion target' \\
-      'zsh:zsh completion script' \\
-      'bash:bash completion script' \\
-      '--accounts:print saved account names for completion'
-    return 0
-  fi
-
-  if (( CURRENT == 3 )) && [[ \${words[CURRENT]} != --* ]]; then
-    case \$command in
-      ${accountCommandPattern}) ;;
-      *) return 0 ;;
-    esac
-
-    accounts=(\${(@f)\$(codexm completion --accounts 2>/dev/null)})
-    if (( \${#accounts[@]} > 0 )); then
-      _describe -t accounts 'account' accounts
-      return 0
-    fi
-  fi
-
-  command_flags=()
-  case \$command in
-${commandCases}
-  esac
-
-  if [[ \${words[CURRENT]} == --* ]]; then
-    _describe -t flags 'global flag' global_flags
-    _describe -t flags 'command flag' command_flags
-  fi
-}
-
-_codexm "$@"
-`;
-}
-
-function buildCompletionBashScript(): string {
-  const commands = COMMAND_NAMES.join(" ");
-  const globalFlags = [...GLOBAL_FLAGS].join(" ");
-  const commandCases = COMMAND_NAMES.map((command) => {
-    const flags = [...COMMAND_FLAGS[command]].join(" ");
-    return `    ${command}) command_flags="${flags}" ;;`;
-  }).join("\n");
-
-  const accountCommandCases = [...COMPLETION_ACCOUNT_COMMANDS]
-    .map((command) => `    ${command})`)
-    .join("|");
-
-  return `_codexm() {
-  local cur prev command command_flags global_flags commands accounts
-  COMPREPLY=()
-  cur="\${COMP_WORDS[COMP_CWORD]}"
-  prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  command="\${COMP_WORDS[1]}"
-  global_flags="${quoteBashWords([...GLOBAL_FLAGS])}"
-  commands="${commands}"
-
-  if [[ \${COMP_CWORD} -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "\${commands} \${global_flags}" -- "\${cur}") )
-    return 0
-  fi
-
-  if [[ "\${command}" == "completion" ]]; then
-    COMPREPLY=( $(compgen -W "zsh bash --accounts" -- "\${cur}") )
-    return 0
-  fi
-
-  if [[ \${COMP_CWORD} -eq 2 && "\${cur}" != --* ]]; then
-    case "\${command}" in
-      ${accountCommandCases})
-        accounts="$(codexm completion --accounts 2>/dev/null)"
-        COMPREPLY=( $(compgen -W "\${accounts}" -- "\${cur}") )
-        return 0
-        ;;
-    esac
-  fi
-
-  command_flags=""
-  case "\${command}" in
-${commandCases}
-  esac
-
-  if [[ "\${cur}" == --* ]]; then
-    COMPREPLY=( $(compgen -W "\${global_flags} \${command_flags}" -- "\${cur}") )
-  fi
-}
-
-complete -F _codexm codexm
-`;
-}
-
-async function listCompletionAccountNames(store: AccountStore): Promise<string[]> {
-  const { accounts } = await store.listAccounts();
-  return accounts.map((account) => account.name).sort((left, right) => left.localeCompare(right));
-}
-
-async function readStreamToString(stream: NodeJS.ReadStream): Promise<string> {
-  let content = "";
-  stream.setEncoding("utf8");
-
-  for await (const chunk of stream) {
-    content += typeof chunk === "string" ? chunk : chunk.toString("utf8");
-  }
-
-  return content;
-}
 
 const NON_MANAGED_DESKTOP_WARNING_PREFIX =
   '"codexm switch" updates local auth, but running Codex Desktop may still use the previous login state.';
@@ -706,36 +240,6 @@ async function refreshManagedDesktopAfterSwitch(
   }
 }
 
-function describeCurrentUsageSummary(
-  quota: ReturnType<typeof toCliQuotaSummary> | null,
-  unavailableReason: string | null,
-  sourceLabel?: string,
-): string {
-  if (quota === null) {
-    return unavailableReason ? `Usage: ${unavailableReason}` : "Usage: unavailable";
-  }
-
-  if (quota.refresh_status !== "ok") {
-    if (quota.refresh_status === "unsupported") {
-      return "Usage: unsupported";
-    }
-
-    return `Usage: ${quota.refresh_status}${quota.error_message ? ` | ${quota.error_message}` : ""}`;
-  }
-
-  return [
-    `Usage: ${quota.available ?? "unknown"}`,
-    `5H ${quota.five_hour?.used_percent ?? "-"}% used`,
-    `1W ${quota.one_week?.used_percent ?? "-"}% used`,
-    sourceLabel ??
-      `fetched ${
-        quota.fetched_at
-          ? dayjs.utc(quota.fetched_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm")
-          : "unknown"
-      }`,
-  ].join(" | ");
-}
-
 function describeWatchQuotaUpdate(quota: ReturnType<typeof toCliQuotaSummary> | null): string {
   if (!quota) {
     return "Quota update: Usage: unavailable";
@@ -762,6 +266,14 @@ function formatWatchField(key: string, value: string | number): string {
   }
 
   return `${key}=${JSON.stringify(value)}`;
+}
+
+function computeRemainingPercent(usedPercent: number | undefined): number | null {
+  if (typeof usedPercent !== "number") {
+    return null;
+  }
+
+  return Math.max(0, 100 - usedPercent);
 }
 
 function describeWatchQuotaEvent(
@@ -876,58 +388,6 @@ async function ensureDetachedWatch(
   };
 }
 
-function describeCurrentStatus(
-  status: CurrentStatusView,
-  usage?: {
-    quota: ReturnType<typeof toCliQuotaSummary> | null;
-    unavailableReason: string | null;
-    sourceLabel?: string;
-  },
-): string {
-  const lines: string[] = [];
-
-  if (!status.exists) {
-    lines.push("Current auth: missing");
-  } else {
-    lines.push("Current auth: present");
-    lines.push(`Source: ${describeCurrentSource(status.source)}`);
-    lines.push(`Auth mode: ${status.auth_mode}`);
-    if (status.identity) {
-      lines.push(`Identity: ${maskAccountId(status.identity)}`);
-    }
-    if (status.matched_accounts.length === 0) {
-      lines.push("Managed account: no (unmanaged)");
-    } else if (status.matched_accounts.length === 1) {
-      lines.push(`Managed account: ${status.matched_accounts[0]}`);
-    } else {
-      lines.push(`Managed account: multiple (${status.matched_accounts.join(", ")})`);
-    }
-  }
-
-  for (const warning of status.warnings) {
-    lines.push(`Warning: ${warning}`);
-  }
-
-  if (usage) {
-    lines.push(
-      describeCurrentUsageSummary(usage.quota, usage.unavailableReason, usage.sourceLabel),
-    );
-  }
-
-  return lines.join("\n");
-}
-
-function describeCurrentSource(source: CurrentStatusView["source"]): string {
-  switch (source) {
-    case "desktop-runtime":
-      return "managed Desktop runtime (mcp + auth.json)";
-    case "direct-runtime":
-      return "direct Codex runtime (app-server + auth.json)";
-    default:
-      return "local auth.json";
-  }
-}
-
 async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -942,36 +402,6 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function quotaSummaryLabel(quota: ReturnType<typeof toCliQuotaSummary> | null): string {
-  return describeCurrentUsageSummary(quota, null).replace(/^Usage:\s*/, "");
-}
-
-function runtimeAccountLabel(account: RuntimeAccountSnapshot | null): string {
-  if (!account) {
-    return "unavailable";
-  }
-
-  const fields = [account.auth_mode ?? "unknown"];
-  if (account.email) {
-    fields.push(account.email);
-  }
-  if (account.plan_type) {
-    fields.push(account.plan_type);
-  }
-  return fields.join(" | ");
-}
-
-function hasRuntimeAuthDifference(
-  left: { auth_mode: string | null } | null,
-  right: { auth_mode: string | null } | null,
-): boolean | null {
-  if (!left || !right || !left.auth_mode || !right.auth_mode) {
-    return null;
-  }
-
-  return left.auth_mode !== right.auth_mode;
-}
-
 function createDebugLogger(
   stream: NodeJS.WriteStream,
   enabled: boolean,
@@ -983,28 +413,6 @@ function createDebugLogger(
   return (message: string) => {
     stream.write(`[debug] ${message}\n`);
   };
-}
-
-async function tryReadCurrentRuntimeQuota(
-  desktopLauncher: CodexDesktopLauncher,
-  debugLog?: (message: string) => void,
-): Promise<CurrentRuntimeQuotaView | null> {
-  try {
-    const quotaResult = await desktopLauncher.readCurrentRuntimeQuotaResult();
-    if (!quotaResult) {
-      debugLog?.("current: runtime quota unavailable");
-      return null;
-    }
-
-    debugLog?.(`current: using ${quotaResult.source} runtime quota`);
-    return {
-      quota: toCliQuotaSummaryFromRuntimeQuota(quotaResult.snapshot),
-      source: quotaResult.source,
-    };
-  } catch (error) {
-    debugLog?.(`current: runtime quota read failed: ${(error as Error).message}`);
-    return null;
-  }
 }
 
 async function tryReadManagedDesktopQuota(
@@ -1030,289 +438,6 @@ async function tryReadManagedDesktopQuota(
     debugLog?.(`watch: managed Desktop quota read failed: ${(error as Error).message}`);
     return null;
   }
-}
-
-async function tryReadCurrentRuntimeAccount(
-  desktopLauncher: CodexDesktopLauncher,
-  debugLog?: (message: string) => void,
-): Promise<CurrentRuntimeAccountView | null> {
-  try {
-    const accountResult = await desktopLauncher.readCurrentRuntimeAccountResult();
-    if (!accountResult) {
-      debugLog?.("current: runtime account unavailable");
-      return null;
-    }
-
-    debugLog?.(`current: using ${accountResult.source} runtime account`);
-    return accountResult;
-  } catch (error) {
-    debugLog?.(`current: runtime account read failed: ${(error as Error).message}`);
-    return null;
-  }
-}
-
-function buildCurrentStatusView(
-  localStatus: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
-  runtimeAccountView: CurrentRuntimeAccountView | null,
-): CurrentStatusView {
-  const warnings = [...localStatus.warnings];
-  let runtimeDiffersFromLocal = false;
-  const runtimeAccount = runtimeAccountView?.snapshot ?? null;
-
-  if (runtimeAccount && runtimeAccount.auth_mode !== localStatus.auth_mode) {
-    runtimeDiffersFromLocal = true;
-    warnings.push(
-      runtimeAccountView?.source === "desktop"
-        ? "Managed Desktop auth differs from ~/.codex/auth.json."
-        : "Direct Codex runtime auth differs from ~/.codex/auth.json.",
-    );
-  }
-
-  return {
-    ...localStatus,
-    exists:
-      localStatus.exists ||
-      (runtimeAccount !== null && runtimeAccount.auth_mode !== null),
-    auth_mode: runtimeAccount?.auth_mode ?? localStatus.auth_mode,
-    warnings,
-    source:
-      runtimeAccountView?.source === "desktop"
-        ? "desktop-runtime"
-        : runtimeAccountView?.source === "direct"
-          ? "direct-runtime"
-          : "auth.json",
-    runtime_differs_from_local: runtimeDiffersFromLocal,
-  };
-}
-
-async function inspectDoctorCurrentAuth(store: AccountStore): Promise<DoctorCurrentAuthView> {
-  if (!(await pathExists(store.paths.currentAuthPath))) {
-    return {
-      status: "missing",
-      auth_mode: null,
-      identity: null,
-      matched_accounts: [],
-      managed: false,
-      error: null,
-    };
-  }
-
-  try {
-    const localStatus = await store.getCurrentStatus();
-    return {
-      status: "ok",
-      auth_mode: localStatus.auth_mode,
-      identity: localStatus.identity,
-      matched_accounts: localStatus.matched_accounts,
-      managed: localStatus.managed,
-      error: null,
-    };
-  } catch (error) {
-    let parsedAuthMode: string | null = null;
-    let parsedIdentity: string | null = null;
-
-    try {
-      const rawAuth = await readFile(store.paths.currentAuthPath, "utf8");
-      const snapshot = parseAuthSnapshot(rawAuth);
-      parsedAuthMode = snapshot.auth_mode;
-      parsedIdentity = getSnapshotIdentity(snapshot);
-    } catch {
-      // Keep the doctor output best-effort when current auth parsing fails.
-    }
-
-    return {
-      status: "invalid",
-      auth_mode: parsedAuthMode,
-      identity: parsedIdentity,
-      matched_accounts: [],
-      managed: false,
-      error: (error as Error).message,
-    };
-  }
-}
-
-async function inspectDirectRuntime(
-  desktopLauncher: CodexDesktopLauncher,
-): Promise<DoctorRuntimeView> {
-  try {
-    const account = await desktopLauncher.readDirectRuntimeAccount();
-    if (!account) {
-      return {
-        status: "unavailable",
-        account: null,
-        quota: null,
-        error: "Direct runtime did not return account info.",
-      };
-    }
-
-    try {
-      const quotaSnapshot = await desktopLauncher.readDirectRuntimeQuota();
-      return {
-        status: "ok",
-        account,
-        quota: quotaSnapshot ? toCliQuotaSummaryFromRuntimeQuota(quotaSnapshot) : null,
-        error: null,
-      };
-    } catch {
-      return {
-        status: "ok",
-        account,
-        quota: null,
-        error: null,
-      };
-    }
-  } catch (error) {
-    return {
-      status: "error",
-      account: null,
-      quota: null,
-      error: (error as Error).message,
-    };
-  }
-}
-
-async function inspectDesktopRuntime(
-  desktopLauncher: CodexDesktopLauncher,
-  currentAuth: DoctorCurrentAuthView,
-  directRuntime: DoctorRuntimeView,
-): Promise<DoctorDesktopRuntimeView> {
-  try {
-    const account = await desktopLauncher.readManagedCurrentAccount();
-    const quotaSnapshot = await desktopLauncher.readManagedCurrentQuota();
-
-    if (!account && !quotaSnapshot) {
-      return {
-        status: "unavailable",
-        account: null,
-        quota: null,
-        error: null,
-        differs_from_local: null,
-        differs_from_direct: null,
-      };
-    }
-
-    return {
-      status: "ok",
-      account,
-      quota: quotaSnapshot ? toCliQuotaSummaryFromRuntimeQuota(quotaSnapshot) : null,
-      error: null,
-      differs_from_local: hasRuntimeAuthDifference(
-        account,
-        currentAuth.status === "ok" ? { auth_mode: currentAuth.auth_mode } : null,
-      ),
-      differs_from_direct: hasRuntimeAuthDifference(account, directRuntime.account),
-    };
-  } catch (error) {
-    return {
-      status: "error",
-      account: null,
-      quota: null,
-      error: (error as Error).message,
-      differs_from_local: null,
-      differs_from_direct: null,
-    };
-  }
-}
-
-async function runDoctorChecks(
-  store: AccountStore,
-  desktopLauncher: CodexDesktopLauncher,
-): Promise<CliDoctorReport> {
-  const [storeReport, currentAuth, directRuntime] = await Promise.all([
-    store.doctor(),
-    inspectDoctorCurrentAuth(store),
-    inspectDirectRuntime(desktopLauncher),
-  ]);
-  const desktopRuntime = await inspectDesktopRuntime(desktopLauncher, currentAuth, directRuntime);
-
-  const warnings = [...storeReport.warnings];
-  const issues = [...storeReport.issues];
-
-  if (currentAuth.status === "missing") {
-    issues.push("Current ~/.codex/auth.json is missing.");
-  } else if (currentAuth.status === "invalid" && currentAuth.error) {
-    issues.push(`Current auth.json is invalid: ${currentAuth.error}`);
-  }
-
-  if (directRuntime.status !== "ok") {
-    issues.push(directRuntime.error ?? "Direct runtime health check failed.");
-  } else if (!directRuntime.quota) {
-    warnings.push("Direct runtime quota probe did not return usage info.");
-  }
-
-  if (desktopRuntime.status === "error") {
-    warnings.push(`Managed Desktop runtime probe failed: ${desktopRuntime.error}`);
-  }
-
-  if (desktopRuntime.differs_from_local === true) {
-    warnings.push("Managed Desktop runtime auth differs from ~/.codex/auth.json.");
-  }
-
-  if (desktopRuntime.differs_from_direct === true) {
-    warnings.push("Managed Desktop runtime auth differs from the direct runtime probe.");
-  }
-
-  const uniqueWarnings = [...new Set(warnings)];
-  const uniqueIssues = [...new Set(issues)];
-
-  return {
-    healthy: uniqueIssues.length === 0,
-    store: storeReport,
-    current_auth: currentAuth,
-    direct_runtime: directRuntime,
-    desktop_runtime: desktopRuntime,
-    warnings: uniqueWarnings,
-    issues: uniqueIssues,
-  };
-}
-
-function describeDoctorReport(report: CliDoctorReport): string {
-  const lines = [
-    `Doctor: ${report.healthy ? "healthy" : "issues found"}`,
-    `Store: ${report.store.healthy ? "healthy" : "issues found"} | accounts=${report.store.account_count} | invalid=${report.store.invalid_accounts.length}`,
-    `Current auth: ${report.current_auth.status}${
-      report.current_auth.status === "ok"
-        ? ` | ${report.current_auth.auth_mode ?? "unknown"} | managed=${report.current_auth.managed ? "yes" : "no"}`
-        : report.current_auth.error
-          ? ` | ${report.current_auth.error}`
-          : ""
-    }`,
-    `Direct runtime: ${report.direct_runtime.status}${
-      report.direct_runtime.status === "ok"
-        ? ` | ${runtimeAccountLabel(report.direct_runtime.account)}`
-        : report.direct_runtime.error
-          ? ` | ${report.direct_runtime.error}`
-          : ""
-    }`,
-  ];
-
-  if (report.direct_runtime.status === "ok") {
-    lines.push(`Direct quota: ${quotaSummaryLabel(report.direct_runtime.quota)}`);
-  }
-
-  lines.push(
-    `Desktop runtime: ${report.desktop_runtime.status}${
-      report.desktop_runtime.status === "ok"
-        ? ` | ${runtimeAccountLabel(report.desktop_runtime.account)}`
-        : report.desktop_runtime.error
-          ? ` | ${report.desktop_runtime.error}`
-          : ""
-    }`,
-  );
-
-  if (report.desktop_runtime.status === "ok" && report.desktop_runtime.quota) {
-    lines.push(`Desktop quota: ${quotaSummaryLabel(report.desktop_runtime.quota)}`);
-  }
-
-  for (const warning of report.warnings) {
-    lines.push(`Warning: ${warning}`);
-  }
-
-  for (const issue of report.issues) {
-    lines.push(`Issue: ${issue}`);
-  }
-
-  return lines.join("\n");
 }
 
 interface AutoSwitchExecutionResult {
@@ -1575,524 +700,6 @@ function describeBusySwitchLock(lockPath: string, owner: SwitchLockOwner | null)
   return message;
 }
 
-function formatUsagePercent(
-  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
-): string {
-  if (!window) {
-    return "-";
-  }
-
-  return `${window.used_percent}%`;
-}
-
-function formatResetAt(
-  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
-): string {
-  if (!window?.reset_at) {
-    return "-";
-  }
-
-  return dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
-}
-
-function computeAvailability(account: AccountQuotaSummary): string | null {
-  if (account.status !== "ok") {
-    return null;
-  }
-
-  const usedPercents = [account.five_hour?.used_percent, account.one_week?.used_percent].filter(
-    (value): value is number => typeof value === "number",
-  );
-
-  if (usedPercents.length === 0) {
-    return null;
-  }
-
-  if (usedPercents.some((value) => value >= 100)) {
-    return "unavailable";
-  }
-
-  if (usedPercents.some((value) => 100 - value < 10)) {
-    return "almost unavailable";
-  }
-
-  return "available";
-}
-
-function toCliQuotaSummary(account: AccountQuotaSummary) {
-  const { status, ...rest } = account;
-  return {
-    ...rest,
-    available: computeAvailability(account),
-    refresh_status: status,
-  };
-}
-
-function toCliQuotaRefreshResult(result: {
-  successes: AccountQuotaSummary[];
-  failures: Array<{ name: string; error: string }>;
-}) {
-  return {
-    successes: result.successes.map(toCliQuotaSummary),
-    failures: result.failures,
-  };
-}
-
-function toCliQuotaSummaryFromRuntimeQuota(quota: RuntimeQuotaSnapshot) {
-  const normalizeWindow = (
-    window: RuntimeQuotaSnapshot["five_hour"] | RuntimeQuotaSnapshot["one_week"],
-  ): AccountQuotaSummary["five_hour"] =>
-    window
-      ? {
-          used_percent: window.used_percent,
-          window_seconds: window.window_seconds,
-          ...(window.reset_at ? { reset_at: window.reset_at } : {}),
-        }
-      : null;
-
-  const account: AccountQuotaSummary = {
-    name: "__current__",
-    account_id: "__current__",
-    user_id: null,
-    identity: "__current__",
-    plan_type: quota.plan_type,
-    credits_balance: quota.credits_balance,
-    status: "ok",
-    fetched_at: quota.fetched_at,
-    error_message: null,
-    unlimited: quota.unlimited,
-    five_hour: normalizeWindow(quota.five_hour),
-    one_week: normalizeWindow(quota.one_week),
-  };
-
-  return toCliQuotaSummary(account);
-}
-
-function isTerminalWatchQuota(quota: ReturnType<typeof toCliQuotaSummary> | null): boolean {
-  return quota?.refresh_status === "ok" && quota.available === "unavailable";
-}
-
-function computeRemainingPercent(usedPercent: number | undefined): number | null {
-  if (typeof usedPercent !== "number") {
-    return null;
-  }
-
-  return Math.max(0, 100 - usedPercent);
-}
-
-function roundScore(value: number): number {
-  return Number(value.toFixed(2));
-}
-
-function resolveFiveHourWindowsPerWeek(planType: string | null): number {
-  if (!planType) {
-    return AUTO_SWITCH_SCORING.defaultFiveHourWindowsPerWeek;
-  }
-
-  return (
-    AUTO_SWITCH_SCORING.fiveHourWindowsPerWeekByPlan[
-      planType as keyof typeof AUTO_SWITCH_SCORING.fiveHourWindowsPerWeekByPlan
-    ] ?? AUTO_SWITCH_SCORING.defaultFiveHourWindowsPerWeek
-  );
-}
-
-function convertFiveHourPercentToWeeklyEquivalent(
-  fiveHourPercent: number | null,
-  fiveHourWindowsPerWeek: number,
-): number | null {
-  if (fiveHourPercent === null) {
-    return null;
-  }
-
-  return roundScore(fiveHourPercent / fiveHourWindowsPerWeek);
-}
-
-function computeProjectedRemainingPercent(
-  fetchedAt: string | null,
-  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
-): number | null {
-  if (!window || typeof window.used_percent !== "number") {
-    return null;
-  }
-
-  const remaining = computeRemainingPercent(window.used_percent);
-  if (remaining === null) {
-    return null;
-  }
-
-  if (!fetchedAt || !window.reset_at) {
-    return remaining;
-  }
-
-  const fetchedAtMs = Date.parse(fetchedAt);
-  const resetAtMs = Date.parse(window.reset_at);
-  if (Number.isNaN(fetchedAtMs) || Number.isNaN(resetAtMs)) {
-    return remaining;
-  }
-
-  const horizonSeconds = AUTO_SWITCH_PROJECTION_HORIZON_SECONDS;
-  const timeUntilResetSeconds = Math.max(0, (resetAtMs - fetchedAtMs) / 1000);
-  if (timeUntilResetSeconds >= horizonSeconds) {
-    return remaining;
-  }
-
-  const beforeResetSeconds = Math.min(horizonSeconds, timeUntilResetSeconds);
-  const afterResetSeconds = horizonSeconds - beforeResetSeconds;
-  return roundScore((remaining * beforeResetSeconds + 100 * afterResetSeconds) / horizonSeconds);
-}
-
-function compareNullableNumberDescending(left: number | null, right: number | null): number {
-  if (left === right) {
-    return 0;
-  }
-  if (left === null) {
-    return 1;
-  }
-  if (right === null) {
-    return -1;
-  }
-  return right - left;
-}
-
-function resolveBottleneckScore(left: number | null, right: number | null): number | null {
-  if (left !== null && right !== null) {
-    return Math.min(left, right);
-  }
-
-  return left ?? right;
-}
-
-function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchCandidate | null {
-  if (account.status !== "ok") {
-    return null;
-  }
-
-  const fiveHourWindowsPerWeek = resolveFiveHourWindowsPerWeek(account.plan_type);
-  const remain5h = computeRemainingPercent(account.five_hour?.used_percent);
-  const remain1w = computeRemainingPercent(account.one_week?.used_percent);
-  if (remain5h === null && remain1w === null) {
-    return null;
-  }
-
-  const remain5hEq1w = convertFiveHourPercentToWeeklyEquivalent(remain5h, fiveHourWindowsPerWeek);
-  const projected5hScore = computeProjectedRemainingPercent(account.fetched_at, account.five_hour);
-  const projected5hEq1wScore = convertFiveHourPercentToWeeklyEquivalent(
-    projected5hScore,
-    fiveHourWindowsPerWeek,
-  );
-  const projected1wScore = computeProjectedRemainingPercent(account.fetched_at, account.one_week);
-  const currentScore = resolveBottleneckScore(remain5hEq1w, remain1w);
-  const effectiveScore = resolveBottleneckScore(projected5hEq1wScore, projected1wScore);
-
-  if (currentScore === null || effectiveScore === null) {
-    return null;
-  }
-
-  return {
-    name: account.name,
-    account_id: account.account_id,
-    identity: account.identity,
-    plan_type: account.plan_type,
-    available: computeAvailability(account),
-    refresh_status: "ok",
-    current_score: currentScore,
-    score_1h: effectiveScore,
-    projected_5h_1h: projected5hScore,
-    projected_5h_in_1w_units_1h: projected5hEq1wScore,
-    projected_1w_1h: projected1wScore,
-    remain_5h: remain5h,
-    remain_5h_in_1w_units: remain5hEq1w,
-    remain_1w: remain1w,
-    five_hour_windows_per_week: fiveHourWindowsPerWeek,
-    five_hour_used: account.five_hour?.used_percent ?? null,
-    one_week_used: account.one_week?.used_percent ?? null,
-    five_hour_reset_at: account.five_hour?.reset_at ?? null,
-    one_week_reset_at: account.one_week?.reset_at ?? null,
-  };
-}
-
-function compareNullableDateAscending(left: string | null, right: string | null): number {
-  if (left === right) {
-    return 0;
-  }
-  if (left === null) {
-    return 1;
-  }
-  if (right === null) {
-    return -1;
-  }
-  return left.localeCompare(right);
-}
-
-export function rankAutoSwitchCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidate[] {
-  return accounts
-    .map(toAutoSwitchCandidate)
-    .filter((candidate): candidate is AutoSwitchCandidate => candidate !== null)
-    .sort((left, right) => {
-      const currentScoreGap = Math.abs(right.current_score - left.current_score);
-      if (currentScoreGap > AUTO_SWITCH_CURRENT_SCORE_TIEBREAK_DELTA) {
-        return right.current_score - left.current_score;
-      }
-      if (right.score_1h !== left.score_1h) {
-        return right.score_1h - left.score_1h;
-      }
-      if (right.current_score !== left.current_score) {
-        return right.current_score - left.current_score;
-      }
-      const projected5hOrder = compareNullableNumberDescending(
-        left.projected_5h_in_1w_units_1h,
-        right.projected_5h_in_1w_units_1h,
-      );
-      if (projected5hOrder !== 0) {
-        return projected5hOrder;
-      }
-      const projected1wOrder = compareNullableNumberDescending(
-        left.projected_1w_1h,
-        right.projected_1w_1h,
-      );
-      if (projected1wOrder !== 0) {
-        return projected1wOrder;
-      }
-      const remain5hOrder = compareNullableNumberDescending(
-        left.remain_5h_in_1w_units,
-        right.remain_5h_in_1w_units,
-      );
-      if (remain5hOrder !== 0) {
-        return remain5hOrder;
-      }
-      const remain1wOrder = compareNullableNumberDescending(
-        left.remain_1w,
-        right.remain_1w,
-      );
-      if (remain1wOrder !== 0) {
-        return remain1wOrder;
-      }
-
-      const fiveHourResetOrder = compareNullableDateAscending(
-        left.five_hour_reset_at,
-        right.five_hour_reset_at,
-      );
-      if (fiveHourResetOrder !== 0) {
-        return fiveHourResetOrder;
-      }
-
-      const oneWeekResetOrder = compareNullableDateAscending(
-        left.one_week_reset_at,
-        right.one_week_reset_at,
-      );
-      if (oneWeekResetOrder !== 0) {
-        return oneWeekResetOrder;
-      }
-
-      return left.name.localeCompare(right.name);
-    });
-}
-
-function formatRemainingPercent(value: number | null): string {
-  return value === null ? "-" : `${value}%`;
-}
-
-function formatRawScore(value: number | null): string {
-  return value === null ? "-" : String(value);
-}
-
-function normalizeDisplayedScore(rawScore: number | null, fiveHourWindowsPerWeek: number): number | null {
-  if (rawScore === null) {
-    return null;
-  }
-
-  return roundScore(Math.min(100, rawScore * fiveHourWindowsPerWeek));
-}
-
-function describeAutoSwitchSelection(
-  candidate: AutoSwitchCandidate,
-  dryRun: boolean,
-  backupPath: string | null,
-  warnings: string[],
-): string {
-  const lines = [
-    dryRun
-      ? `Best account: "${candidate.name}" (${maskAccountId(candidate.identity)}).`
-      : `Auto-switched to "${candidate.name}" (${maskAccountId(candidate.identity)}).`,
-    `Current score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.current_score, candidate.five_hour_windows_per_week))}`,
-    `1H score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.score_1h, candidate.five_hour_windows_per_week))}`,
-    `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
-    `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
-    `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
-    `5H 1H projected score: ${formatRemainingPercent(candidate.projected_5h_1h)}`,
-    `5H 1H projected score (1W units): ${formatRawScore(candidate.projected_5h_in_1w_units_1h)}`,
-    `1W 1H projected score: ${formatRemainingPercent(candidate.projected_1w_1h)}`,
-  ];
-
-  if (backupPath) {
-    lines.push(`Backup: ${backupPath}`);
-  }
-  for (const warning of warnings) {
-    lines.push(`Warning: ${warning}`);
-  }
-
-  return lines.join("\n");
-}
-
-function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings: string[]): string {
-  const lines = [
-    `Current account "${candidate.name}" (${maskAccountId(candidate.identity)}) is already the best available account.`,
-    `Current score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.current_score, candidate.five_hour_windows_per_week))}`,
-    `1H score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.score_1h, candidate.five_hour_windows_per_week))}`,
-    `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
-    `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
-    `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
-    `5H 1H projected score: ${formatRemainingPercent(candidate.projected_5h_1h)}`,
-    `5H 1H projected score (1W units): ${formatRawScore(candidate.projected_5h_in_1w_units_1h)}`,
-    `1W 1H projected score: ${formatRemainingPercent(candidate.projected_1w_1h)}`,
-  ];
-
-  for (const warning of warnings) {
-    lines.push(`Warning: ${warning}`);
-  }
-
-  return lines.join("\n");
-}
-
-function describeQuotaAccounts(
-  accounts: AccountQuotaSummary[],
-  currentStatus: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
-  warnings: string[],
-  options: { verbose?: boolean } = {},
-): string {
-  if (accounts.length === 0) {
-    const lines = [describeCurrentListStatus(currentStatus), "No saved accounts."];
-    for (const warning of warnings) {
-      lines.push(`Warning: ${warning}`);
-    }
-
-    return lines.join("\n");
-  }
-
-  const currentAccounts = new Set(currentStatus.matched_accounts);
-  const autoSwitchCandidates = new Map(
-    rankAutoSwitchCandidates(accounts).map((candidate) => [candidate.name, candidate] as const),
-  );
-  const rows = accounts.map((account) => {
-    const candidate = autoSwitchCandidates.get(account.name);
-    const row: Record<string, string> = {
-      name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
-      account_id: maskAccountId(account.identity),
-      plan_type: account.plan_type ?? "-",
-      available: computeAvailability(account) ?? "-",
-      score: candidate
-        ? formatRemainingPercent(
-            normalizeDisplayedScore(candidate.current_score, candidate.five_hour_windows_per_week),
-          )
-        : "-",
-      five_hour: formatUsagePercent(account.five_hour),
-      five_hour_reset: formatResetAt(account.five_hour),
-      one_week: formatUsagePercent(account.one_week),
-      one_week_reset: formatResetAt(account.one_week),
-      refresh_status: account.status,
-    };
-
-    if (options.verbose) {
-      row.projected_5h_in_1w_units_1h = candidate
-        ? formatRawScore(candidate.projected_5h_in_1w_units_1h)
-        : "-";
-      row.score_1h = candidate
-        ? formatRemainingPercent(
-            normalizeDisplayedScore(candidate.score_1h, candidate.five_hour_windows_per_week),
-          )
-        : "-";
-      row.projected_1w_1h = candidate ? formatRemainingPercent(candidate.projected_1w_1h) : "-";
-      row.five_hour_windows_per_week = candidate ? String(candidate.five_hour_windows_per_week) : "-";
-    }
-
-    return row;
-  });
-
-  const columns = [
-    { key: "name", label: "  NAME" },
-    { key: "account_id", label: "IDENTITY" },
-    { key: "plan_type", label: "PLAN TYPE" },
-    { key: "available", label: "AVAILABLE" },
-    { key: "score", label: "CURRENT SCORE" },
-    { key: "five_hour", label: "5H USED" },
-    { key: "five_hour_reset", label: "5H RESET AT" },
-    { key: "one_week", label: "1W USED" },
-    { key: "one_week_reset", label: "1W RESET AT" },
-    { key: "refresh_status", label: "REFRESH STATUS" },
-  ];
-
-  if (options.verbose) {
-    columns.splice(
-      5,
-      0,
-      { key: "score_1h", label: "1H SCORE" },
-      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H RAW" },
-      { key: "projected_1w_1h", label: "1W 1H" },
-      { key: "five_hour_windows_per_week", label: "1W:5H" },
-    );
-  }
-
-  const table = formatTable(rows, columns);
-
-  const lines = [describeCurrentListStatus(currentStatus), "Refreshed quotas:", table];
-  for (const warning of warnings) {
-    lines.push(`Warning: ${warning}`);
-  }
-
-  return lines.join("\n");
-}
-
-function describeQuotaRefresh(result: {
-  successes: AccountQuotaSummary[];
-  failures: Array<{ name: string; error: string }>;
-}, currentStatus: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>, options: { verbose?: boolean } = {}): string {
-  const lines: string[] = [];
-
-  if (result.successes.length > 0) {
-    lines.push(describeQuotaAccounts(result.successes, currentStatus, [], options));
-  } else {
-    lines.push(describeQuotaAccounts([], currentStatus, [], options));
-  }
-
-  for (const failure of result.failures) {
-    lines.push(`Failure: ${failure.name}: ${failure.error}`);
-  }
-
-  if (lines.length === 0) {
-    lines.push(describeQuotaAccounts([], currentStatus, [], options));
-  }
-
-  return lines.join("\n");
-}
-
-async function confirmRemoval(
-  name: string,
-  streams: CliStreams,
-): Promise<boolean> {
-  if (!streams.stdin.isTTY) {
-    throw new Error(`Refusing to remove "${name}" without --yes in a non-interactive terminal.`);
-  }
-
-  streams.stdout.write(`Remove saved account "${name}"? [y/N] `);
-
-  return await new Promise<boolean>((resolve) => {
-    const cleanup = () => {
-      streams.stdin.off("data", onData);
-      streams.stdin.pause();
-    };
-
-    const onData = (buffer: Buffer) => {
-      const answer = buffer.toString("utf8").trim().toLowerCase();
-      cleanup();
-      streams.stdout.write("\n");
-      resolve(answer === "y" || answer === "yes");
-    };
-
-    streams.stdin.resume();
-    streams.stdin.on("data", onData);
-  });
-}
-
 async function confirmDesktopRelaunch(
   streams: CliStreams,
   prompt: string,
@@ -2245,278 +852,79 @@ export async function runCli(
 
     switch (parsed.command) {
       case "completion": {
-        if (parsed.flags.has("--accounts")) {
-          if (parsed.positionals.length > 0) {
-            throw new Error("Usage: codexm completion --accounts");
-          }
-
-          const accountNames = await listCompletionAccountNames(store);
-          if (accountNames.length > 0) {
-            streams.stdout.write(`${accountNames.join("\n")}\n`);
-          }
-          return 0;
-        }
-
-        const shell = parsed.positionals[0] ?? null;
-        if (parsed.positionals.length !== 1 || (shell !== "zsh" && shell !== "bash")) {
-          throw new Error("Usage: codexm completion <zsh|bash>");
-        }
-
-        streams.stdout.write(shell === "zsh" ? buildCompletionZshScript() : buildCompletionBashScript());
-        return 0;
+        return await handleCompletionCommand({
+          store,
+          positionals: parsed.positionals,
+          flags: parsed.flags,
+          stdout: streams.stdout,
+        });
       }
 
       case "current": {
-        const refresh = parsed.flags.has("--refresh");
-        const localStatus = await store.getCurrentStatus();
-        const runtimeAccount = await tryReadCurrentRuntimeAccount(desktopLauncher, debugLog);
-        const result = buildCurrentStatusView(localStatus, runtimeAccount);
-        let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
-        let usageUnavailableReason: string | null = null;
-        let usageSourceLabel: string | null = null;
-
-        if (!refresh && result.exists && result.matched_accounts.length === 1) {
-          const runtimeQuota = await tryReadCurrentRuntimeQuota(desktopLauncher, debugLog);
-          if (runtimeQuota) {
-            quota = runtimeQuota.quota;
-            usageSourceLabel =
-              runtimeQuota.source === "desktop" ? "live Desktop runtime" : "direct runtime";
-          }
-        }
-
-        if (refresh) {
-          if (!result.exists) {
-            usageUnavailableReason = "unavailable (current auth is missing)";
-          } else if (result.matched_accounts.length === 0) {
-            usageUnavailableReason = "unavailable (current auth is unmanaged)";
-          } else if (result.matched_accounts.length > 1) {
-            usageUnavailableReason = "unavailable (current auth matches multiple managed accounts)";
-          } else {
-            const currentName = result.matched_accounts[0];
-            const runtimeQuota = await tryReadCurrentRuntimeQuota(desktopLauncher, debugLog);
-            if (runtimeQuota) {
-              quota = runtimeQuota.quota;
-              usageSourceLabel =
-                runtimeQuota.source === "desktop"
-                  ? "refreshed via Desktop runtime"
-                  : "refreshed via direct runtime";
-            } else {
-              const quotaResult = await store.refreshQuotaForAccount(currentName);
-              const quotaList = await store.listQuotaSummaries();
-              const matched =
-                quotaList.accounts.find((account) => account.name === quotaResult.account.name) ??
-                null;
-              quota = matched ? toCliQuotaSummary(matched) : null;
-              if (quota) {
-                usageSourceLabel = "refreshed via api";
-              }
-            }
-          }
-        }
-
-        debugLog(
-          `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"} source=${result.source} runtime_differs=${result.runtime_differs_from_local} refresh=${refresh} quota_refreshed=${quota !== null} quota_source=${usageSourceLabel ?? "none"}`,
-        );
-        if (json) {
-          writeJson(
-            streams.stdout,
-            refresh || quota
-              ? {
-                  ...result,
-                  quota,
-                }
-              : result,
-          );
-        } else {
-          streams.stdout.write(
-            `${describeCurrentStatus(
-              result,
-              refresh
-                ? {
-                    quota,
-                    unavailableReason: usageUnavailableReason,
-                    sourceLabel: usageSourceLabel ?? undefined,
-                  }
-                : quota
-                  ? {
-                      quota,
-                      unavailableReason: usageUnavailableReason,
-                      sourceLabel: usageSourceLabel ?? undefined,
-                    }
-                  : undefined,
-            )}\n`,
-          );
-        }
-        return 0;
+        return await handleCurrentCommand({
+          store,
+          desktopLauncher,
+          stdout: streams.stdout,
+          debugLog,
+          json,
+          refresh: parsed.flags.has("--refresh"),
+        });
       }
 
       case "doctor": {
-        const report = await runDoctorChecks(store, desktopLauncher);
-        debugLog(
-          `doctor: healthy=${report.healthy} current_auth=${report.current_auth.status} direct_runtime=${report.direct_runtime.status} desktop_runtime=${report.desktop_runtime.status} warnings=${report.warnings.length} issues=${report.issues.length}`,
-        );
-
-        if (json) {
-          writeJson(streams.stdout, report);
-        } else {
-          streams.stdout.write(`${describeDoctorReport(report)}\n`);
-        }
-
-        return report.healthy ? 0 : 1;
+        return await handleDoctorCommand({
+          store,
+          desktopLauncher,
+          stdout: streams.stdout,
+          debugLog,
+          json,
+        });
       }
 
       case "list": {
-        const targetName = parsed.positionals[0];
-        const verbose = parsed.flags.has("--verbose");
-        const result = await store.refreshAllQuotas(targetName);
-        const current = await store.getCurrentStatus();
-        const currentAccounts = new Set(current.matched_accounts);
-        debugLog(
-          `list: target=${targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} current_matches=${current.matched_accounts.length}`,
-        );
-        if (json) {
-          writeJson(streams.stdout, {
-            ...toCliQuotaRefreshResult(result),
-            current,
-            successes: result.successes.map((account) => ({
-              ...toCliQuotaSummary(account),
-              is_current: currentAccounts.has(account.name),
-            })),
-          });
-        } else {
-          streams.stdout.write(`${describeQuotaRefresh(result, current, { verbose })}\n`);
-        }
-        return result.failures.length === 0 ? 0 : 1;
+        return await handleListCommand({
+          store,
+          stdout: streams.stdout,
+          debugLog,
+          json,
+          targetName: parsed.positionals[0],
+          verbose: parsed.flags.has("--verbose"),
+        });
       }
 
       case "add": {
-        const name = parsed.positionals[0];
-        const deviceAuth = parsed.flags.has("--device-auth");
-        const withApiKey = parsed.flags.has("--with-api-key");
-        const force = parsed.flags.has("--force");
-        if (!name || parsed.positionals.length !== 1 || (deviceAuth && withApiKey)) {
-          throw new Error("Usage: codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
-        }
-
-        const snapshot = withApiKey
-          ? {
-              auth_mode: "apikey",
-              OPENAI_API_KEY: (await readStreamToString(streams.stdin)).trim(),
-            }
-          : await authLogin.login({
-              mode: deviceAuth ? "device" : "browser",
-              stdout: streams.stdout,
-              stderr: streams.stderr,
-            });
-        if (withApiKey && !snapshot.OPENAI_API_KEY) {
-          throw new Error("No API key was provided on stdin.");
-        }
-
-        const account = await store.addAccountSnapshot(name, snapshot, {
-          force,
-          rawConfig: withApiKey ? "" : null,
+        return await handleAddCommand({
+          name: parsed.positionals[0],
+          positionals: parsed.positionals,
+          deviceAuth: parsed.flags.has("--device-auth"),
+          withApiKey: parsed.flags.has("--with-api-key"),
+          force: parsed.flags.has("--force"),
+          json,
+          store,
+          authLogin,
+          streams,
+          debugLog,
         });
-        debugLog(
-          `add: name=${account.name} auth_mode=${account.auth_mode} identity=${maskAccountId(account.identity)} mode=${withApiKey ? "apikey" : deviceAuth ? "device" : "browser"}`,
-        );
-        const payload = {
-          ok: true,
-          action: "add",
-          account: {
-            name: account.name,
-            account_id: account.account_id,
-            user_id: account.user_id ?? null,
-            identity: account.identity,
-            auth_mode: account.auth_mode,
-          },
-        };
-
-        if (json) {
-          writeJson(streams.stdout, payload);
-        } else {
-          streams.stdout.write(
-            `Added account "${account.name}" (${maskAccountId(account.identity)}).\n`,
-          );
-        }
-        return 0;
       }
 
       case "save": {
-        const name = parsed.positionals[0];
-        if (!name) {
-          throw new Error("Usage: codexm save <name> [--force]");
-        }
-
-        const account = await store.saveCurrentAccount(name, parsed.flags.has("--force"));
-        debugLog(
-          `save: name=${account.name} auth_mode=${account.auth_mode} identity=${maskAccountId(account.identity)}`,
-        );
-        const payload = {
-          ok: true,
-          action: "save",
-          account: {
-            name: account.name,
-            account_id: account.account_id,
-            user_id: account.user_id ?? null,
-            identity: account.identity,
-            auth_mode: account.auth_mode,
-          },
-        };
-
-        if (json) {
-          writeJson(streams.stdout, payload);
-        } else {
-          streams.stdout.write(
-            `Saved account "${account.name}" (${maskAccountId(account.identity)}).\n`,
-          );
-        }
-        return 0;
+        return await handleSaveCommand({
+          name: parsed.positionals[0],
+          json,
+          force: parsed.flags.has("--force"),
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
       }
 
       case "update": {
-        const result = await store.updateCurrentManagedAccount();
-        const warnings: string[] = [];
-        let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
-
-        try {
-          const quotaResult = await store.refreshQuotaForAccount(result.account.name);
-          const quotaList = await store.listQuotaSummaries();
-          const matched =
-            quotaList.accounts.find((account) => account.name === quotaResult.account.name) ??
-            null;
-          quota = matched ? toCliQuotaSummary(matched) : null;
-        } catch (error) {
-          warnings.push((error as Error).message);
-        }
-
-        const payload = {
-          ok: true,
-          action: "update",
-          account: {
-            name: result.account.name,
-            account_id: result.account.account_id,
-            user_id: result.account.user_id ?? null,
-            identity: result.account.identity,
-            auth_mode: result.account.auth_mode,
-          },
-          quota,
-          warnings,
-        };
-        debugLog(
-          `update: name=${result.account.name} quota=${quota?.refresh_status ?? "unknown"} warnings=${warnings.length}`,
-        );
-
-        if (json) {
-          writeJson(streams.stdout, payload);
-        } else {
-          streams.stdout.write(
-            `Updated managed account "${result.account.name}" (${maskAccountId(result.account.identity)}).\n`,
-          );
-          for (const warning of warnings) {
-            streams.stdout.write(`Warning: ${warning}\n`);
-          }
-        }
-        return 0;
+        return await handleUpdateCommand({
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
       }
 
       case "switch": {
@@ -3223,62 +1631,25 @@ export async function runCli(
       }
 
       case "remove": {
-        const name = parsed.positionals[0];
-        if (!name) {
-          throw new Error("Usage: codexm remove <name> [--yes]");
-        }
-
-        const confirmed =
-          parsed.flags.has("--yes") || (await confirmRemoval(name, streams));
-        debugLog(`remove: target=${name} confirmed=${confirmed}`);
-        if (!confirmed) {
-          if (json) {
-            writeJson(streams.stdout, {
-              ok: false,
-              action: "remove",
-              account: name,
-              cancelled: true,
-            });
-          } else {
-            streams.stdout.write("Cancelled.\n");
-          }
-          return 1;
-        }
-
-        await store.removeAccount(name);
-        if (json) {
-          writeJson(streams.stdout, { ok: true, action: "remove", account: name });
-        } else {
-          streams.stdout.write(`Removed account "${name}".\n`);
-        }
-        return 0;
+        return await handleRemoveCommand({
+          name: parsed.positionals[0],
+          json,
+          yes: parsed.flags.has("--yes"),
+          store,
+          streams,
+          debugLog,
+        });
       }
 
       case "rename": {
-        const oldName = parsed.positionals[0];
-        const newName = parsed.positionals[1];
-        if (!oldName || !newName) {
-          throw new Error("Usage: codexm rename <old> <new>");
-        }
-
-        const account = await store.renameAccount(oldName, newName);
-        debugLog(`rename: from=${oldName} to=${newName} identity=${maskAccountId(account.identity)}`);
-        if (json) {
-          writeJson(streams.stdout, {
-            ok: true,
-            action: "rename",
-            account: {
-              name: account.name,
-              account_id: account.account_id,
-              user_id: account.user_id ?? null,
-              identity: account.identity,
-              auth_mode: account.auth_mode,
-            },
-          });
-        } else {
-          streams.stdout.write(`Renamed "${oldName}" to "${newName}".\n`);
-        }
-        return 0;
+        return await handleRenameCommand({
+          oldName: parsed.positionals[0],
+          newName: parsed.positionals[1],
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
       }
 
       default:
