@@ -63,6 +63,8 @@ function createDesktopLauncherStub(overrides: Partial<{
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
+  readDirectRuntimeAccount: () => Promise<RuntimeAccountSnapshot | null>;
+  readDirectRuntimeQuota: () => Promise<RuntimeQuotaSnapshot | null>;
   readCurrentRuntimeAccountResult: () => Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null>;
   readCurrentRuntimeQuotaResult: () => Promise<RuntimeReadResult<RuntimeQuotaSnapshot> | null>;
   readCurrentRuntimeAccount: () => Promise<RuntimeAccountSnapshot | null>;
@@ -120,6 +122,16 @@ function createDesktopLauncherStub(overrides: Partial<{
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    readDirectRuntimeAccount:
+      overrides.readDirectRuntimeAccount
+      ?? overrides.readCurrentRuntimeAccount
+      ?? overrides.readManagedCurrentAccount
+      ?? (async () => null),
+    readDirectRuntimeQuota:
+      overrides.readDirectRuntimeQuota
+      ?? overrides.readCurrentRuntimeQuota
+      ?? overrides.readManagedCurrentQuota
+      ?? (async () => null),
     readCurrentRuntimeAccountResult:
       overrides.readCurrentRuntimeAccountResult
       ?? (async () => {
@@ -257,6 +269,7 @@ describe("CLI", () => {
 
     expect(output).toContain("codexm --version");
     expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
+    expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
     expect(output).toContain("codexm completion <zsh|bash>");
@@ -288,6 +301,7 @@ describe("CLI", () => {
       expect(script).toContain("#compdef codexm");
       expect(script).toContain("add");
       expect(script).toContain("current");
+      expect(script).toContain("doctor");
       expect(script).toContain("watch");
       expect(script).toContain("completion");
       expect(script).toContain("--device-auth");
@@ -599,6 +613,168 @@ describe("CLI", () => {
       expect(output).toContain("Source: managed Desktop runtime (mcp + auth.json)");
       expect(output).toContain("Managed account: current-live");
       expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | live Desktop runtime");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("doctor --json reports local, direct, and Desktop runtime checks", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-cli-doctor");
+      await runCli(["save", "doctor-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["doctor", "--json"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readDirectRuntimeAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "doctor@example.com",
+            plan_type: "plus",
+            requires_openai_auth: true,
+          }),
+          readDirectRuntimeQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 11,
+            unlimited: false,
+            five_hour: {
+              used_percent: 12,
+              window_seconds: 18_000,
+              reset_at: "2026-03-18T21:17:21.000Z",
+            },
+            one_week: {
+              used_percent: 47,
+              window_seconds: 604_800,
+              reset_at: "2026-03-19T03:14:00.000Z",
+            },
+            fetched_at: "2026-04-08T13:28:00.000Z",
+          }),
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "doctor@example.com",
+            plan_type: "plus",
+            requires_openai_auth: true,
+          }),
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 11,
+            unlimited: false,
+            five_hour: {
+              used_percent: 12,
+              window_seconds: 18_000,
+              reset_at: "2026-03-18T21:17:21.000Z",
+            },
+            one_week: {
+              used_percent: 47,
+              window_seconds: 604_800,
+              reset_at: "2026-03-19T03:14:00.000Z",
+            },
+            fetched_at: "2026-04-08T13:28:00.000Z",
+          }),
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        healthy: true,
+        current_auth: {
+          status: "ok",
+          managed: true,
+          matched_accounts: ["doctor-main"],
+        },
+        direct_runtime: {
+          status: "ok",
+          account: {
+            auth_mode: "chatgpt",
+            email: "doctor@example.com",
+            plan_type: "plus",
+          },
+          quota: {
+            available: "available",
+          },
+        },
+        desktop_runtime: {
+          status: "ok",
+          differs_from_direct: false,
+          differs_from_local: false,
+        },
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("doctor returns non-zero when the direct runtime check fails", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-cli-doctor-fail");
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["doctor"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readDirectRuntimeAccount: async () => {
+            throw new Error("401 Unauthorized");
+          },
+          readManagedCurrentAccount: async () => null,
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toContain("Direct runtime: error | 401 Unauthorized");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("doctor warns when the managed Desktop runtime differs from local auth", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentApiKeyAuth(homeDir, "sk-cli-doctor-drift");
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["doctor"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readDirectRuntimeAccount: async () => ({
+            auth_mode: "apikey",
+            email: null,
+            plan_type: null,
+            requires_openai_auth: false,
+          }),
+          readDirectRuntimeQuota: async () => null,
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "desktop@example.com",
+            plan_type: "plus",
+            requires_openai_auth: true,
+          }),
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain(
+        "Warning: Managed Desktop runtime auth differs from ~/.codex/auth.json.",
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }

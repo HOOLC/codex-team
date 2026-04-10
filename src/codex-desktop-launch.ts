@@ -138,6 +138,8 @@ export interface CodexDesktopLauncher {
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;
   isManagedDesktopRunning(): Promise<boolean>;
+  readDirectRuntimeAccount(): Promise<RuntimeAccountSnapshot | null>;
+  readDirectRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null>;
   readCurrentRuntimeAccountResult(): Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null>;
   readCurrentRuntimeQuotaResult(): Promise<RuntimeReadResult<RuntimeQuotaSnapshot> | null>;
   readCurrentRuntimeAccount(): Promise<RuntimeAccountSnapshot | null>;
@@ -2152,6 +2154,8 @@ export function createCodexDesktopLauncher(options: {
     writeManagedState,
     clearManagedState,
     isManagedDesktopRunning,
+    readDirectRuntimeAccount,
+    readDirectRuntimeQuota,
     readCurrentRuntimeAccountResult,
     readCurrentRuntimeQuotaResult,
     readCurrentRuntimeAccount,

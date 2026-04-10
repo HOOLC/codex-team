@@ -127,7 +127,7 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 ### 3.4 后续 `doctor`
 
-`doctor` 应优先使用 direct client 做“运行时凭据有效性”检查，再按需补充 Desktop 一致性检查。
+`doctor` 使用 **direct 优先** 的检查顺序：
 
 推荐分层：
 
@@ -136,6 +136,19 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 3. direct client 能否成功 `account/read`
 4. direct client 能否成功 `account/rateLimits/read`
 5. 若受管 Desktop 存在，再比对 Desktop runtime 与本地状态是否一致
+
+目前 CLI 上的 `codexm doctor` 落地为：
+
+1. 复用 `store.doctor()` 检查本地存储结构、权限、损坏账号
+2. 单独检查当前 `~/.codex/auth.json` 是否缺失或损坏
+3. 通过 direct runtime 检查当前凭据是否真的能启动并返回账号信息
+4. direct quota probe 失败只记 warning，不直接判定 unhealthy
+5. 若受管 Desktop 可读，再补一层 Desktop runtime 与本地 / direct runtime 的 auth mode 一致性告警
+
+退出码约定：
+
+- `0`：没有 issue
+- `1`：存在 issue（例如 current auth 缺失 / 损坏，或 direct runtime account probe 失败）
 
 ## 4. 命名约定
 

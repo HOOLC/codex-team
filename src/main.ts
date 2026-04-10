@@ -8,6 +8,10 @@ import packageJson from "../package.json";
 
 import { maskAccountId } from "./auth-snapshot.js";
 import {
+  getSnapshotIdentity,
+  parseAuthSnapshot,
+} from "./auth-snapshot.js";
+import {
   AccountStore,
   type AccountQuotaSummary,
   createAccountStore,
@@ -105,6 +109,41 @@ interface CurrentRuntimeQuotaView {
   source: RuntimeReadSource;
 }
 
+interface DoctorCurrentAuthView {
+  status: "ok" | "missing" | "invalid";
+  auth_mode: string | null;
+  identity: string | null;
+  matched_accounts: string[];
+  managed: boolean;
+  error: string | null;
+}
+
+interface DoctorRuntimeView {
+  status: "ok" | "unavailable" | "error";
+  account: RuntimeAccountSnapshot | null;
+  quota: ReturnType<typeof toCliQuotaSummary> | null;
+  error: string | null;
+}
+
+interface DoctorDesktopRuntimeView {
+  status: "ok" | "unavailable" | "error";
+  account: RuntimeAccountSnapshot | null;
+  quota: ReturnType<typeof toCliQuotaSummary> | null;
+  error: string | null;
+  differs_from_local: boolean | null;
+  differs_from_direct: boolean | null;
+}
+
+interface CliDoctorReport {
+  healthy: boolean;
+  store: Awaited<ReturnType<AccountStore["doctor"]>>;
+  current_auth: DoctorCurrentAuthView;
+  direct_runtime: DoctorRuntimeView;
+  desktop_runtime: DoctorDesktopRuntimeView;
+  warnings: string[];
+  issues: string[];
+}
+
 interface SwitchLockOwner {
   pid: number;
   command: string;
@@ -123,6 +162,7 @@ class CliUsageError extends Error {
 
 const COMMAND_NAMES = [
   "current",
+  "doctor",
   "list",
   "add",
   "save",
@@ -155,6 +195,7 @@ const SWITCH_LOCK_DIR_NAME = "switch.lock";
 
 const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   current: new Set(["--json", "--refresh"]),
+  doctor: new Set(["--json"]),
   list: new Set(["--json", "--verbose"]),
   add: new Set(["--device-auth", "--with-api-key", "--force", "--json"]),
   save: new Set(["--force", "--json"]),
@@ -310,6 +351,7 @@ Usage:
   codexm --help
   codexm completion <zsh|bash>
   codexm current [--refresh] [--json]
+  codexm doctor [--json]
   codexm list [name] [--verbose] [--json]
   codexm add <name> [--device-auth|--with-api-key] [--force] [--json]
   codexm save <name> [--force] [--json]
@@ -326,6 +368,7 @@ Global flags: --help, --version, --debug
 Notes:
   codexm current shows live usage when a managed Codex Desktop session is available.
   codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.
+  codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.
   codexm list refreshes quota data, shows the current managed account, and marks current rows with "*"; use --verbose to expand score inputs.
   Run codexm launch from an external terminal if you need to restart Codex Desktop.
   Unknown commands and flags fail fast; close matches include a suggestion.
@@ -878,6 +921,50 @@ function describeCurrentSource(source: CurrentStatusView["source"]): string {
   }
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+function quotaSummaryLabel(quota: ReturnType<typeof toCliQuotaSummary> | null): string {
+  return describeCurrentUsageSummary(quota, null).replace(/^Usage:\s*/, "");
+}
+
+function runtimeAccountLabel(account: RuntimeAccountSnapshot | null): string {
+  if (!account) {
+    return "unavailable";
+  }
+
+  const fields = [account.auth_mode ?? "unknown"];
+  if (account.email) {
+    fields.push(account.email);
+  }
+  if (account.plan_type) {
+    fields.push(account.plan_type);
+  }
+  return fields.join(" | ");
+}
+
+function hasRuntimeAuthDifference(
+  left: { auth_mode: string | null } | null,
+  right: { auth_mode: string | null } | null,
+): boolean | null {
+  if (!left || !right || !left.auth_mode || !right.auth_mode) {
+    return null;
+  }
+
+  return left.auth_mode !== right.auth_mode;
+}
+
 function createDebugLogger(
   stream: NodeJS.WriteStream,
   enabled: boolean,
@@ -989,6 +1076,236 @@ function buildCurrentStatusView(
           : "auth.json",
     runtime_differs_from_local: runtimeDiffersFromLocal,
   };
+}
+
+async function inspectDoctorCurrentAuth(store: AccountStore): Promise<DoctorCurrentAuthView> {
+  if (!(await pathExists(store.paths.currentAuthPath))) {
+    return {
+      status: "missing",
+      auth_mode: null,
+      identity: null,
+      matched_accounts: [],
+      managed: false,
+      error: null,
+    };
+  }
+
+  try {
+    const localStatus = await store.getCurrentStatus();
+    return {
+      status: "ok",
+      auth_mode: localStatus.auth_mode,
+      identity: localStatus.identity,
+      matched_accounts: localStatus.matched_accounts,
+      managed: localStatus.managed,
+      error: null,
+    };
+  } catch (error) {
+    let parsedAuthMode: string | null = null;
+    let parsedIdentity: string | null = null;
+
+    try {
+      const rawAuth = await readFile(store.paths.currentAuthPath, "utf8");
+      const snapshot = parseAuthSnapshot(rawAuth);
+      parsedAuthMode = snapshot.auth_mode;
+      parsedIdentity = getSnapshotIdentity(snapshot);
+    } catch {
+      // Keep the doctor output best-effort when current auth parsing fails.
+    }
+
+    return {
+      status: "invalid",
+      auth_mode: parsedAuthMode,
+      identity: parsedIdentity,
+      matched_accounts: [],
+      managed: false,
+      error: (error as Error).message,
+    };
+  }
+}
+
+async function inspectDirectRuntime(
+  desktopLauncher: CodexDesktopLauncher,
+): Promise<DoctorRuntimeView> {
+  try {
+    const account = await desktopLauncher.readDirectRuntimeAccount();
+    if (!account) {
+      return {
+        status: "unavailable",
+        account: null,
+        quota: null,
+        error: "Direct runtime did not return account info.",
+      };
+    }
+
+    try {
+      const quotaSnapshot = await desktopLauncher.readDirectRuntimeQuota();
+      return {
+        status: "ok",
+        account,
+        quota: quotaSnapshot ? toCliQuotaSummaryFromRuntimeQuota(quotaSnapshot) : null,
+        error: null,
+      };
+    } catch {
+      return {
+        status: "ok",
+        account,
+        quota: null,
+        error: null,
+      };
+    }
+  } catch (error) {
+    return {
+      status: "error",
+      account: null,
+      quota: null,
+      error: (error as Error).message,
+    };
+  }
+}
+
+async function inspectDesktopRuntime(
+  desktopLauncher: CodexDesktopLauncher,
+  currentAuth: DoctorCurrentAuthView,
+  directRuntime: DoctorRuntimeView,
+): Promise<DoctorDesktopRuntimeView> {
+  try {
+    const account = await desktopLauncher.readManagedCurrentAccount();
+    const quotaSnapshot = await desktopLauncher.readManagedCurrentQuota();
+
+    if (!account && !quotaSnapshot) {
+      return {
+        status: "unavailable",
+        account: null,
+        quota: null,
+        error: null,
+        differs_from_local: null,
+        differs_from_direct: null,
+      };
+    }
+
+    return {
+      status: "ok",
+      account,
+      quota: quotaSnapshot ? toCliQuotaSummaryFromRuntimeQuota(quotaSnapshot) : null,
+      error: null,
+      differs_from_local: hasRuntimeAuthDifference(
+        account,
+        currentAuth.status === "ok" ? { auth_mode: currentAuth.auth_mode } : null,
+      ),
+      differs_from_direct: hasRuntimeAuthDifference(account, directRuntime.account),
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      account: null,
+      quota: null,
+      error: (error as Error).message,
+      differs_from_local: null,
+      differs_from_direct: null,
+    };
+  }
+}
+
+async function runDoctorChecks(
+  store: AccountStore,
+  desktopLauncher: CodexDesktopLauncher,
+): Promise<CliDoctorReport> {
+  const [storeReport, currentAuth, directRuntime] = await Promise.all([
+    store.doctor(),
+    inspectDoctorCurrentAuth(store),
+    inspectDirectRuntime(desktopLauncher),
+  ]);
+  const desktopRuntime = await inspectDesktopRuntime(desktopLauncher, currentAuth, directRuntime);
+
+  const warnings = [...storeReport.warnings];
+  const issues = [...storeReport.issues];
+
+  if (currentAuth.status === "missing") {
+    issues.push("Current ~/.codex/auth.json is missing.");
+  } else if (currentAuth.status === "invalid" && currentAuth.error) {
+    issues.push(`Current auth.json is invalid: ${currentAuth.error}`);
+  }
+
+  if (directRuntime.status !== "ok") {
+    issues.push(directRuntime.error ?? "Direct runtime health check failed.");
+  } else if (!directRuntime.quota) {
+    warnings.push("Direct runtime quota probe did not return usage info.");
+  }
+
+  if (desktopRuntime.status === "error") {
+    warnings.push(`Managed Desktop runtime probe failed: ${desktopRuntime.error}`);
+  }
+
+  if (desktopRuntime.differs_from_local === true) {
+    warnings.push("Managed Desktop runtime auth differs from ~/.codex/auth.json.");
+  }
+
+  if (desktopRuntime.differs_from_direct === true) {
+    warnings.push("Managed Desktop runtime auth differs from the direct runtime probe.");
+  }
+
+  const uniqueWarnings = [...new Set(warnings)];
+  const uniqueIssues = [...new Set(issues)];
+
+  return {
+    healthy: uniqueIssues.length === 0,
+    store: storeReport,
+    current_auth: currentAuth,
+    direct_runtime: directRuntime,
+    desktop_runtime: desktopRuntime,
+    warnings: uniqueWarnings,
+    issues: uniqueIssues,
+  };
+}
+
+function describeDoctorReport(report: CliDoctorReport): string {
+  const lines = [
+    `Doctor: ${report.healthy ? "healthy" : "issues found"}`,
+    `Store: ${report.store.healthy ? "healthy" : "issues found"} | accounts=${report.store.account_count} | invalid=${report.store.invalid_accounts.length}`,
+    `Current auth: ${report.current_auth.status}${
+      report.current_auth.status === "ok"
+        ? ` | ${report.current_auth.auth_mode ?? "unknown"} | managed=${report.current_auth.managed ? "yes" : "no"}`
+        : report.current_auth.error
+          ? ` | ${report.current_auth.error}`
+          : ""
+    }`,
+    `Direct runtime: ${report.direct_runtime.status}${
+      report.direct_runtime.status === "ok"
+        ? ` | ${runtimeAccountLabel(report.direct_runtime.account)}`
+        : report.direct_runtime.error
+          ? ` | ${report.direct_runtime.error}`
+          : ""
+    }`,
+  ];
+
+  if (report.direct_runtime.status === "ok") {
+    lines.push(`Direct quota: ${quotaSummaryLabel(report.direct_runtime.quota)}`);
+  }
+
+  lines.push(
+    `Desktop runtime: ${report.desktop_runtime.status}${
+      report.desktop_runtime.status === "ok"
+        ? ` | ${runtimeAccountLabel(report.desktop_runtime.account)}`
+        : report.desktop_runtime.error
+          ? ` | ${report.desktop_runtime.error}`
+          : ""
+    }`,
+  );
+
+  if (report.desktop_runtime.status === "ok" && report.desktop_runtime.quota) {
+    lines.push(`Desktop quota: ${quotaSummaryLabel(report.desktop_runtime.quota)}`);
+  }
+
+  for (const warning of report.warnings) {
+    lines.push(`Warning: ${warning}`);
+  }
+
+  for (const issue of report.issues) {
+    lines.push(`Issue: ${issue}`);
+  }
+
+  return lines.join("\n");
 }
 
 interface AutoSwitchExecutionResult {
@@ -1797,20 +2114,6 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === "ENOENT") {
-      return false;
-    }
-
-    throw error;
-  }
-}
-
 function isRunningDesktopFromApp(
   app: RunningCodexDesktop,
   appPath: string,
@@ -2030,6 +2333,21 @@ export async function runCli(
           );
         }
         return 0;
+      }
+
+      case "doctor": {
+        const report = await runDoctorChecks(store, desktopLauncher);
+        debugLog(
+          `doctor: healthy=${report.healthy} current_auth=${report.current_auth.status} direct_runtime=${report.direct_runtime.status} desktop_runtime=${report.desktop_runtime.status} warnings=${report.warnings.length} issues=${report.issues.length}`,
+        );
+
+        if (json) {
+          writeJson(streams.stdout, report);
+        } else {
+          streams.stdout.write(`${describeDoctorReport(report)}\n`);
+        }
+
+        return report.healthy ? 0 : 1;
       }
 
       case "list": {
