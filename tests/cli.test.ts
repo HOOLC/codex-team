@@ -312,6 +312,8 @@ describe("CLI", () => {
       expect(script).toContain("completion");
       expect(script).toContain("--device-auth");
       expect(script).toContain("--no-auto-switch");
+      expect(script).toContain("'--debug:enable debug logging'");
+      expect(script).not.toContain("'--debug[enable debug logging]'");
       expect(script).toContain("codexm completion --accounts");
       expect(stderr.read()).toBe("");
     } finally {
