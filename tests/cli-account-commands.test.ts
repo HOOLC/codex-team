@@ -36,7 +36,7 @@ describe("CLI Account Commands", () => {
         authLogin: {
           login: async (request) => {
             calls.push(request.mode);
-            return createAuthPayload("acct-added-main", "chatgpt_auth_tokens", "plus", "user-added");
+            return createAuthPayload("acct-added-main", "chatgpt", "plus", "user-added");
           },
         },
       });
@@ -48,7 +48,7 @@ describe("CLI Account Commands", () => {
         action: "add",
         account: {
           name: "added-main",
-          auth_mode: "chatgpt_auth_tokens",
+          auth_mode: "chatgpt",
           account_id: "acct-added-main",
           user_id: "user-added",
         },
@@ -60,7 +60,7 @@ describe("CLI Account Commands", () => {
         "utf8",
       );
       expect(JSON.parse(savedAuthRaw)).toMatchObject({
-        auth_mode: "chatgpt_auth_tokens",
+        auth_mode: "chatgpt",
         tokens: {
           account_id: "acct-added-main",
         },
@@ -87,7 +87,7 @@ describe("CLI Account Commands", () => {
         authLogin: {
           login: async (request) => {
             calls.push(request.mode);
-            return createAuthPayload("acct-device-main", "chatgpt_auth_tokens", "team", "user-device");
+            return createAuthPayload("acct-device-main", "chatgpt", "team", "user-device");
           },
         },
       });

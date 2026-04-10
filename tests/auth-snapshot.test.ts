@@ -24,6 +24,12 @@ describe("auth snapshot parsing", () => {
     expect(() => parseAuthSnapshot(JSON.stringify(payload))).toThrow(/auth_mode/);
   });
 
+  test("rejects unsupported auth modes in auth snapshots", () => {
+    const payload = createAuthPayload("acct-primary", "chatgpt_auth_tokens");
+
+    expect(() => parseAuthSnapshot(JSON.stringify(payload))).toThrow(/Unsupported auth_mode/);
+  });
+
   test("parses an apikey auth snapshot and derives a stable identity", () => {
     const payload = createApiKeyPayload("sk-test-primary");
     const snapshot = parseAuthSnapshot(JSON.stringify(payload));
@@ -115,5 +121,23 @@ describe("auth snapshot parsing", () => {
     expect(parsed.quota.status).toBe("stale");
     expect(parsed.account_id).toBe("acct-primary");
     expect(parsed.user_id).toBe("user-primary");
+  });
+
+  test("rejects unsupported auth modes in account metadata", () => {
+    expect(() =>
+      parseSnapshotMeta(
+        JSON.stringify({
+          name: "main",
+          auth_mode: "chatgpt_auth_tokens",
+          account_id: "acct-primary",
+          created_at: "2026-03-18T00:00:00.000Z",
+          updated_at: "2026-03-18T00:00:00.000Z",
+          last_switched_at: null,
+          quota: {
+            status: "stale",
+          },
+        }),
+      ),
+    ).toThrow(/Unsupported auth_mode/);
   });
 });

@@ -132,7 +132,7 @@ function authSnapshotFromTokens(tokens: TokenExchangeResponse): AuthSnapshot {
   }
 
   return {
-    auth_mode: "chatgpt_auth_tokens",
+    auth_mode: "chatgpt",
     tokens: {
       id_token: tokens.id_token,
       access_token: tokens.access_token,

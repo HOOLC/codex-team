@@ -23,7 +23,7 @@ function captureWritable(): {
 
 describe("Codex login provider", () => {
   test("completes device login using Codex device endpoints", async () => {
-    const auth = createAuthPayload("acct-device-provider", "chatgpt_auth_tokens", "plus", "user-device-provider");
+    const auth = createAuthPayload("acct-device-provider", "chatgpt", "plus", "user-device-provider");
     const requests: Array<{ url: string; body: string }> = [];
     const fetchMock: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -71,7 +71,7 @@ describe("Codex login provider", () => {
     });
 
     expect(snapshot).toMatchObject({
-      auth_mode: "chatgpt_auth_tokens",
+      auth_mode: "chatgpt",
       tokens: {
         account_id: "acct-device-provider",
       },

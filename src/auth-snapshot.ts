@@ -93,13 +93,25 @@ function normalizeAuthMode(authMode: string): string {
   return authMode.trim().toLowerCase();
 }
 
+function isSupportedAuthMode(authMode: string): boolean {
+  return isApiKeyAuthMode(authMode) || isSupportedChatGPTAuthMode(authMode);
+}
+
+function assertSupportedAuthMode(authMode: string, fieldName: string): string {
+  const normalized = normalizeAuthMode(authMode);
+  if (!isSupportedAuthMode(normalized)) {
+    throw new Error(`Unsupported ${fieldName}: ${authMode}`);
+  }
+
+  return normalized;
+}
+
 export function isApiKeyAuthMode(authMode: string): boolean {
   return normalizeAuthMode(authMode) === "apikey";
 }
 
 export function isSupportedChatGPTAuthMode(authMode: string): boolean {
-  const normalized = normalizeAuthMode(authMode);
-  return normalized === "chatgpt" || normalized === "chatgpt_auth_tokens";
+  return normalizeAuthMode(authMode) === "chatgpt";
 }
 
 function extractAuthClaim(
@@ -273,7 +285,10 @@ export function parseAuthSnapshot(raw: string): AuthSnapshot {
     throw new Error("Auth snapshot must be a JSON object.");
   }
 
-  const authMode = asNonEmptyString(parsed.auth_mode, "auth_mode");
+  const authMode = assertSupportedAuthMode(
+    asNonEmptyString(parsed.auth_mode, "auth_mode"),
+    "auth_mode",
+  );
   const tokens = parsed.tokens;
 
   if (tokens !== undefined && tokens !== null && !isRecord(tokens)) {
@@ -363,7 +378,10 @@ export function parseSnapshotMeta(raw: string): SnapshotMeta {
 
   return {
     name: asNonEmptyString(parsed.name, "name"),
-    auth_mode: asNonEmptyString(parsed.auth_mode, "auth_mode"),
+    auth_mode: assertSupportedAuthMode(
+      asNonEmptyString(parsed.auth_mode, "auth_mode"),
+      "auth_mode",
+    ),
     account_id: asNonEmptyString(parsed.account_id, "account_id"),
     user_id: asOptionalString(parsed.user_id, "user_id"),
     created_at: asNonEmptyString(parsed.created_at, "created_at"),
