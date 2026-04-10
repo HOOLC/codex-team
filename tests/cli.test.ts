@@ -16,6 +16,9 @@ import type {
   CodexDesktopLauncher,
   ManagedCurrentQuotaSnapshot,
   ManagedCodexDesktopState,
+  RuntimeAccountSnapshot,
+  RuntimeQuotaSnapshot,
+  RuntimeReadResult,
   RunningCodexDesktop,
 } from "../src/codex-desktop-launch.js";
 import type { WatchProcessManager, WatchProcessState } from "../src/watch-process.js";
@@ -60,6 +63,10 @@ function createDesktopLauncherStub(overrides: Partial<{
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
+  readCurrentRuntimeAccountResult: () => Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null>;
+  readCurrentRuntimeQuotaResult: () => Promise<RuntimeReadResult<RuntimeQuotaSnapshot> | null>;
+  readCurrentRuntimeAccount: () => Promise<RuntimeAccountSnapshot | null>;
+  readCurrentRuntimeQuota: () => Promise<RuntimeQuotaSnapshot | null>;
   readManagedCurrentAccount: () => Promise<ManagedCurrentAccountSnapshot | null>;
   readManagedCurrentQuota: () => Promise<ManagedCurrentQuotaSnapshot | null>;
   isRunningInsideDesktopShell: () => Promise<boolean>;
@@ -113,6 +120,40 @@ function createDesktopLauncherStub(overrides: Partial<{
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    readCurrentRuntimeAccountResult:
+      overrides.readCurrentRuntimeAccountResult
+      ?? (async () => {
+        const snapshot =
+          (await (overrides.readCurrentRuntimeAccount ?? overrides.readManagedCurrentAccount)?.())
+          ?? null;
+        return snapshot
+          ? {
+              snapshot,
+              source: "desktop",
+            }
+          : null;
+      }),
+    readCurrentRuntimeQuotaResult:
+      overrides.readCurrentRuntimeQuotaResult
+      ?? (async () => {
+        const snapshot =
+          (await (overrides.readCurrentRuntimeQuota ?? overrides.readManagedCurrentQuota)?.())
+          ?? null;
+        return snapshot
+          ? {
+              snapshot,
+              source: "desktop",
+            }
+          : null;
+      }),
+    readCurrentRuntimeAccount:
+      overrides.readCurrentRuntimeAccount
+      ?? overrides.readManagedCurrentAccount
+      ?? (async () => null),
+    readCurrentRuntimeQuota:
+      overrides.readCurrentRuntimeQuota
+      ?? overrides.readManagedCurrentQuota
+      ?? (async () => null),
     readManagedCurrentAccount: overrides.readManagedCurrentAccount ?? (async () => null),
     readManagedCurrentQuota: overrides.readManagedCurrentQuota ?? (async () => null),
     isRunningInsideDesktopShell: overrides.isRunningInsideDesktopShell ?? (async () => false),
@@ -510,7 +551,7 @@ describe("CLI", () => {
     expect(stderr.read()).toContain("Error: Usage: codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
   });
 
-  test("current best-effort shows live usage when managed MCP quota is available", async () => {
+  test("current best-effort shows Desktop runtime usage when available", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -555,15 +596,15 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(0);
       const output = stdout.read();
-      expect(output).toContain("Source: managed Desktop (mcp + auth.json)");
+      expect(output).toContain("Source: managed Desktop runtime (mcp + auth.json)");
       expect(output).toContain("Managed account: current-live");
-      expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | live");
+      expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | live Desktop runtime");
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("current --json reports mcp+auth source when managed Desktop account is available", async () => {
+  test("current --json reports desktop-runtime source when managed Desktop account is available", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -595,7 +636,51 @@ describe("CLI", () => {
         exists: true,
         managed: true,
         matched_accounts: ["current-source"],
-        source: "mcp+auth.json",
+        source: "desktop-runtime",
+        runtime_differs_from_local: false,
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --json reports direct-runtime source when Desktop fallback is unavailable", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-cli-current-direct-source");
+      await runCli(["save", "current-direct-source", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--json"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readCurrentRuntimeAccountResult: async () => ({
+            snapshot: {
+              auth_mode: "chatgpt",
+              email: "direct-source@example.com",
+              plan_type: "plus",
+              requires_openai_auth: true,
+            },
+            source: "direct",
+          }),
+          readManagedCurrentAccount: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        exists: true,
+        managed: true,
+        matched_accounts: ["current-direct-source"],
+        source: "direct-runtime",
         runtime_differs_from_local: false,
       });
     } finally {
@@ -627,7 +712,7 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(0);
       const output = stdout.read();
-      expect(output).toContain("Source: managed Desktop (mcp + auth.json)");
+      expect(output).toContain("Source: managed Desktop runtime (mcp + auth.json)");
       expect(output).toContain("Auth mode: chatgpt");
       expect(output).toContain("Warning: Managed Desktop auth differs from ~/.codex/auth.json.");
     } finally {
@@ -741,7 +826,9 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(0);
       expect(fetchCalled).toBe(false);
-      expect(stdout.read()).toContain("Usage: available | 5H 9% used | 1W 31% used | refreshed via mcp");
+      expect(stdout.read()).toContain(
+        "Usage: available | 5H 9% used | 1W 31% used | refreshed via Desktop runtime",
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }

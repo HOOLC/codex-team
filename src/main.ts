@@ -14,12 +14,13 @@ import {
 } from "./account-store.js";
 import {
   createCodexDesktopLauncher,
-  type ManagedCurrentAccountSnapshot,
   type CodexDesktopLauncher,
-  type ManagedCurrentQuotaSnapshot,
   type ManagedCodexDesktopState,
   type ManagedQuotaSignal,
   type ManagedWatchStatusEvent,
+  type RuntimeAccountSnapshot,
+  type RuntimeQuotaSnapshot,
+  type RuntimeReadSource,
   type RunningCodexDesktop,
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
@@ -90,8 +91,18 @@ interface AutoSwitchSelection {
 }
 
 interface CurrentStatusView extends Awaited<ReturnType<AccountStore["getCurrentStatus"]>> {
-  source: "auth.json" | "mcp+auth.json";
+  source: "auth.json" | "desktop-runtime" | "direct-runtime";
   runtime_differs_from_local: boolean;
+}
+
+interface CurrentRuntimeAccountView {
+  snapshot: RuntimeAccountSnapshot;
+  source: RuntimeReadSource;
+}
+
+interface CurrentRuntimeQuotaView {
+  quota: ReturnType<typeof toCliQuotaSummary>;
+  source: RuntimeReadSource;
 }
 
 interface SwitchLockOwner {
@@ -829,9 +840,7 @@ function describeCurrentStatus(
     lines.push("Current auth: missing");
   } else {
     lines.push("Current auth: present");
-    lines.push(
-      `Source: ${status.source === "mcp+auth.json" ? "managed Desktop (mcp + auth.json)" : "local auth.json"}`,
-    );
+    lines.push(`Source: ${describeCurrentSource(status.source)}`);
     lines.push(`Auth mode: ${status.auth_mode}`);
     if (status.identity) {
       lines.push(`Identity: ${maskAccountId(status.identity)}`);
@@ -858,6 +867,17 @@ function describeCurrentStatus(
   return lines.join("\n");
 }
 
+function describeCurrentSource(source: CurrentStatusView["source"]): string {
+  switch (source) {
+    case "desktop-runtime":
+      return "managed Desktop runtime (mcp + auth.json)";
+    case "direct-runtime":
+      return "direct Codex runtime (app-server + auth.json)";
+    default:
+      return "local auth.json";
+  }
+}
+
 function createDebugLogger(
   stream: NodeJS.WriteStream,
   enabled: boolean,
@@ -871,60 +891,87 @@ function createDebugLogger(
   };
 }
 
-async function tryReadManagedCurrentQuota(
+async function tryReadCurrentRuntimeQuota(
   desktopLauncher: CodexDesktopLauncher,
   debugLog?: (message: string) => void,
-  fallbackQuota?: ManagedCurrentQuotaSnapshot | null,
+): Promise<CurrentRuntimeQuotaView | null> {
+  try {
+    const quotaResult = await desktopLauncher.readCurrentRuntimeQuotaResult();
+    if (!quotaResult) {
+      debugLog?.("current: runtime quota unavailable");
+      return null;
+    }
+
+    debugLog?.(`current: using ${quotaResult.source} runtime quota`);
+    return {
+      quota: toCliQuotaSummaryFromRuntimeQuota(quotaResult.snapshot),
+      source: quotaResult.source,
+    };
+  } catch (error) {
+    debugLog?.(`current: runtime quota read failed: ${(error as Error).message}`);
+    return null;
+  }
+}
+
+async function tryReadManagedDesktopQuota(
+  desktopLauncher: CodexDesktopLauncher,
+  debugLog?: (message: string) => void,
+  fallbackQuota?: RuntimeQuotaSnapshot | null,
 ): Promise<ReturnType<typeof toCliQuotaSummary> | null> {
   if (fallbackQuota) {
-    debugLog?.("current: using quota from matched managed MCP signal");
-    return toCliQuotaSummaryFromManagedCurrentQuota(fallbackQuota);
+    debugLog?.("watch: using quota carried by Desktop bridge signal");
+    return toCliQuotaSummaryFromRuntimeQuota(fallbackQuota);
   }
 
   try {
     const quota = await desktopLauncher.readManagedCurrentQuota();
     if (!quota) {
-      debugLog?.("current: managed MCP quota unavailable");
+      debugLog?.("watch: managed Desktop quota unavailable");
       return null;
     }
 
-    debugLog?.("current: using managed MCP quota");
-    return toCliQuotaSummaryFromManagedCurrentQuota(quota);
+    debugLog?.("watch: using managed Desktop quota");
+    return toCliQuotaSummaryFromRuntimeQuota(quota);
   } catch (error) {
-    debugLog?.(`current: managed MCP quota read failed: ${(error as Error).message}`);
+    debugLog?.(`watch: managed Desktop quota read failed: ${(error as Error).message}`);
     return null;
   }
 }
 
-async function tryReadManagedCurrentAccount(
+async function tryReadCurrentRuntimeAccount(
   desktopLauncher: CodexDesktopLauncher,
   debugLog?: (message: string) => void,
-): Promise<ManagedCurrentAccountSnapshot | null> {
+): Promise<CurrentRuntimeAccountView | null> {
   try {
-    const account = await desktopLauncher.readManagedCurrentAccount();
-    if (!account) {
-      debugLog?.("current: managed MCP account unavailable");
+    const accountResult = await desktopLauncher.readCurrentRuntimeAccountResult();
+    if (!accountResult) {
+      debugLog?.("current: runtime account unavailable");
       return null;
     }
 
-    debugLog?.("current: using managed MCP account");
-    return account;
+    debugLog?.(`current: using ${accountResult.source} runtime account`);
+    return accountResult;
   } catch (error) {
-    debugLog?.(`current: managed MCP account read failed: ${(error as Error).message}`);
+    debugLog?.(`current: runtime account read failed: ${(error as Error).message}`);
     return null;
   }
 }
 
 function buildCurrentStatusView(
   localStatus: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
-  runtimeAccount: ManagedCurrentAccountSnapshot | null,
+  runtimeAccountView: CurrentRuntimeAccountView | null,
 ): CurrentStatusView {
   const warnings = [...localStatus.warnings];
   let runtimeDiffersFromLocal = false;
+  const runtimeAccount = runtimeAccountView?.snapshot ?? null;
 
   if (runtimeAccount && runtimeAccount.auth_mode !== localStatus.auth_mode) {
     runtimeDiffersFromLocal = true;
-    warnings.push("Managed Desktop auth differs from ~/.codex/auth.json.");
+    warnings.push(
+      runtimeAccountView?.source === "desktop"
+        ? "Managed Desktop auth differs from ~/.codex/auth.json."
+        : "Direct Codex runtime auth differs from ~/.codex/auth.json.",
+    );
   }
 
   return {
@@ -934,7 +981,12 @@ function buildCurrentStatusView(
       (runtimeAccount !== null && runtimeAccount.auth_mode !== null),
     auth_mode: runtimeAccount?.auth_mode ?? localStatus.auth_mode,
     warnings,
-    source: runtimeAccount ? "mcp+auth.json" : "auth.json",
+    source:
+      runtimeAccountView?.source === "desktop"
+        ? "desktop-runtime"
+        : runtimeAccountView?.source === "direct"
+          ? "direct-runtime"
+          : "auth.json",
     runtime_differs_from_local: runtimeDiffersFromLocal,
   };
 }
@@ -1262,9 +1314,9 @@ function toCliQuotaRefreshResult(result: {
   };
 }
 
-function toCliQuotaSummaryFromManagedCurrentQuota(quota: ManagedCurrentQuotaSnapshot) {
+function toCliQuotaSummaryFromRuntimeQuota(quota: RuntimeQuotaSnapshot) {
   const normalizeWindow = (
-    window: ManagedCurrentQuotaSnapshot["five_hour"] | ManagedCurrentQuotaSnapshot["one_week"],
+    window: RuntimeQuotaSnapshot["five_hour"] | RuntimeQuotaSnapshot["one_week"],
   ): AccountQuotaSummary["five_hour"] =>
     window
       ? {
@@ -1899,16 +1951,18 @@ export async function runCli(
       case "current": {
         const refresh = parsed.flags.has("--refresh");
         const localStatus = await store.getCurrentStatus();
-        const runtimeAccount = await tryReadManagedCurrentAccount(desktopLauncher, debugLog);
+        const runtimeAccount = await tryReadCurrentRuntimeAccount(desktopLauncher, debugLog);
         const result = buildCurrentStatusView(localStatus, runtimeAccount);
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         let usageUnavailableReason: string | null = null;
         let usageSourceLabel: string | null = null;
 
         if (!refresh && result.exists && result.matched_accounts.length === 1) {
-          quota = await tryReadManagedCurrentQuota(desktopLauncher, debugLog);
-          if (quota) {
-            usageSourceLabel = "live";
+          const runtimeQuota = await tryReadCurrentRuntimeQuota(desktopLauncher, debugLog);
+          if (runtimeQuota) {
+            quota = runtimeQuota.quota;
+            usageSourceLabel =
+              runtimeQuota.source === "desktop" ? "live Desktop runtime" : "direct runtime";
           }
         }
 
@@ -1921,9 +1975,13 @@ export async function runCli(
             usageUnavailableReason = "unavailable (current auth matches multiple managed accounts)";
           } else {
             const currentName = result.matched_accounts[0];
-            quota = await tryReadManagedCurrentQuota(desktopLauncher, debugLog);
-            if (quota) {
-              usageSourceLabel = "refreshed via mcp";
+            const runtimeQuota = await tryReadCurrentRuntimeQuota(desktopLauncher, debugLog);
+            if (runtimeQuota) {
+              quota = runtimeQuota.quota;
+              usageSourceLabel =
+                runtimeQuota.source === "desktop"
+                  ? "refreshed via Desktop runtime"
+                  : "refreshed via direct runtime";
             } else {
               const quotaResult = await store.refreshQuotaForAccount(currentName);
               const quotaList = await store.listQuotaSummaries();
@@ -2623,7 +2681,7 @@ export async function runCli(
               `watch: quota signal matched reason=${quotaSignal.reason} requestId=${quotaSignal.requestId}`,
             );
 
-            const quota = await tryReadManagedCurrentQuota(
+            const quota = await tryReadManagedDesktopQuota(
               desktopLauncher,
               debugLog,
               quotaSignal.quota,

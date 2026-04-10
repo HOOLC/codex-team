@@ -4,6 +4,12 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
+import {
+  createCodexDirectClient,
+  type CodexDirectClient,
+} from "./codex-direct-client.js";
+export type { CodexDirectClient } from "./codex-direct-client.js";
+
 const execFile = promisify(execFileCallback);
 
 export const DEFAULT_CODEX_REMOTE_DEBUGGING_PORT = 9223;
@@ -79,7 +85,7 @@ export interface ManagedQuotaSignal {
   reason: "rpc_response" | "rpc_notification";
   bodySnippet: string | null;
   shouldAutoSwitch: boolean;
-  quota: ManagedCurrentQuotaSnapshot | null;
+  quota: RuntimeQuotaSnapshot | null;
 }
 
 export interface ManagedWatchStatusEvent {
@@ -88,7 +94,7 @@ export interface ManagedWatchStatusEvent {
   error: string | null;
 }
 
-export interface ManagedCurrentQuotaSnapshot {
+export interface RuntimeQuotaSnapshot {
   plan_type: string | null;
   credits_balance: number | null;
   unlimited: boolean;
@@ -105,12 +111,22 @@ export interface ManagedCurrentQuotaSnapshot {
   fetched_at: string;
 }
 
-export interface ManagedCurrentAccountSnapshot {
+export interface RuntimeAccountSnapshot {
   auth_mode: string | null;
   email: string | null;
   plan_type: string | null;
   requires_openai_auth: boolean | null;
 }
+
+export type RuntimeReadSource = "desktop" | "direct";
+
+export interface RuntimeReadResult<TSnapshot> {
+  snapshot: TSnapshot;
+  source: RuntimeReadSource;
+}
+
+export type ManagedCurrentQuotaSnapshot = RuntimeQuotaSnapshot;
+export type ManagedCurrentAccountSnapshot = RuntimeAccountSnapshot;
 
 export interface CodexDesktopLauncher {
   findInstalledApp(): Promise<string | null>;
@@ -122,8 +138,12 @@ export interface CodexDesktopLauncher {
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;
   isManagedDesktopRunning(): Promise<boolean>;
-  readManagedCurrentAccount(): Promise<ManagedCurrentAccountSnapshot | null>;
-  readManagedCurrentQuota(): Promise<ManagedCurrentQuotaSnapshot | null>;
+  readCurrentRuntimeAccountResult(): Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null>;
+  readCurrentRuntimeQuotaResult(): Promise<RuntimeReadResult<RuntimeQuotaSnapshot> | null>;
+  readCurrentRuntimeAccount(): Promise<RuntimeAccountSnapshot | null>;
+  readCurrentRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null>;
+  readManagedCurrentAccount(): Promise<RuntimeAccountSnapshot | null>;
+  readManagedCurrentQuota(): Promise<RuntimeQuotaSnapshot | null>;
   applyManagedSwitch(options?: {
     force?: boolean;
     timeoutMs?: number;
@@ -689,7 +709,7 @@ function epochSecondsToIsoString(value: unknown): string | null {
 function normalizeManagedQuotaWindow(
   value: unknown,
   fallbackWindowSeconds: number,
-): ManagedCurrentQuotaSnapshot["five_hour"] {
+): RuntimeQuotaSnapshot["five_hour"] {
   if (!isRecord(value) || typeof value.usedPercent !== "number") {
     return null;
   }
@@ -706,7 +726,7 @@ function normalizeManagedQuotaWindow(
   };
 }
 
-function normalizeManagedCurrentQuotaSnapshot(value: unknown): ManagedCurrentQuotaSnapshot | null {
+function normalizeRuntimeQuotaSnapshot(value: unknown): RuntimeQuotaSnapshot | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -738,7 +758,7 @@ function normalizeManagedCurrentQuotaSnapshot(value: unknown): ManagedCurrentQuo
   };
 }
 
-function normalizeManagedCurrentAccountSnapshot(value: unknown): ManagedCurrentAccountSnapshot | null {
+function normalizeRuntimeAccountSnapshot(value: unknown): RuntimeAccountSnapshot | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -874,7 +894,7 @@ function buildRpcQuotaSignal(options: {
   method: string | null;
   reason: "rpc_response" | "rpc_notification";
   shouldAutoSwitch: boolean;
-  quota: ManagedCurrentQuotaSnapshot | null;
+  quota: RuntimeQuotaSnapshot | null;
 }): ManagedQuotaSignal {
   return {
     requestId: options.requestId,
@@ -923,7 +943,7 @@ function extractRpcQuotaSignal(
         method,
         reason: "rpc_notification",
         shouldAutoSwitch: hasExhaustedRateLimit(event.params),
-        quota: normalizeManagedCurrentQuotaSnapshot(event.params),
+        quota: normalizeRuntimeQuotaSnapshot(event.params),
       });
     }
     if (
@@ -962,7 +982,7 @@ function extractRpcQuotaSignal(
       method,
       reason: "rpc_response",
       shouldAutoSwitch: hasExhaustedRateLimit(message?.result),
-      quota: normalizeManagedCurrentQuotaSnapshot(message?.result),
+      quota: normalizeRuntimeQuotaSnapshot(message?.result),
     });
   }
 
@@ -1416,6 +1436,7 @@ export function createCodexDesktopLauncher(options: {
   fetchImpl?: FetchLike;
   createWebSocketImpl?: CreateWebSocketLike;
   launchProcessImpl?: LaunchProcessLike;
+  createDirectClientImpl?: () => Promise<CodexDirectClient>;
   watchReconnectDelayMs?: number;
   watchHealthCheckIntervalMs?: number;
   watchHealthCheckTimeoutMs?: number;
@@ -1427,6 +1448,7 @@ export function createCodexDesktopLauncher(options: {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   const createWebSocketImpl = options.createWebSocketImpl ?? createDefaultWebSocket;
   const launchProcessImpl = options.launchProcessImpl ?? launchManagedDesktopProcess;
+  const createDirectClientImpl = options.createDirectClientImpl ?? createCodexDirectClient;
   const watchReconnectDelayMs = options.watchReconnectDelayMs ?? DEFAULT_WATCH_RECONNECT_DELAY_MS;
   const watchHealthCheckIntervalMs =
     options.watchHealthCheckIntervalMs ?? DEFAULT_WATCH_HEALTH_CHECK_INTERVAL_MS;
@@ -1603,7 +1625,7 @@ export function createCodexDesktopLauncher(options: {
     return isManagedDesktopProcess(runningApps, state);
   }
 
-  async function readManagedCurrentAccount(): Promise<ManagedCurrentAccountSnapshot | null> {
+  async function readDesktopRuntimeAccount(): Promise<RuntimeAccountSnapshot | null> {
     const state = await readManagedState();
     if (!state) {
       return null;
@@ -1622,10 +1644,10 @@ export function createCodexDesktopLauncher(options: {
       DEVTOOLS_REQUEST_TIMEOUT_MS,
     );
 
-    return normalizeManagedCurrentAccountSnapshot(rawResult);
+    return normalizeRuntimeAccountSnapshot(rawResult);
   }
 
-  async function readManagedCurrentQuota(): Promise<ManagedCurrentQuotaSnapshot | null> {
+  async function readDesktopRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null> {
     const state = await readManagedState();
     if (!state) {
       return null;
@@ -1644,7 +1666,121 @@ export function createCodexDesktopLauncher(options: {
       DEVTOOLS_REQUEST_TIMEOUT_MS,
     );
 
-    return normalizeManagedCurrentQuotaSnapshot(rawResult);
+    return normalizeRuntimeQuotaSnapshot(rawResult);
+  }
+
+  async function readDirectRuntimeAccount(): Promise<RuntimeAccountSnapshot | null> {
+    const directClient = await createDirectClientImpl();
+
+    try {
+      const rawResult = await directClient.request("account/read", {
+        refreshToken: false,
+      });
+      return normalizeRuntimeAccountSnapshot(rawResult);
+    } finally {
+      await directClient.close();
+    }
+  }
+
+  async function readDirectRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null> {
+    const directClient = await createDirectClientImpl();
+
+    try {
+      const rawResult = await directClient.request("account/rateLimits/read", {});
+      return normalizeRuntimeQuotaSnapshot(rawResult);
+    } finally {
+      await directClient.close();
+    }
+  }
+
+  async function readCurrentRuntimeAccountResult(): Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null> {
+    let desktopError: Error | null = null;
+
+    try {
+      const desktopAccount = await readDesktopRuntimeAccount();
+      if (desktopAccount) {
+        return {
+          snapshot: desktopAccount,
+          source: "desktop",
+        };
+      }
+    } catch (error) {
+      desktopError = toErrorMessage(error, "Failed to read the current Desktop runtime account.");
+    }
+
+    try {
+      const directAccount = await readDirectRuntimeAccount();
+      if (!directAccount) {
+        return null;
+      }
+
+      return {
+        snapshot: directAccount,
+        source: "direct",
+      };
+    } catch (error) {
+      const directError = toErrorMessage(error, "Failed to read the direct runtime account.");
+      if (!desktopError) {
+        throw directError;
+      }
+
+      throw new Error(
+        `${desktopError.message} Fallback direct runtime account read failed: ${directError.message}`,
+      );
+    }
+  }
+
+  async function readCurrentRuntimeQuotaResult(): Promise<RuntimeReadResult<RuntimeQuotaSnapshot> | null> {
+    let desktopError: Error | null = null;
+
+    try {
+      const desktopQuota = await readDesktopRuntimeQuota();
+      if (desktopQuota) {
+        return {
+          snapshot: desktopQuota,
+          source: "desktop",
+        };
+      }
+    } catch (error) {
+      desktopError = toErrorMessage(error, "Failed to read the current Desktop runtime quota.");
+    }
+
+    try {
+      const directQuota = await readDirectRuntimeQuota();
+      if (!directQuota) {
+        return null;
+      }
+
+      return {
+        snapshot: directQuota,
+        source: "direct",
+      };
+    } catch (error) {
+      const directError = toErrorMessage(error, "Failed to read the direct runtime quota.");
+      if (!desktopError) {
+        throw directError;
+      }
+
+      throw new Error(
+        `${desktopError.message} Fallback direct runtime quota read failed: ${directError.message}`,
+      );
+    }
+  }
+
+  async function readCurrentRuntimeAccount(): Promise<RuntimeAccountSnapshot | null> {
+    return (await readCurrentRuntimeAccountResult())?.snapshot ?? null;
+  }
+
+  async function readCurrentRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null> {
+    return (await readCurrentRuntimeQuotaResult())?.snapshot ?? null;
+  }
+
+  async function readManagedCurrentAccount(): Promise<RuntimeAccountSnapshot | null> {
+    return await readDesktopRuntimeAccount();
+  }
+
+  async function readManagedCurrentQuota(): Promise<RuntimeQuotaSnapshot | null> {
+    return await readDesktopRuntimeQuota();
   }
 
   async function applyManagedSwitch(options?: {
@@ -2016,6 +2152,10 @@ export function createCodexDesktopLauncher(options: {
     writeManagedState,
     clearManagedState,
     isManagedDesktopRunning,
+    readCurrentRuntimeAccountResult,
+    readCurrentRuntimeQuotaResult,
+    readCurrentRuntimeAccount,
+    readCurrentRuntimeQuota,
     readManagedCurrentAccount,
     readManagedCurrentQuota,
     applyManagedSwitch,
