@@ -578,6 +578,70 @@ export class AccountStore {
     return this.readManagedAccount(name);
   }
 
+  async addAccountSnapshot(
+    name: string,
+    snapshot: AuthSnapshot,
+    options: {
+      force?: boolean;
+      rawConfig?: string | null;
+    } = {},
+  ): Promise<ManagedAccount> {
+    ensureAccountName(name);
+    await this.ensureLayout();
+
+    const normalizedSnapshot = parseAuthSnapshot(JSON.stringify(snapshot));
+    const rawSnapshot = stringifyJson(normalizedSnapshot);
+    const rawConfig = options.rawConfig ?? null;
+    const accountDir = this.accountDirectory(name);
+    const authPath = this.accountAuthPath(name);
+    const metaPath = this.accountMetaPath(name);
+    const configPath = this.accountConfigPath(name);
+    const identity = getSnapshotIdentity(normalizedSnapshot);
+    const accountExists = await pathExists(accountDir);
+    const existingMeta =
+      accountExists && (await pathExists(metaPath))
+        ? parseSnapshotMeta(await readJsonFile(metaPath))
+        : undefined;
+
+    if (accountExists && !options.force) {
+      throw new Error(`Account "${name}" already exists. Use --force to overwrite it.`);
+    }
+
+    const { accounts } = await this.listAccounts();
+    const duplicateIdentityAccounts = accounts.filter(
+      (account) => account.name !== name && account.identity === identity,
+    );
+    if (duplicateIdentityAccounts.length > 0) {
+      const joinedNames = duplicateIdentityAccounts.map((account) => `"${account.name}"`).join(", ");
+      throw new Error(
+        `Identity ${identity} is already managed by ${joinedNames}.`,
+      );
+    }
+
+    await ensureDirectory(accountDir, DIRECTORY_MODE);
+    await atomicWriteFile(authPath, rawSnapshot);
+    if (rawConfig !== null) {
+      await atomicWriteFile(
+        configPath,
+        rawConfig === "" || rawConfig.endsWith("\n") ? rawConfig : `${rawConfig}\n`,
+      );
+    } else if (await pathExists(configPath)) {
+      await rm(configPath, { force: true });
+    }
+
+    const meta = createSnapshotMeta(
+      name,
+      normalizedSnapshot,
+      new Date(),
+      existingMeta?.created_at,
+    );
+    meta.last_switched_at = existingMeta?.last_switched_at ?? null;
+    meta.quota = existingMeta?.quota ?? meta.quota;
+    await atomicWriteFile(metaPath, stringifyJson(meta));
+
+    return this.readManagedAccount(name);
+  }
+
   async updateCurrentManagedAccount(): Promise<UpdateAccountResult> {
     await this.ensureLayout();
 

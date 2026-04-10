@@ -3,6 +3,9 @@
 - Check the current local auth and best-effort live usage: `codexm current`
 - Force a fresh current-account usage refresh: `codexm current --refresh`
 - Generate shell completion scripts: `codexm completion <zsh|bash>`
+- Add a new managed ChatGPT account with browser login: `codexm add <name>`
+- Add a new managed ChatGPT account with device-code login: `codexm add <name> --device-auth`
+- Add a managed API-key account from stdin: `printenv OPENAI_API_KEY | codexm add <name> --with-api-key`
 - Save the current auth as a named account: `codexm save <name>`
 - List saved accounts and refreshed quota state: `codexm list`
 - Show auto-switch score details and normalized 1-hour breakdowns: `codexm list --verbose`
@@ -24,7 +27,9 @@
 - Use `codexm current --refresh` when the user explicitly wants the latest usage data instead of best-effort live data.
 - Use `codexm list` when the user wants to compare saved accounts or inspect quota state.
 - Use `codexm list --verbose` when the user wants score details behind auto-switch ranking.
-- Use `codexm save <name>` right after the user has logged into the desired account with native Codex auth.
+- Use `codexm add <name>` when the user wants to create a managed account without changing current auth.
+- Use `codexm add <name> --device-auth` on remote/headless machines where browser callback login is inconvenient.
+- Use `codexm save <name>` right after the user has already logged into the desired account with native Codex auth or Codex Desktop.
 - Use `codexm update` when the current local auth already matches a managed account and the user wants to refresh the saved snapshot.
 - Use `codexm launch [name]` when the user wants Codex Desktop to start with a specific account immediately, and add `--watch` when they also want background quota supervision.
 - Use `codexm watch` when the user wants ongoing monitoring with automatic switching; use `codexm watch --no-auto-switch` for observation only.

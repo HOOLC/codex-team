@@ -1,6 +1,6 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 
 import { describe, expect, test } from "@rstest/core";
 import dayjs from "dayjs";
@@ -21,6 +21,8 @@ import type {
 import type { WatchProcessManager, WatchProcessState } from "../src/watch-process.js";
 import {
   cleanupTempHome,
+  createApiKeyPayload,
+  createAuthPayload,
   createTempHome,
   jsonResponse,
   readCurrentAuth,
@@ -213,6 +215,7 @@ describe("CLI", () => {
     })();
 
     expect(output).toContain("codexm --version");
+    expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
     expect(output).toContain("codexm completion <zsh|bash>");
@@ -242,9 +245,11 @@ describe("CLI", () => {
       expect(exitCode).toBe(0);
       const script = stdout.read();
       expect(script).toContain("#compdef codexm");
+      expect(script).toContain("add");
       expect(script).toContain("current");
       expect(script).toContain("watch");
       expect(script).toContain("completion");
+      expect(script).toContain("--device-auth");
       expect(script).toContain("--no-auto-switch");
       expect(script).toContain("codexm completion --accounts");
       expect(stderr.read()).toBe("");
@@ -272,6 +277,7 @@ describe("CLI", () => {
       expect(script).toContain("_codexm()");
       expect(script).toContain("COMPREPLY=");
       expect(script).toContain("codexm completion --accounts");
+      expect(script).toContain("--with-api-key");
       expect(script).toContain("--detach");
       expect(stderr.read()).toBe("");
     } finally {
@@ -365,6 +371,143 @@ describe("CLI", () => {
     } finally {
       await cleanupTempHome(homeDir);
     }
+  });
+
+  test("adds a ChatGPT account from the browser login flow without changing current auth", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-current-before-add");
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const calls: string[] = [];
+
+      const exitCode = await runCli(["add", "added-main", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        authLogin: {
+          login: async (request) => {
+            calls.push(request.mode);
+            return createAuthPayload("acct-added-main", "chatgpt_auth_tokens", "plus", "user-added");
+          },
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["browser"]);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        ok: true,
+        action: "add",
+        account: {
+          name: "added-main",
+          auth_mode: "chatgpt_auth_tokens",
+          account_id: "acct-added-main",
+          user_id: "user-added",
+        },
+      });
+      expect(stderr.read()).toBe("");
+
+      const savedAuthRaw = await readFile(
+        join(homeDir, ".codex-team", "accounts", "added-main", "auth.json"),
+        "utf8",
+      );
+      expect(JSON.parse(savedAuthRaw)).toMatchObject({
+        auth_mode: "chatgpt_auth_tokens",
+        tokens: {
+          account_id: "acct-added-main",
+        },
+      });
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-current-before-add");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("adds a ChatGPT account from the device login flow", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const calls: string[] = [];
+
+      const exitCode = await runCli(["add", "device-main", "--device-auth"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        authLogin: {
+          login: async (request) => {
+            calls.push(request.mode);
+            return createAuthPayload("acct-device-main", "chatgpt_auth_tokens", "team", "user-device");
+          },
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["device"]);
+      expect(stdout.read()).toContain('Added account "device-main"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("adds an API key account from stdin", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["add", "api-main", "--with-api-key", "--json"], {
+        store,
+        stdin: Readable.from(["sk-test-add\n"]) as unknown as NodeJS.ReadStream,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        ok: true,
+        action: "add",
+        account: {
+          name: "api-main",
+          auth_mode: "apikey",
+        },
+      });
+      expect(stderr.read()).toBe("");
+
+      const savedAuthRaw = await readFile(
+        join(homeDir, ".codex-team", "accounts", "api-main", "auth.json"),
+        "utf8",
+      );
+      expect(JSON.parse(savedAuthRaw)).toEqual(createApiKeyPayload("sk-test-add"));
+      const savedConfig = await readFile(
+        join(homeDir, ".codex-team", "accounts", "api-main", "config.toml"),
+        "utf8",
+      );
+      expect(savedConfig).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("rejects mutually exclusive add login modes", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["add", "bad", "--device-auth", "--with-api-key"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.read()).toBe("");
+    expect(stderr.read()).toContain("Error: Usage: codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
   });
 
   test("current best-effort shows live usage when managed MCP quota is available", async () => {

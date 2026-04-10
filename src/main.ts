@@ -29,6 +29,10 @@ import {
   type WatchProcessState,
   type WatchProcessManager,
 } from "./watch-process.js";
+import {
+  createCodexLoginProvider,
+  type CodexLoginProvider,
+} from "./codex-login.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -42,6 +46,7 @@ interface CliStreams {
 interface RunCliOptions extends Partial<CliStreams> {
   store?: AccountStore;
   desktopLauncher?: CodexDesktopLauncher;
+  authLogin?: CodexLoginProvider;
   watchProcessManager?: WatchProcessManager;
   interruptSignal?: AbortSignal;
   managedDesktopWaitStatusDelayMs?: number;
@@ -108,6 +113,7 @@ class CliUsageError extends Error {
 const COMMAND_NAMES = [
   "current",
   "list",
+  "add",
   "save",
   "update",
   "switch",
@@ -139,6 +145,7 @@ const SWITCH_LOCK_DIR_NAME = "switch.lock";
 const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
   current: new Set(["--json", "--refresh"]),
   list: new Set(["--json", "--verbose"]),
+  add: new Set(["--device-auth", "--with-api-key", "--force", "--json"]),
   save: new Set(["--force", "--json"]),
   update: new Set(["--json"]),
   switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
@@ -293,6 +300,7 @@ Usage:
   codexm completion <zsh|bash>
   codexm current [--refresh] [--json]
   codexm list [name] [--verbose] [--json]
+  codexm add <name> [--device-auth|--with-api-key] [--force] [--json]
   codexm save <name> [--force] [--json]
   codexm update [--json]
   codexm switch <name> [--force] [--json]
@@ -331,6 +339,8 @@ function describeCommandFlag(flag: string): string {
       return `${flag}[enable debug logging]`;
     case "--detach":
       return `${flag}[run watch in the background]`;
+    case "--device-auth":
+      return `${flag}[add account with device-code login]`;
     case "--no-auto-switch":
       return `${flag}[watch without switching accounts automatically]`;
     case "--dry-run":
@@ -349,6 +359,8 @@ function describeCommandFlag(flag: string): string {
       return `${flag}[stop the background watch]`;
     case "--watch":
       return `${flag}[start a detached watch after launch]`;
+    case "--with-api-key":
+      return `${flag}[add account by reading an API key from stdin]`;
     case "--version":
       return `${flag}[print the installed version]`;
     case "--yes":
@@ -487,6 +499,17 @@ complete -F _codexm codexm
 async function listCompletionAccountNames(store: AccountStore): Promise<string[]> {
   const { accounts } = await store.listAccounts();
   return accounts.map((account) => account.name).sort((left, right) => left.localeCompare(right));
+}
+
+async function readStreamToString(stream: NodeJS.ReadStream): Promise<string> {
+  let content = "";
+  stream.setEncoding("utf8");
+
+  for await (const chunk of stream) {
+    content += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+  }
+
+  return content;
 }
 
 const NON_MANAGED_DESKTOP_WARNING_PREFIX =
@@ -1824,6 +1847,7 @@ export async function runCli(
   };
   const store = options.store ?? createAccountStore();
   const desktopLauncher = options.desktopLauncher ?? createCodexDesktopLauncher();
+  const authLogin = options.authLogin ?? createCodexLoginProvider();
   const watchProcessManager =
     options.watchProcessManager ?? createWatchProcessManager(store.paths.codexTeamDir);
   const interruptSignal = options.interruptSignal;
@@ -1972,6 +1996,58 @@ export async function runCli(
           streams.stdout.write(`${describeQuotaRefresh(result, current, { verbose })}\n`);
         }
         return result.failures.length === 0 ? 0 : 1;
+      }
+
+      case "add": {
+        const name = parsed.positionals[0];
+        const deviceAuth = parsed.flags.has("--device-auth");
+        const withApiKey = parsed.flags.has("--with-api-key");
+        const force = parsed.flags.has("--force");
+        if (!name || parsed.positionals.length !== 1 || (deviceAuth && withApiKey)) {
+          throw new Error("Usage: codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
+        }
+
+        const snapshot = withApiKey
+          ? {
+              auth_mode: "apikey",
+              OPENAI_API_KEY: (await readStreamToString(streams.stdin)).trim(),
+            }
+          : await authLogin.login({
+              mode: deviceAuth ? "device" : "browser",
+              stdout: streams.stdout,
+              stderr: streams.stderr,
+            });
+        if (withApiKey && !snapshot.OPENAI_API_KEY) {
+          throw new Error("No API key was provided on stdin.");
+        }
+
+        const account = await store.addAccountSnapshot(name, snapshot, {
+          force,
+          rawConfig: withApiKey ? "" : null,
+        });
+        debugLog(
+          `add: name=${account.name} auth_mode=${account.auth_mode} identity=${maskAccountId(account.identity)} mode=${withApiKey ? "apikey" : deviceAuth ? "device" : "browser"}`,
+        );
+        const payload = {
+          ok: true,
+          action: "add",
+          account: {
+            name: account.name,
+            account_id: account.account_id,
+            user_id: account.user_id ?? null,
+            identity: account.identity,
+            auth_mode: account.auth_mode,
+          },
+        };
+
+        if (json) {
+          writeJson(streams.stdout, payload);
+        } else {
+          streams.stdout.write(
+            `Added account "${account.name}" (${maskAccountId(account.identity)}).\n`,
+          );
+        }
+        return 0;
       }
 
       case "save": {
