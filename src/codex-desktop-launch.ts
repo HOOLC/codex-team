@@ -88,6 +88,13 @@ export interface ManagedQuotaSignal {
   quota: RuntimeQuotaSnapshot | null;
 }
 
+export interface ManagedWatchActivitySignal {
+  requestId: string;
+  method: string;
+  reason: "quota_dirty" | "turn_completed";
+  bodySnippet: string | null;
+}
+
 export interface ManagedWatchStatusEvent {
   type: "disconnected" | "reconnected";
   attempt: number;
@@ -155,6 +162,7 @@ export interface CodexDesktopLauncher {
     signal?: AbortSignal;
     debugLogger?: (line: string) => void;
     onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+    onActivitySignal?: (signal: ManagedWatchActivitySignal) => Promise<void> | void;
     onStatus?: (event: ManagedWatchStatusEvent) => Promise<void> | void;
   }): Promise<void>;
 }
@@ -939,14 +947,7 @@ function extractRpcQuotaSignal(
   if (eventType === "mcp-notification") {
     const method = typeof event.method === "string" ? event.method : null;
     if (method === "account/rateLimits/updated") {
-      return buildRpcQuotaSignal({
-        event,
-        requestId: `rpc:notification:${method}`,
-        method,
-        reason: "rpc_notification",
-        shouldAutoSwitch: hasExhaustedRateLimit(event.params),
-        quota: normalizeRuntimeQuotaSnapshot(event.params),
-      });
+      return null;
     }
     if (
       method === "error" && hasStructuredQuotaError(event.params)
@@ -999,6 +1000,41 @@ function extractRpcQuotaSignal(
       shouldAutoSwitch: true,
       quota: null,
     });
+  }
+
+  return null;
+}
+
+function extractRpcActivitySignal(
+  payload: BridgeProbePayload | null,
+): ManagedWatchActivitySignal | null {
+  if (!payload) {
+    return null;
+  }
+
+  const event = payload.event;
+  const eventType = typeof event.type === "string" ? event.type : null;
+  if (eventType !== "mcp-notification") {
+    return null;
+  }
+
+  const method = typeof event.method === "string" ? event.method : null;
+  if (method === "account/rateLimits/updated") {
+    return {
+      requestId: `rpc:notification:${method}`,
+      method,
+      reason: "quota_dirty",
+      bodySnippet: stringifySnippet(event),
+    };
+  }
+
+  if (method === "turn/completed") {
+    return {
+      requestId: `rpc:notification:${method}`,
+      method,
+      reason: "turn_completed",
+      bodySnippet: stringifySnippet(event),
+    };
   }
 
   return null;
@@ -1829,6 +1865,7 @@ export function createCodexDesktopLauncher(options: {
     signal?: AbortSignal;
     debugLogger?: (line: string) => void;
     onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+    onActivitySignal?: (signal: ManagedWatchActivitySignal) => Promise<void> | void;
     dedupeState: { lastFingerprint: string | null };
     onReady?: () => Promise<void> | void;
   }): Promise<void> {
@@ -2070,6 +2107,15 @@ export function createCodexDesktopLauncher(options: {
               fail(error);
             });
           }
+
+          const rpcActivitySignal = extractRpcActivitySignal(bridgePayload);
+          if (rpcActivitySignal) {
+            void Promise.resolve(sessionOptions.onActivitySignal?.(rpcActivitySignal)).catch(
+              (error) => {
+                fail(error);
+              },
+            );
+          }
           return;
         }
       };
@@ -2100,6 +2146,7 @@ export function createCodexDesktopLauncher(options: {
     signal?: AbortSignal;
     debugLogger?: (line: string) => void;
     onQuotaSignal?: (signal: ManagedQuotaSignal) => Promise<void> | void;
+    onActivitySignal?: (signal: ManagedWatchActivitySignal) => Promise<void> | void;
     onStatus?: (event: ManagedWatchStatusEvent) => Promise<void> | void;
   }): Promise<void> {
     const dedupeState = { lastFingerprint: null as string | null };
@@ -2115,6 +2162,7 @@ export function createCodexDesktopLauncher(options: {
           signal: options?.signal,
           debugLogger: options?.debugLogger,
           onQuotaSignal: options?.onQuotaSignal,
+          onActivitySignal: options?.onActivitySignal,
           dedupeState,
           onReady: async () => {
             if (reconnectAttempt > 0) {

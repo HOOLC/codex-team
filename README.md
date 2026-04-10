@@ -12,6 +12,17 @@ npm install -g codex-team
 
 After install, use the `codexm` command.
 
+## Quick start
+
+```bash
+npm install -g codex-team
+codexm add plus1
+codexm add team1
+codexm launch --watch
+```
+
+`codexm add` opens a login flow and stores each account as a named snapshot. `codexm launch --watch` starts Codex Desktop and keeps a background watcher running so quota exhaustion can switch to the best available saved account.
+
 ## Shell completion
 
 Generate a shell completion script and install it with your shell's standard mechanism:
@@ -47,12 +58,12 @@ Global flags: `--help`, `--version`, `--debug`
 
 Use `--json` for machine-readable output and `--debug` for stderr diagnostics.
 
-- `codexm current` keeps the default current-auth summary, prefers managed Desktop MCP account state when available, and labels whether the result came from MCP or local `auth.json`; when the running managed Desktop auth differs from local `auth.json`, it prints a warning. `--refresh` prefers managed Desktop MCP quota when a codexm-managed session is available and falls back to the usage API. JSON output adds a top-level `quota` field whenever usage data is available.
+- `codexm current` shows the active account. It uses the running managed Desktop session when available, falls back to local `auth.json`, and warns if those differ. Add `--refresh` to include current quota usage.
 - `codexm list` refreshes quota data before printing, shows the current managed account above the table, marks current rows with `*`, and includes top-level `current` plus per-row `is_current` fields in JSON mode. The default table shows normalized `CURRENT SCORE`; add `--verbose` for normalized `1H SCORE`, raw 5H/1W breakdown, and plan ratio details.
 - `codexm add <name>` creates a new managed account without changing the active `~/.codex/auth.json`. By default it uses the built-in browser ChatGPT login flow; add `--device-auth` for device-code login on remote/headless machines. `--with-api-key` reads an API key from stdin, for example `printenv OPENAI_API_KEY | codexm add work-api --with-api-key`.
-- `codexm launch` starts Codex Desktop with current auth, switches first when you pass a saved account name, or picks the best saved account with `codexm launch --auto`. Add `--watch` to ensure a detached background watcher is running after launch; by default that watcher auto-switches on terminal quota events, and `--no-auto-switch` turns it into a read-only quota watcher. A codexm-managed Desktop session can accept later `codexm switch` updates directly; unmanaged sessions only update local auth and point you back to `codexm launch`. Run `codexm launch` from an external terminal if you need to restart Desktop, and use `codexm switch --force` when you want to skip waiting for the current managed Desktop thread.
+- `codexm launch` starts Codex Desktop with current auth, switches first when you pass a saved account name, or picks the best saved account with `codexm launch --auto`. Add `--watch` to keep a detached watcher running after launch. Run `codexm launch` from an external terminal if you need to restart Desktop.
 - `codexm switch`, `codexm switch --auto`, and auth-changing `codexm launch` flows share a cross-process lock under `~/.codex-team/locks/switch.lock` so only one auth-changing operation runs at a time. If the lock is busy, the CLI reports the lock path and the owning command; `watch` skips that cycle instead of queueing behind an in-flight switch.
-- `codexm watch` attaches to the managed Codex Desktop DevTools session, tracks bridge-level quota signals, prints structured quota updates, and by default can trigger `switch --auto` on terminal quota events such as exhausted `account/rateLimits/*` payloads or `usageLimitExceeded`. Use `--no-auto-switch` to keep the same quota feed without changing accounts. `--detach` runs the watcher in the background and stores state in `~/.codex-team/watch-state.json` with logs under `~/.codex-team/logs/watch.log`; use `--status` and `--stop` to inspect or stop it.
+- `codexm watch` watches the managed Codex Desktop session, prints quota updates, and by default auto-switches when the active account is exhausted. Use `--no-auto-switch` for read-only watching. `--detach` runs it in the background; use `--status` and `--stop` to inspect or stop it.
 
 Unknown commands and flags fail fast; when there is a close match, `codexm` suggests it.
 

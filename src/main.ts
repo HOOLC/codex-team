@@ -21,6 +21,7 @@ import {
   type CodexDesktopLauncher,
   type ManagedCodexDesktopState,
   type ManagedQuotaSignal,
+  type ManagedWatchActivitySignal,
   type ManagedWatchStatusEvent,
   type RuntimeAccountSnapshot,
   type RuntimeQuotaSnapshot,
@@ -56,6 +57,8 @@ interface RunCliOptions extends Partial<CliStreams> {
   interruptSignal?: AbortSignal;
   managedDesktopWaitStatusDelayMs?: number;
   managedDesktopWaitStatusIntervalMs?: number;
+  watchQuotaMinReadIntervalMs?: number;
+  watchQuotaIdleReadIntervalMs?: number;
 }
 
 interface ParsedArgs {
@@ -584,6 +587,8 @@ function stripManagedDesktopWarning(warnings: string[]): string[] {
 const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS = 1_000;
 const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS = 5_000;
 const WATCH_AUTO_SWITCH_TIMEOUT_MS = 600_000;
+const DEFAULT_WATCH_QUOTA_MIN_READ_INTERVAL_MS = 30_000;
+const DEFAULT_WATCH_QUOTA_IDLE_READ_INTERVAL_MS = 120_000;
 
 function startManagedDesktopWaitReporter(
   stream: NodeJS.WriteStream,
@@ -1661,6 +1666,10 @@ function toCliQuotaSummaryFromRuntimeQuota(quota: RuntimeQuotaSnapshot) {
   return toCliQuotaSummary(account);
 }
 
+function isTerminalWatchQuota(quota: ReturnType<typeof toCliQuotaSummary> | null): boolean {
+  return quota?.refresh_status === "ok" && quota.available === "unavailable";
+}
+
 function computeRemainingPercent(usedPercent: number | undefined): number | null {
   if (typeof usedPercent !== "number") {
     return null;
@@ -2210,6 +2219,10 @@ export async function runCli(
     options.managedDesktopWaitStatusDelayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
   const managedDesktopWaitStatusIntervalMs =
     options.managedDesktopWaitStatusIntervalMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_INTERVAL_MS;
+  const watchQuotaMinReadIntervalMs =
+    options.watchQuotaMinReadIntervalMs ?? DEFAULT_WATCH_QUOTA_MIN_READ_INTERVAL_MS;
+  const watchQuotaIdleReadIntervalMs =
+    options.watchQuotaIdleReadIntervalMs ?? DEFAULT_WATCH_QUOTA_IDLE_READ_INTERVAL_MS;
   const parsed = parseArgs(argv);
   const json = parsed.flags.has("--json");
   const debug = parsed.flags.has("--debug");
@@ -2982,111 +2995,227 @@ export async function runCli(
         debugLog("watch: starting managed desktop quota watch");
         debugLog(`watch: auto-switch ${autoSwitch ? "enabled" : "disabled"}`);
 
-        await desktopLauncher.watchManagedQuotaSignals({
-          signal: interruptSignal,
-          debugLogger: debug
-            ? (line) => {
-                streams.stderr.write(`${line}\n`);
-              }
-            : undefined,
-          onStatus: (event) => {
-            streams.stderr.write(
-              `${formatWatchLogLine(describeWatchStatusEvent(currentWatchAccountLabel, event))}\n`,
-            );
-          },
-          onQuotaSignal: async (quotaSignal: ManagedQuotaSignal) => {
+        const handleQuotaReadResult = async (options: {
+          requestId: string;
+          quota: ReturnType<typeof toCliQuotaSummary> | null;
+          shouldAutoSwitch: boolean;
+        }) => {
+          const quota = options.quota;
+          const quotaUpdateLine = describeWatchQuotaEvent(currentWatchAccountLabel, quota);
+          if (quotaUpdateLine !== lastQuotaUpdateLine) {
+            streams.stdout.write(`${formatWatchLogLine(quotaUpdateLine)}\n`);
+            lastQuotaUpdateLine = quotaUpdateLine;
+          } else {
+            debugLog(`watch: quota output unchanged for requestId=${options.requestId}`);
+          }
+          if (!autoSwitch) {
+            return;
+          }
+
+          if (!options.shouldAutoSwitch) {
             debugLog(
-              `watch: quota signal matched reason=${quotaSignal.reason} requestId=${quotaSignal.requestId}`,
+              `watch: skipping auto switch for requestId=${options.requestId} because the event is informational only`,
             );
+            return;
+          }
 
-            const quota = await tryReadManagedDesktopQuota(
-              desktopLauncher,
+          const lock = await tryAcquireSwitchLock(store, "watch");
+          if (!lock.acquired) {
+            debugLog(`watch: switch lock is busy at ${lock.lockPath}`);
+            streams.stdout.write(
+              `${formatWatchLogLine(
+                describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "lock-busy"),
+              )}\n`,
+            );
+            return;
+          }
+
+          const now = Date.now();
+          if (switchInFlight || now - lastSwitchStartedAt < WATCH_SWITCH_COOLDOWN_MS) {
+            await lock.release();
+            debugLog(
+              `watch: skipped auto switch for requestId=${options.requestId} because another switch is already in progress`,
+            );
+            return;
+          }
+
+          switchInFlight = true;
+          lastSwitchStartedAt = now;
+
+          try {
+            const autoSwitch = await performAutoSwitch(store, desktopLauncher, {
+              dryRun: false,
+              force: false,
+              signal: interruptSignal,
+              statusStream: streams.stderr,
+              statusDelayMs: managedDesktopWaitStatusDelayMs,
+              statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+              timeoutMs: WATCH_AUTO_SWITCH_TIMEOUT_MS,
               debugLog,
-              quotaSignal.quota,
-            );
-            const quotaUpdateLine = describeWatchQuotaEvent(currentWatchAccountLabel, quota);
-            if (quotaUpdateLine !== lastQuotaUpdateLine) {
-              streams.stdout.write(`${formatWatchLogLine(quotaUpdateLine)}\n`);
-              lastQuotaUpdateLine = quotaUpdateLine;
-            } else {
-              debugLog(`watch: quota output unchanged for requestId=${quotaSignal.requestId}`);
-            }
-            if (!autoSwitch) {
-              return;
-            }
+            });
 
-            if (!quotaSignal.shouldAutoSwitch) {
-              debugLog(
-                `watch: skipping auto switch for requestId=${quotaSignal.requestId} because the event is informational only`,
-              );
-              return;
-            }
-
-            const lock = await tryAcquireSwitchLock(store, "watch");
-            if (!lock.acquired) {
-              debugLog(`watch: switch lock is busy at ${lock.lockPath}`);
+            if (autoSwitch.skipped) {
+              currentWatchAccountLabel = autoSwitch.selected.name;
               streams.stdout.write(
                 `${formatWatchLogLine(
-                  describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "lock-busy"),
+                  describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "already-best"),
                 )}\n`,
               );
-              return;
-            }
-
-            const now = Date.now();
-            if (switchInFlight || now - lastSwitchStartedAt < WATCH_SWITCH_COOLDOWN_MS) {
-              await lock.release();
-              debugLog(
-                `watch: skipped auto switch for requestId=${quotaSignal.requestId} because another switch is already in progress`,
+            } else if (autoSwitch.result) {
+              const previousAccountLabel = currentWatchAccountLabel;
+              currentWatchAccountLabel = autoSwitch.result.account.name;
+              streams.stdout.write(
+                `${formatWatchLogLine(
+                  describeWatchAutoSwitchEvent(
+                    previousAccountLabel,
+                    currentWatchAccountLabel,
+                    autoSwitch.result.warnings,
+                  ),
+                )}\n`,
               );
+            }
+
+            if (autoSwitch.refreshResult.failures.length > 0) {
+              watchExitCode = 1;
+            }
+          } finally {
+            switchInFlight = false;
+            await lock.release();
+          }
+        };
+
+        let quotaReadTimer: NodeJS.Timeout | null = null;
+        let idleQuotaReadTimer: NodeJS.Timeout | null = null;
+        let quotaReadInFlight = false;
+        let lastQuotaReadStartedAt = 0;
+        let pendingQuotaReadReason: string | null = null;
+        let watchStopped = false;
+
+        const clearQuotaReadTimer = () => {
+          if (quotaReadTimer) {
+            clearTimeout(quotaReadTimer);
+            quotaReadTimer = null;
+          }
+        };
+
+        const readManagedQuotaForWatch = async (reason: string) => {
+          if (watchStopped || interruptSignal?.aborted) {
+            return;
+          }
+
+          if (quotaReadInFlight) {
+            pendingQuotaReadReason = reason;
+            return;
+          }
+
+          quotaReadInFlight = true;
+          lastQuotaReadStartedAt = Date.now();
+          debugLog(`watch: reading managed Desktop quota reason=${reason}`);
+          try {
+            const quota = await tryReadManagedDesktopQuota(desktopLauncher, debugLog);
+            if (watchStopped || interruptSignal?.aborted) {
               return;
             }
-
-            switchInFlight = true;
-            lastSwitchStartedAt = now;
-
-            try {
-              const autoSwitch = await performAutoSwitch(store, desktopLauncher, {
-                dryRun: false,
-                force: false,
-                signal: interruptSignal,
-                statusStream: streams.stderr,
-                statusDelayMs: managedDesktopWaitStatusDelayMs,
-                statusIntervalMs: managedDesktopWaitStatusIntervalMs,
-                timeoutMs: WATCH_AUTO_SWITCH_TIMEOUT_MS,
-                debugLog,
-              });
-
-              if (autoSwitch.skipped) {
-                currentWatchAccountLabel = autoSwitch.selected.name;
-                streams.stdout.write(
-                  `${formatWatchLogLine(
-                    describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "already-best"),
-                  )}\n`,
-                );
-              } else if (autoSwitch.result) {
-                const previousAccountLabel = currentWatchAccountLabel;
-                currentWatchAccountLabel = autoSwitch.result.account.name;
-                streams.stdout.write(
-                  `${formatWatchLogLine(
-                    describeWatchAutoSwitchEvent(
-                      previousAccountLabel,
-                      currentWatchAccountLabel,
-                      autoSwitch.result.warnings,
-                    ),
-                  )}\n`,
-                );
-              }
-
-              if (autoSwitch.refreshResult.failures.length > 0) {
-                watchExitCode = 1;
-              }
-            } finally {
-              switchInFlight = false;
-              await lock.release();
+            await handleQuotaReadResult({
+              requestId: `poll:${reason}`,
+              quota,
+              shouldAutoSwitch: isTerminalWatchQuota(quota),
+            });
+          } finally {
+            quotaReadInFlight = false;
+            const nextReason = pendingQuotaReadReason;
+            pendingQuotaReadReason = null;
+            if (nextReason && !watchStopped && !interruptSignal?.aborted) {
+              scheduleQuotaRead(nextReason);
             }
-          },
-        });
+          }
+        };
+
+        function scheduleQuotaRead(reason: string): void {
+          if (watchStopped || interruptSignal?.aborted) {
+            return;
+          }
+
+          pendingQuotaReadReason = reason;
+          if (quotaReadTimer || quotaReadInFlight) {
+            return;
+          }
+
+          const elapsedMs =
+            lastQuotaReadStartedAt === 0
+              ? watchQuotaMinReadIntervalMs
+              : Date.now() - lastQuotaReadStartedAt;
+          const delayMs = Math.max(0, watchQuotaMinReadIntervalMs - elapsedMs);
+          debugLog(`watch: scheduled quota read reason=${reason} delay_ms=${delayMs}`);
+          quotaReadTimer = setTimeout(() => {
+            quotaReadTimer = null;
+            const queuedReason = pendingQuotaReadReason ?? reason;
+            pendingQuotaReadReason = null;
+            void readManagedQuotaForWatch(queuedReason).catch((error) => {
+              watchExitCode = 1;
+              streams.stderr.write(`Error: ${(error as Error).message}\n`);
+            });
+          }, delayMs);
+        }
+
+        const scheduleIdleQuotaRead = () => {
+          if (watchStopped || interruptSignal?.aborted || watchQuotaIdleReadIntervalMs <= 0) {
+            return;
+          }
+
+          idleQuotaReadTimer = setTimeout(() => {
+            idleQuotaReadTimer = null;
+            scheduleQuotaRead("idle");
+            scheduleIdleQuotaRead();
+          }, watchQuotaIdleReadIntervalMs);
+        };
+
+        try {
+          await readManagedQuotaForWatch("startup");
+          scheduleIdleQuotaRead();
+
+          await desktopLauncher.watchManagedQuotaSignals({
+            signal: interruptSignal,
+            debugLogger: debug
+              ? (line) => {
+                  streams.stderr.write(`${line}\n`);
+                }
+              : undefined,
+            onStatus: (event) => {
+              streams.stderr.write(
+                `${formatWatchLogLine(describeWatchStatusEvent(currentWatchAccountLabel, event))}\n`,
+              );
+            },
+            onActivitySignal: (activitySignal: ManagedWatchActivitySignal) => {
+              debugLog(
+                `watch: activity signal matched reason=${activitySignal.reason} requestId=${activitySignal.requestId}`,
+              );
+              scheduleQuotaRead(activitySignal.reason);
+            },
+            onQuotaSignal: async (quotaSignal: ManagedQuotaSignal) => {
+              debugLog(
+                `watch: quota signal matched reason=${quotaSignal.reason} requestId=${quotaSignal.requestId}`,
+              );
+
+              const quota = await tryReadManagedDesktopQuota(
+                desktopLauncher,
+                debugLog,
+                quotaSignal.quota,
+              );
+              await handleQuotaReadResult({
+                requestId: quotaSignal.requestId,
+                quota,
+                shouldAutoSwitch: quotaSignal.shouldAutoSwitch,
+              });
+            },
+          });
+        } finally {
+          watchStopped = true;
+          clearQuotaReadTimer();
+          if (idleQuotaReadTimer) {
+            clearTimeout(idleQuotaReadTimer);
+          }
+        }
 
         return watchExitCode;
       }

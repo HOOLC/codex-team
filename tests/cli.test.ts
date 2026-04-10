@@ -109,6 +109,12 @@ function createDesktopLauncherStub(overrides: Partial<{
         fetched_at: string;
       } | null;
     }) => Promise<void> | void;
+    onActivitySignal?: (signal: {
+      requestId: string;
+      method: string;
+      reason: "quota_dirty" | "turn_completed";
+      bodySnippet: string | null;
+    }) => Promise<void> | void;
   }) => Promise<void>;
 }> = {}): CodexDesktopLauncher {
   return {
@@ -2148,14 +2154,14 @@ wire_api = "responses"
       expect(stdout.read()).toMatch(
         /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=28% left 1W=37% left/,
       );
-      expect(readManagedCurrentQuotaCalls).toBe(0);
+      expect(readManagedCurrentQuotaCalls).toBe(1);
       expect(applyManagedSwitchCalls).toBe(0);
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("watch --no-auto-switch prints non-exhausted rate limit updates without auto-switching", async () => {
+  test("watch reads quota from managed Desktop after dirty activity instead of trusting updated payloads", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -2163,58 +2169,50 @@ wire_api = "responses"
       const stdout = captureWritable();
       const stderr = captureWritable();
       let applyManagedSwitchCalls = 0;
+      let readManagedCurrentQuotaCalls = 0;
+      const interruptController = new AbortController();
 
       const exitCode = await runCli(["watch", "--debug", "--no-auto-switch"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        interruptSignal: interruptController.signal,
+        watchQuotaMinReadIntervalMs: 5,
+        watchQuotaIdleReadIntervalMs: 10_000,
         desktopLauncher: createDesktopLauncherStub({
           isManagedDesktopRunning: async () => true,
-          readManagedCurrentQuota: async () => ({
-            plan_type: "team",
-            credits_balance: null,
-            unlimited: false,
-            fetched_at: "2026-04-08T15:20:00.000Z",
-            five_hour: {
-              used_percent: 72,
-              window_seconds: 18_000,
-              reset_at: "2026-04-08T16:50:52.000Z",
-            },
-            one_week: {
-              used_percent: 63,
-              window_seconds: 604_800,
-              reset_at: "2026-04-14T09:17:35.000Z",
-            },
-          }),
+          readManagedCurrentQuota: async () => {
+            readManagedCurrentQuotaCalls += 1;
+            return {
+              plan_type: "team",
+              credits_balance: null,
+              unlimited: false,
+              fetched_at: "2026-04-08T15:20:00.000Z",
+              five_hour: {
+                used_percent: readManagedCurrentQuotaCalls === 1 ? 10 : 72,
+                window_seconds: 18_000,
+                reset_at: "2026-04-08T16:50:52.000Z",
+              },
+              one_week: {
+                used_percent: readManagedCurrentQuotaCalls === 1 ? 20 : 63,
+                window_seconds: 604_800,
+                reset_at: "2026-04-14T09:17:35.000Z",
+              },
+            };
+          },
           watchManagedQuotaSignals: async (options) => {
             options?.debugLogger?.(
-              '{"method":"Bridge.message","params":{"direction":"for_view","event":{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":72},"secondary":{"usedPercent":63}}}}}}',
+              '{"method":"Bridge.message","params":{"direction":"for_view","event":{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":96},"secondary":{"usedPercent":16}}}}}}',
             );
-            await options?.onQuotaSignal?.({
+            await options?.onActivitySignal?.({
               requestId: "rpc:notification:account/rateLimits/updated",
-              url: "mcp:account/rateLimits/updated",
-              status: null,
-              reason: "rpc_notification",
+              method: "account/rateLimits/updated",
+              reason: "quota_dirty",
               bodySnippet:
-                '{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":72},"secondary":{"usedPercent":63}}}}',
-              shouldAutoSwitch: false,
-              quota: {
-                plan_type: "team",
-                credits_balance: null,
-                unlimited: false,
-                fetched_at: "2026-04-08T15:20:00.000Z",
-                five_hour: {
-                  used_percent: 72,
-                  window_seconds: 18_000,
-                  reset_at: "2026-04-08T16:50:52.000Z",
-                },
-                one_week: {
-                  used_percent: 63,
-                  window_seconds: 604_800,
-                  reset_at: "2026-04-14T09:17:35.000Z",
-                },
-              },
+                '{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":96},"secondary":{"usedPercent":16}}}}',
             });
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            interruptController.abort();
           },
           applyManagedSwitch: async () => {
             applyManagedSwitchCalls += 1;
@@ -2225,10 +2223,74 @@ wire_api = "responses"
 
       expect(exitCode).toBe(0);
       expect(stderr.read()).toContain('"method":"account/rateLimits/updated"');
+      expect(stderr.read()).toContain(
+        "[debug] watch: activity signal matched reason=quota_dirty requestId=rpc:notification:account/rateLimits/updated",
+      );
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=90% left 1W=80% left/,
+      );
       expect(stdout.read()).toMatch(
         /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=28% left 1W=37% left/,
       );
+      expect(stdout.read()).not.toContain("5H=4% left");
+      expect(readManagedCurrentQuotaCalls).toBe(2);
       expect(applyManagedSwitchCalls).toBe(0);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch refreshes quota on the idle fallback interval", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const interruptController = new AbortController();
+      let readManagedCurrentQuotaCalls = 0;
+
+      const exitCode = await runCli(["watch", "--debug", "--no-auto-switch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        interruptSignal: interruptController.signal,
+        watchQuotaMinReadIntervalMs: 1,
+        watchQuotaIdleReadIntervalMs: 5,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => {
+            readManagedCurrentQuotaCalls += 1;
+            return {
+              plan_type: "team",
+              credits_balance: null,
+              unlimited: false,
+              fetched_at: "2026-04-08T15:20:00.000Z",
+              five_hour: {
+                used_percent: readManagedCurrentQuotaCalls === 1 ? 10 : 20,
+                window_seconds: 18_000,
+                reset_at: "2026-04-08T16:50:52.000Z",
+              },
+              one_week: {
+                used_percent: readManagedCurrentQuotaCalls === 1 ? 20 : 30,
+                window_seconds: 604_800,
+                reset_at: "2026-04-14T09:17:35.000Z",
+              },
+            };
+          },
+          watchManagedQuotaSignals: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 15));
+            interruptController.abort();
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(readManagedCurrentQuotaCalls).toBeGreaterThanOrEqual(2);
+      expect(stderr.read()).toContain("[debug] watch: reading managed Desktop quota reason=idle");
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=80% left 1W=70% left/,
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2336,18 +2398,21 @@ wire_api = "responses"
     }
   });
 
-  test("watch does not switch on non-exhausted rate limit updates", async () => {
+  test("watch does not switch on non-exhausted quota reads", async () => {
     const homeDir = await createTempHome();
 
     try {
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
       const stderr = captureWritable();
+      const interruptController = new AbortController();
 
       const exitCode = await runCli(["watch", "--debug"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        interruptSignal: interruptController.signal,
+        watchQuotaIdleReadIntervalMs: 10_000,
         desktopLauncher: createDesktopLauncherStub({
           isManagedDesktopRunning: async () => true,
           readManagedCurrentQuota: async () => ({
@@ -2366,16 +2431,8 @@ wire_api = "responses"
               reset_at: "2026-04-14T09:17:35.000Z",
             },
           }),
-          watchManagedQuotaSignals: async (options) => {
-            await options?.onQuotaSignal?.({
-              requestId: "rpc:notification:account/rateLimits/updated",
-              url: "mcp:account/rateLimits/updated",
-              status: null,
-              reason: "rpc_notification",
-              bodySnippet:
-                '{"type":"mcp-notification","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":72},"secondary":{"usedPercent":63}}}}',
-              shouldAutoSwitch: false,
-            });
+          watchManagedQuotaSignals: async () => {
+            interruptController.abort();
           },
           applyManagedSwitch: async () => true,
         }),
@@ -2388,7 +2445,7 @@ wire_api = "responses"
       expect(stdout.read()).not.toContain('Auto-switched to');
       expect(stderr.read()).toContain('[debug] watch: auto-switch enabled');
       expect(stderr.read()).toContain(
-        '[debug] watch: skipping auto switch for requestId=rpc:notification:account/rateLimits/updated because the event is informational only',
+        '[debug] watch: skipping auto switch for requestId=poll:startup because the event is informational only',
       );
     } finally {
       await cleanupTempHome(homeDir);

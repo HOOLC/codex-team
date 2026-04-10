@@ -1662,13 +1662,14 @@ describe("codex-desktop-launch", () => {
     }
   });
 
-  test("deduplicates identical rate limit notifications by payload instead of request identity", async () => {
+  test("emits dirty activity from rate limit notifications without trusting their quota payload", async () => {
     const homeDir = await createTempHome();
     const statePath = join(homeDir, ".codex-team", "desktop-state.json");
-    const quotaSignals: Array<{
+    const quotaSignals: Array<{ requestId: string }> = [];
+    const activitySignals: Array<{
       requestId: string;
+      reason: string;
       bodySnippet: string | null;
-      quota: { five_hour_used: number | null; one_week_used: number | null } | null;
     }> = [];
 
     try {
@@ -1767,35 +1768,37 @@ describe("codex-desktop-launch", () => {
       const watchPromise = launcher.watchManagedQuotaSignals({
         signal: controller.signal,
         onQuotaSignal: (signal) => {
-          quotaSignals.push({
+          quotaSignals.push({ requestId: signal.requestId });
+        },
+        onActivitySignal: (signal) => {
+          activitySignals.push({
             requestId: signal.requestId,
+            reason: signal.reason,
             bodySnippet: signal.bodySnippet,
-            quota: signal.quota
-              ? {
-                  five_hour_used: signal.quota.five_hour?.used_percent ?? null,
-                  one_week_used: signal.quota.one_week?.used_percent ?? null,
-                }
-              : null,
           });
+          controller.abort();
         },
       });
 
       await expect(watchPromise).resolves.toBeUndefined();
-      expect(quotaSignals).toHaveLength(1);
-      expect(quotaSignals[0]?.requestId).toBe("rpc:notification:account/rateLimits/updated");
-      expect(quotaSignals[0]?.quota).toEqual({
-        five_hour_used: 3,
-        one_week_used: 30,
-      });
+      expect(quotaSignals).toEqual([]);
+      expect(activitySignals).toEqual([
+        {
+          requestId: "rpc:notification:account/rateLimits/updated",
+          reason: "quota_dirty",
+          bodySnippet:
+            '{"type":"mcp-notification","hostId":"local","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":3},"secondary":{"usedPercent":30},"planType":"plus"}}}',
+        },
+      ]);
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("emits distinct rate limit notifications even when they share the same notification method", async () => {
+  test("emits turn completed activity signals for quota read scheduling", async () => {
     const homeDir = await createTempHome();
     const statePath = join(homeDir, ".codex-team", "desktop-state.json");
-    const quotaSignals: Array<{ requestId: string; bodySnippet: string | null }> = [];
+    const activitySignals: Array<{ requestId: string; reason: string; bodySnippet: string | null }> = [];
 
     try {
       const launcher = createCodexDesktopLauncher({
@@ -1841,25 +1844,14 @@ describe("codex-desktop-launch", () => {
                   });
 
                   if (payload.method === "Runtime.evaluate") {
-                    const first =
-                      '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":3},"secondary":{"usedPercent":30},"planType":"plus"}}}}';
-                    const second =
-                      '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":4},"secondary":{"usedPercent":30},"planType":"plus"}}}}';
+                    const notification =
+                      '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}}';
                     socket.onmessage?.({
                       data: JSON.stringify({
                         method: "Runtime.consoleAPICalled",
                         params: {
                           type: "debug",
-                          args: [{ type: "string", value: first }],
-                        },
-                      }),
-                    });
-                    socket.onmessage?.({
-                      data: JSON.stringify({
-                        method: "Runtime.consoleAPICalled",
-                        params: {
-                          type: "debug",
-                          args: [{ type: "string", value: second }],
+                          args: [{ type: "string", value: notification }],
                         },
                       }),
                     });
@@ -1891,20 +1883,25 @@ describe("codex-desktop-launch", () => {
       const controller = new AbortController();
       const watchPromise = launcher.watchManagedQuotaSignals({
         signal: controller.signal,
-        onQuotaSignal: (signal) => {
-          quotaSignals.push({
+        onActivitySignal: (signal) => {
+          activitySignals.push({
             requestId: signal.requestId,
+            reason: signal.reason,
             bodySnippet: signal.bodySnippet,
           });
-          if (quotaSignals.length === 2) {
-            controller.abort();
-          }
+          controller.abort();
         },
       });
 
       await expect(watchPromise).resolves.toBeUndefined();
-      expect(quotaSignals).toHaveLength(2);
-      expect(quotaSignals[0]?.bodySnippet).not.toBe(quotaSignals[1]?.bodySnippet);
+      expect(activitySignals).toEqual([
+        {
+          requestId: "rpc:notification:turn/completed",
+          reason: "turn_completed",
+          bodySnippet:
+            '{"type":"mcp-notification","hostId":"local","method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}',
+        },
+      ]);
     } finally {
       await cleanupTempHome(homeDir);
     }
