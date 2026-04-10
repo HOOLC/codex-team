@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { describe, expect, test } from "@rstest/core";
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone.js";
@@ -22,6 +25,37 @@ import {
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Promise<void> {
+  await mkdir(join(homeDir, ".codex-team"), { recursive: true });
+  await writeFile(
+    join(homeDir, ".codex-team", "watch-quota-history.jsonl"),
+    [
+      JSON.stringify({
+        recorded_at: "2026-04-10T10:00:00.000Z",
+        account_name: accountName,
+        account_id: "acct-c",
+        identity: "acct-c:user-c",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: "2026-04-10T14:00:00.000Z" },
+        one_week: { used_percent: 3, window_seconds: 604_800, reset_at: "2026-04-16T10:00:00.000Z" },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: "2026-04-10T10:30:00.000Z",
+        account_name: accountName,
+        account_id: "acct-c",
+        identity: "acct-c:user-c",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 20, window_seconds: 18_000, reset_at: "2026-04-10T14:00:00.000Z" },
+        one_week: { used_percent: 6, window_seconds: 604_800, reset_at: "2026-04-16T10:00:00.000Z" },
+        source: "watch",
+      }),
+    ].join("\n") + "\n",
+  );
+}
 
 describe("CLI Read Commands", () => {
   test("prints version from --version", async () => {
@@ -898,6 +932,7 @@ wire_api = "responses"
     const homeDir = await createTempHome();
 
     try {
+      await seedWatchHistory(homeDir);
       const store = createAccountStore(homeDir, {
         fetchImpl: async (input, init) => {
           const url = String(input);
@@ -972,10 +1007,12 @@ wire_api = "responses"
       expect(lines[0]).toBe("Current managed account: quota-main");
       expect(output).not.toContain("CREDITS");
       expect(output).toContain("AVAILABLE");
+      expect(output).toContain("ETA");
       expect(output).toContain("CURRENT SCORE");
       expect(output).toContain("available");
       expect(output).toContain("* quota-main");
       expect(output).toContain("  quota-backup");
+      expect(output).toContain("1.8h");
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
@@ -996,6 +1033,7 @@ wire_api = "responses"
     const homeDir = await createTempHome();
 
     try {
+      await seedWatchHistory(homeDir, "quota-plus");
       const store = createAccountStore(homeDir, {
         fetchImpl: async (input, init) => {
           const url = String(input);
@@ -1052,6 +1090,11 @@ wire_api = "responses"
 
       expect(listCode).toBe(0);
       const output = listStdout.read();
+      expect(output).toContain("ETA");
+      expect(output).toContain("ETA 5H->1W");
+      expect(output).toContain("ETA 1W");
+      expect(output).toContain("RATE 1W UNITS");
+      expect(output).toContain("5H REMAIN->1W");
       expect(output).toContain("CURRENT SCORE");
       expect(output).toContain("1H SCORE");
       expect(output).toContain("5H->1W 1H");
@@ -1059,6 +1102,63 @@ wire_api = "responses"
       expect(output).toContain("1W:5H");
       expect(output).toContain("quota-plus");
       expect(output).toContain("quota-team");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list --json includes eta metadata per account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedWatchHistory(homeDir);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 60,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 400,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: 50,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          }),
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-json-eta");
+      await runCli(["save", "quota-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list", "--json"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+      const output = JSON.parse(listStdout.read());
+      expect(output.successes[0]?.eta).toMatchObject({
+        status: "ok",
+        bottleneck: "five_hour",
+      });
+      expect(typeof output.successes[0]?.eta?.rate_1w_units_per_hour).toBe("number");
     } finally {
       await cleanupTempHome(homeDir);
     }

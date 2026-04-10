@@ -65,6 +65,10 @@ import {
   handleDoctorCommand,
   handleListCommand,
 } from "./commands/inspection.js";
+import {
+  appendWatchQuotaHistory,
+  createWatchHistoryStore,
+} from "./watch-history.js";
 
 export { rankAutoSwitchCandidates } from "./cli/quota.js";
 
@@ -1400,6 +1404,7 @@ export async function runCli(
         let lastSwitchStartedAt = 0;
         let lastQuotaUpdateLine: string | null = null;
         let currentWatchAccountLabel = await resolveWatchAccountLabel(store);
+        const watchHistoryStore = createWatchHistoryStore(store.paths.codexTeamDir);
         const WATCH_SWITCH_COOLDOWN_MS = 5_000;
 
         debugLog("watch: starting managed desktop quota watch");
@@ -1411,6 +1416,34 @@ export async function runCli(
           shouldAutoSwitch: boolean;
         }) => {
           const quota = options.quota;
+          if (quota?.refresh_status === "ok") {
+            try {
+              await appendWatchQuotaHistory(watchHistoryStore, {
+                recordedAt: quota.fetched_at ?? new Date().toISOString(),
+                accountName: currentWatchAccountLabel,
+                accountId: quota.account_id,
+                identity: quota.identity,
+                planType: quota.plan_type,
+                available: quota.available,
+                fiveHour: quota.five_hour
+                  ? {
+                      usedPercent: quota.five_hour.used_percent,
+                      windowSeconds: quota.five_hour.window_seconds,
+                      resetAt: quota.five_hour.reset_at ?? null,
+                    }
+                  : null,
+                oneWeek: quota.one_week
+                  ? {
+                      usedPercent: quota.one_week.used_percent,
+                      windowSeconds: quota.one_week.window_seconds,
+                      resetAt: quota.one_week.reset_at ?? null,
+                    }
+                  : null,
+              });
+            } catch (error) {
+              debugLog(`watch: failed to persist watch history: ${(error as Error).message}`);
+            }
+          }
           const quotaUpdateLine = describeWatchQuotaEvent(currentWatchAccountLabel, quota);
           if (quotaUpdateLine !== lastQuotaUpdateLine) {
             streams.stdout.write(`${formatWatchLogLine(quotaUpdateLine)}\n`);

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -40,6 +40,80 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(1);
       expect(stderr.read()).toContain("No codexm-managed Codex Desktop session is running.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch writes quota history records when runtime quota changes", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-watch-history");
+      await store.saveCurrentAccount("plus-main");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 0,
+            fetched_at: "2026-04-10T10:00:00.000Z",
+            unlimited: false,
+            five_hour: {
+              used_percent: 10,
+              window_seconds: 18_000,
+              reset_at: "2026-04-10T14:00:00.000Z",
+            },
+            one_week: {
+              used_percent: 3,
+              window_seconds: 604_800,
+              reset_at: "2026-04-16T10:00:00.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "quota_dirty",
+              bodySnippet: null,
+              shouldAutoSwitch: false,
+              quota: {
+                plan_type: "plus",
+                credits_balance: 0,
+                fetched_at: "2026-04-10T10:15:00.000Z",
+                unlimited: false,
+                five_hour: {
+                  used_percent: 20,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-10T14:00:00.000Z",
+                },
+                one_week: {
+                  used_percent: 6,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-16T10:00:00.000Z",
+                },
+              },
+            });
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      const historyPath = join(homeDir, ".codex-team", "watch-quota-history.jsonl");
+      const history = await readFile(historyPath, "utf8");
+      expect(history).toContain("\"source\":\"watch\"");
+      expect(history).toContain("\"account_name\":\"plus-main\"");
+      expect(history).toContain("\"used_percent\":10");
+      expect(history).toContain("\"used_percent\":20");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1617,19 +1691,19 @@ describe("CLI", () => {
         mode: "auto",
         dry_run: true,
         selected: {
-          name: "alpha",
+          name: "beta",
           available: "available",
-          current_score: 13.33,
-          remain_5h: 40,
-          remain_1w: 30,
-          remain_5h_in_1w_units: 13.33,
-          five_hour_windows_per_week: 3,
+          current_score: 6.25,
+          remain_5h: 50,
+          remain_1w: 20,
+          remain_5h_in_1w_units: 6.25,
+          five_hour_windows_per_week: 8,
         },
       });
-      expect(dryRunPayload.selected.score_1h).toBeCloseTo(30, 2);
-      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(91.67, 1);
-      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(30.56, 2);
-      expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(30, 2);
+      expect(dryRunPayload.selected.score_1h).toBeCloseTo(11.63, 2);
+      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(93.06, 1);
+      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(11.63, 2);
+      expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(20, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-gamma");
 
@@ -1651,28 +1725,28 @@ describe("CLI", () => {
         action: "switch",
         mode: "auto",
         account: {
-          name: "alpha",
-          account_id: "acct-auto-alpha",
+          name: "beta",
+          account_id: "acct-auto-beta",
         },
         selected: {
-          name: "alpha",
-          current_score: 13.33,
-          five_hour_windows_per_week: 3,
+          name: "beta",
+          current_score: 6.25,
+          five_hour_windows_per_week: 8,
         },
         quota: {
           available: "available",
           refresh_status: "ok",
           five_hour: {
-            used_percent: 60,
+            used_percent: 50,
           },
           one_week: {
-            used_percent: 70,
+            used_percent: 80,
           },
         },
       });
-      expect(switchPayload.selected.score_1h).toBeCloseTo(30, 2);
+      expect(switchPayload.selected.score_1h).toBeCloseTo(11.63, 2);
 
-      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-alpha");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-beta");
     } finally {
       await cleanupTempHome(homeDir);
     }

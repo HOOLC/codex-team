@@ -5,6 +5,7 @@ import utc from "dayjs/plugin/utc.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import type { AccountQuotaSummary } from "../account-store.js";
 import type { RuntimeQuotaSnapshot } from "../codex-desktop-launch.js";
+import type { WatchHistoryEtaContext } from "../watch-history.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -41,10 +42,21 @@ export interface AutoSwitchCandidate {
   one_week_reset_at: string | null;
 }
 
+export interface QuotaEtaSummary {
+  status: WatchHistoryEtaContext["status"];
+  hours: number | null;
+  bottleneck: WatchHistoryEtaContext["bottleneck"];
+  eta_5h_eq_1w_hours: number | null;
+  eta_1w_hours: number | null;
+  rate_1w_units_per_hour: number | null;
+  remaining_5h_eq_1w: number | null;
+  remaining_1w: number | null;
+}
+
 const AUTO_SWITCH_SCORING = {
   defaultFiveHourWindowsPerWeek: 3,
   fiveHourWindowsPerWeekByPlan: {
-    plus: 3,
+    plus: 8,
     team: 8,
   },
 } as const;
@@ -445,6 +457,68 @@ function formatRawScore(value: number | null): string {
   return value === null ? "-" : String(value);
 }
 
+function roundToTwo(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function toQuotaEtaSummary(eta: WatchHistoryEtaContext | undefined): QuotaEtaSummary | null {
+  if (!eta) {
+    return null;
+  }
+
+  const rate = eta.rate_1w_units_per_hour;
+  const eta5hEq1wHours =
+    eta.status === "ok" && rate !== null && rate > 0 && eta.remaining_5h_eq_1w !== null
+      ? roundToTwo(eta.remaining_5h_eq_1w / rate)
+      : null;
+  const eta1wHours =
+    eta.status === "ok" && rate !== null && rate > 0 && eta.remaining_1w !== null
+      ? roundToTwo(eta.remaining_1w / rate)
+      : null;
+
+  return {
+    status: eta.status,
+    hours: eta.etaHours,
+    bottleneck: eta.bottleneck,
+    eta_5h_eq_1w_hours: eta5hEq1wHours,
+    eta_1w_hours: eta1wHours,
+    rate_1w_units_per_hour: eta.rate_1w_units_per_hour,
+    remaining_5h_eq_1w: eta.remaining_5h_eq_1w,
+    remaining_1w: eta.remaining_1w,
+  };
+}
+
+function formatEtaHours(hours: number | null): string {
+  if (hours === null) {
+    return "-";
+  }
+  if (hours < 1) {
+    return `${Math.round(hours * 60)}m`;
+  }
+  if (hours < 24) {
+    return `${hours.toFixed(1)}h`;
+  }
+  return `${(hours / 24).toFixed(1)}d`;
+}
+
+function formatEtaSummary(eta: QuotaEtaSummary | null): string {
+  if (!eta) {
+    return "-";
+  }
+
+  switch (eta.status) {
+    case "ok":
+      return formatEtaHours(eta.hours);
+    case "idle":
+      return "idle";
+    case "unavailable":
+      return "unavailable";
+    case "insufficient_history":
+    default:
+      return "-";
+  }
+}
+
 function normalizeDisplayedScore(rawScore: number | null, fiveHourWindowsPerWeek: number): number | null {
   if (rawScore === null) {
     return null;
@@ -507,7 +581,10 @@ function describeQuotaAccounts(
   accounts: AccountQuotaSummary[],
   currentStatus: CurrentListStatusLike,
   warnings: string[],
-  options: { verbose?: boolean } = {},
+  options: {
+    verbose?: boolean;
+    etaByName?: Map<string, WatchHistoryEtaContext>;
+  } = {},
 ): string {
   if (accounts.length === 0) {
     const lines = [describeCurrentListStatus(currentStatus), "No saved accounts."];
@@ -524,11 +601,13 @@ function describeQuotaAccounts(
   );
   const rows = accounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
+    const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
     const row: Record<string, string> = {
       name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
       account_id: maskAccountId(account.identity),
       plan_type: account.plan_type ?? "-",
       available: computeAvailability(account) ?? "-",
+      eta: formatEtaSummary(eta),
       score: candidate
         ? formatRemainingPercent(
             normalizeDisplayedScore(candidate.current_score, candidate.five_hour_windows_per_week),
@@ -542,6 +621,12 @@ function describeQuotaAccounts(
     };
 
     if (options.verbose) {
+      row.eta_5h_eq_1w = eta ? formatEtaSummary({ ...eta, hours: eta.eta_5h_eq_1w_hours }) : "-";
+      row.eta_1w = eta ? formatEtaSummary({ ...eta, hours: eta.eta_1w_hours }) : "-";
+      row.rate_1w_units =
+        eta && eta.rate_1w_units_per_hour !== null ? String(eta.rate_1w_units_per_hour) : "-";
+      row.remaining_5h_eq_1w =
+        eta && eta.remaining_5h_eq_1w !== null ? String(eta.remaining_5h_eq_1w) : "-";
       row.projected_5h_in_1w_units_1h = candidate
         ? formatRawScore(candidate.projected_5h_in_1w_units_1h)
         : "-";
@@ -562,6 +647,7 @@ function describeQuotaAccounts(
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN TYPE" },
     { key: "available", label: "AVAILABLE" },
+    { key: "eta", label: "ETA" },
     { key: "score", label: "CURRENT SCORE" },
     { key: "five_hour", label: "5H USED" },
     { key: "five_hour_reset", label: "5H RESET AT" },
@@ -574,6 +660,10 @@ function describeQuotaAccounts(
     columns.splice(
       5,
       0,
+      { key: "eta_5h_eq_1w", label: "ETA 5H->1W" },
+      { key: "eta_1w", label: "ETA 1W" },
+      { key: "rate_1w_units", label: "RATE 1W UNITS" },
+      { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W" },
       { key: "score_1h", label: "1H SCORE" },
       { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H RAW" },
       { key: "projected_1w_1h", label: "1W 1H" },
@@ -597,7 +687,10 @@ export function describeQuotaRefresh(
     failures: Array<{ name: string; error: string }>;
   },
   currentStatus: CurrentListStatusLike,
-  options: { verbose?: boolean } = {},
+  options: {
+    verbose?: boolean;
+    etaByName?: Map<string, WatchHistoryEtaContext>;
+  } = {},
 ): string {
   const lines: string[] = [];
 
