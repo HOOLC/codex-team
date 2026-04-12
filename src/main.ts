@@ -1519,7 +1519,7 @@ export async function runCli(
                   )}\n`,
                 );
 
-                // Signal CLI processes to reload auth for the switched account
+                // Restart CLI processes after account switch (SIGTERM → codexm run auto-respawns)
                 const restartResult = await cliManager.restartCliProcess({
                   accountId: switchResult.selected.account_id ?? undefined,
                   signal: interruptSignal,
@@ -1527,14 +1527,14 @@ export async function runCli(
                 if (restartResult.restarted > 0) {
                   streams.stderr.write(
                     `${formatWatchLogLine(
-                      `Signalled ${restartResult.restarted} CLI process(es) to reload auth`,
+                      `Restarted ${restartResult.restarted} CLI process(es). Use "codexm run" for seamless auto-restart.`,
                     )}\n`,
                   );
                 }
                 if (restartResult.failed > 0) {
                   streams.stderr.write(
                     `${formatWatchLogLine(
-                      `Failed to signal ${restartResult.failed} CLI process(es)`,
+                      `Failed to restart ${restartResult.failed} CLI process(es)`,
                     )}\n`,
                   );
                 }
