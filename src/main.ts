@@ -66,6 +66,12 @@ import {
   handleListCommand,
 } from "./commands/inspection.js";
 
+import { getPlatform } from "./platform.js";
+import {
+  createCliProcessManager,
+  type CliProcessManager,
+} from "./codex-cli-watcher.js";
+
 export { rankAutoSwitchCandidates } from "./cli/quota.js";
 
 dayjs.extend(utc);
@@ -1381,9 +1387,183 @@ export async function runCli(
           return 0;
         }
 
-        if (!(await desktopLauncher.isManagedDesktopRunning())) {
-          throw new Error("No codexm-managed Codex Desktop session is running.");
+        const desktopRunning = await desktopLauncher.isManagedDesktopRunning();
+
+        if (!desktopRunning && detach) {
+          throw new Error(
+            "Detached CLI watch is not yet supported. Run \"codexm watch\" in the foreground instead.",
+          );
         }
+
+        // ── CLI-mode watch (no Desktop running) ──
+        if (!desktopRunning) {
+          const platform = await getPlatform();
+          debugLog(`watch: no managed Desktop detected, entering CLI watch mode (platform=${platform})`);
+          streams.stderr.write(
+            `${formatWatchLogLine("No managed Codex Desktop session — entering CLI watch mode")}\n`,
+          );
+
+          const cliManager = createCliProcessManager({
+            pollIntervalMs: watchQuotaMinReadIntervalMs,
+          });
+
+          // Discover and register existing CLI processes
+          const discovered = await cliManager.findRunningCliProcesses();
+          if (discovered.length > 0) {
+            streams.stderr.write(
+              `${formatWatchLogLine(`Found ${discovered.length} running codex CLI process(es)`)}\n`,
+            );
+            for (const proc of discovered) {
+              debugLog(`watch: discovered CLI process pid=${proc.pid} command=${proc.command}`);
+            }
+          }
+
+          let cliWatchExitCode = 0;
+          let cliSwitchInFlight = false;
+          let cliLastSwitchStartedAt = 0;
+          let cliLastQuotaUpdateLine: string | null = null;
+          let cliCurrentAccountLabel = await resolveWatchAccountLabel(store);
+          const CLI_WATCH_SWITCH_COOLDOWN_MS = 5_000;
+
+          const handleCliQuotaResult = async (options: {
+            requestId: string;
+            quota: ReturnType<typeof toCliQuotaSummary> | null;
+            shouldAutoSwitch: boolean;
+          }) => {
+            const quota = options.quota;
+            const quotaUpdateLine = describeWatchQuotaEvent(cliCurrentAccountLabel, quota);
+            if (quotaUpdateLine !== cliLastQuotaUpdateLine) {
+              streams.stdout.write(`${formatWatchLogLine(quotaUpdateLine)}\n`);
+              cliLastQuotaUpdateLine = quotaUpdateLine;
+            }
+
+            if (!autoSwitch || !options.shouldAutoSwitch) {
+              return;
+            }
+
+            const lock = await tryAcquireSwitchLock(store, "watch-cli");
+            if (!lock.acquired) {
+              streams.stdout.write(
+                `${formatWatchLogLine(
+                  describeWatchAutoSwitchSkippedEvent(cliCurrentAccountLabel, "lock-busy"),
+                )}\n`,
+              );
+              return;
+            }
+
+            const now = Date.now();
+            if (cliSwitchInFlight || now - cliLastSwitchStartedAt < CLI_WATCH_SWITCH_COOLDOWN_MS) {
+              await lock.release();
+              return;
+            }
+
+            cliSwitchInFlight = true;
+            cliLastSwitchStartedAt = now;
+
+            try {
+              const switchResult = await performAutoSwitch(store, desktopLauncher, {
+                dryRun: false,
+                force: false,
+                signal: interruptSignal,
+                statusStream: streams.stderr,
+                statusDelayMs: managedDesktopWaitStatusDelayMs,
+                statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+                timeoutMs: WATCH_AUTO_SWITCH_TIMEOUT_MS,
+                debugLog,
+              });
+
+              if (switchResult.skipped) {
+                cliCurrentAccountLabel = switchResult.selected.name;
+                streams.stdout.write(
+                  `${formatWatchLogLine(
+                    describeWatchAutoSwitchSkippedEvent(cliCurrentAccountLabel, "already-best"),
+                  )}\n`,
+                );
+              } else if (switchResult.result) {
+                const previousLabel = cliCurrentAccountLabel;
+                cliCurrentAccountLabel = switchResult.result.account.name;
+                streams.stdout.write(
+                  `${formatWatchLogLine(
+                    describeWatchAutoSwitchEvent(
+                      previousLabel,
+                      cliCurrentAccountLabel,
+                      switchResult.result.warnings,
+                    ),
+                  )}\n`,
+                );
+
+                // Signal CLI processes to reload auth for the switched account
+                const restartResult = await cliManager.restartCliProcess({
+                  accountId: switchResult.selected.account_id ?? undefined,
+                  signal: interruptSignal,
+                });
+                if (restartResult.restarted > 0) {
+                  streams.stderr.write(
+                    `${formatWatchLogLine(
+                      `Signalled ${restartResult.restarted} CLI process(es) to reload auth`,
+                    )}\n`,
+                  );
+                }
+                if (restartResult.failed > 0) {
+                  streams.stderr.write(
+                    `${formatWatchLogLine(
+                      `Failed to signal ${restartResult.failed} CLI process(es)`,
+                    )}\n`,
+                  );
+                }
+              }
+
+              if (switchResult.refreshResult.failures.length > 0) {
+                cliWatchExitCode = 1;
+              }
+            } finally {
+              cliSwitchInFlight = false;
+              await lock.release();
+            }
+          };
+
+          try {
+            await cliManager.watchCliQuotaSignals({
+              pollIntervalMs: watchQuotaMinReadIntervalMs,
+              signal: interruptSignal,
+              debugLogger: debug
+                ? (line) => {
+                    streams.stderr.write(`${line}\n`);
+                  }
+                : undefined,
+              onStatus: async (event) => {
+                if (event.type === "disconnected") {
+                  streams.stderr.write(
+                    `${formatWatchLogLine(`CLI connection lost (attempt ${event.attempt}): ${event.error ?? "unknown"}`)}\n`,
+                  );
+                } else if (event.type === "reconnected") {
+                  streams.stderr.write(
+                    `${formatWatchLogLine("CLI connection established")}\n`,
+                  );
+                }
+              },
+              onQuotaSignal: async (quotaSignal) => {
+                const quota = quotaSignal.quota
+                  ? toCliQuotaSummaryFromRuntimeQuota(quotaSignal.quota)
+                  : null;
+                await handleCliQuotaResult({
+                  requestId: quotaSignal.requestId,
+                  quota,
+                  shouldAutoSwitch: quotaSignal.shouldAutoSwitch,
+                });
+              },
+            });
+          } catch (error) {
+            if (!interruptSignal?.aborted) {
+              streams.stderr.write(`Error: ${(error as Error).message}\n`);
+              cliWatchExitCode = 1;
+            }
+          }
+
+          return cliWatchExitCode;
+        }
+
+
 
         if (detach) {
           const detachedState = await watchProcessManager.startDetached({
