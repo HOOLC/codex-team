@@ -70,6 +70,9 @@ import {
   type CliProcessManager,
 } from "./codex-cli-watcher.js";
 import {
+  runCodexWithAutoRestart,
+} from "./codex-cli-runner.js";
+import {
   createPlatformDesktopLauncher,
 } from "./platform-desktop-adapter.js";
 import { getPlatform, isCodexDesktopCommand, type CodexmPlatform } from "./platform.js";
@@ -1833,6 +1836,50 @@ export async function runCli(
 
         return watchExitCode;
       }
+
+      case "run": {
+        // `codexm run [-- ...codexArgs]` wraps `codex` and auto-restarts
+        // when the auth file changes (e.g. after `codexm switch`).
+        const separatorIdx = process.argv.indexOf("--");
+        const codexArgs =
+          separatorIdx >= 0 ? process.argv.slice(separatorIdx + 1) : [];
+
+        const currentAccount = await store.getCurrentAccountInfo?.();
+
+        streams.stderr.write(
+          `[codexm run] Starting codex with auto-restart on auth changes...
+`,
+        );
+        if (codexArgs.length > 0) {
+          streams.stderr.write(
+            `[codexm run] codex args: ${codexArgs.join(" ")}
+`,
+          );
+        }
+        streams.stderr.write(
+          `[codexm run] Use "codexm switch <account>" in another terminal to hot-switch accounts.
+
+`,
+        );
+
+        const result = await runCodexWithAutoRestart({
+          codexArgs,
+          accountId: currentAccount?.accountId ?? null,
+          email: currentAccount?.email ?? null,
+          debugLog,
+          stderr: streams.stderr,
+        });
+
+        if (result.restartCount > 0) {
+          streams.stderr.write(
+            `
+[codexm run] Session ended. Restarted ${result.restartCount} time(s) due to auth changes.
+`,
+          );
+        }
+        return result.exitCode;
+      }
+
 
       case "remove": {
         return await handleRemoveCommand({
