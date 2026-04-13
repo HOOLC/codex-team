@@ -42,7 +42,7 @@ describe("codex runtime read paths", () => {
           if (file === "ps") {
             return {
               stdout:
-                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223\n",
+                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
               stderr: "",
             };
           }
@@ -55,7 +55,7 @@ describe("codex runtime read paths", () => {
             {
               type: "page",
               url: "app://-/index.html?hostId=local",
-              webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/page/1",
+              webSocketDebuggerUrl: "ws://127.0.0.1:39223/devtools/page/1",
             },
           ],
         }),
@@ -179,7 +179,7 @@ describe("codex runtime read paths", () => {
           if (file === "ps") {
             return {
               stdout:
-                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223\n",
+                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
               stderr: "",
             };
           }
@@ -192,7 +192,7 @@ describe("codex runtime read paths", () => {
             {
               type: "page",
               url: "app://-/index.html?hostId=local",
-              webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/page/1",
+              webSocketDebuggerUrl: "ws://127.0.0.1:39223/devtools/page/1",
             },
           ],
         }),
@@ -289,7 +289,7 @@ describe("codex runtime read paths", () => {
           if (file === "ps") {
             return {
               stdout:
-                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223\n",
+                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
               stderr: "",
             };
           }
@@ -302,7 +302,7 @@ describe("codex runtime read paths", () => {
             {
               type: "page",
               url: "app://-/index.html?hostId=local",
-              webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/page/1",
+              webSocketDebuggerUrl: "ws://127.0.0.1:39223/devtools/page/1",
             },
           ],
         }),

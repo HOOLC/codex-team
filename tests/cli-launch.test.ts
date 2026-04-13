@@ -39,7 +39,7 @@ describe("CLI Launch", () => {
             listCalls += 1;
             return listCalls === 1
               ? []
-              : [{ pid: 501, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+              : [{ pid: 501, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
           },
           quitRunningApps: async () => {
             calls.push("quit");
@@ -80,7 +80,7 @@ describe("CLI Launch", () => {
             listCalls += 1;
             return listCalls === 1
               ? []
-              : [{ pid: 501, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+              : [{ pid: 501, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
           },
           launch: async () => undefined,
         }),
@@ -88,7 +88,7 @@ describe("CLI Launch", () => {
 
       expect(exitCode).toBe(0);
       expect(stderr.read()).toContain("[debug] launch: using app path /Applications/Codex.app");
-      expect(stderr.read()).toContain("[debug] launch: recorded managed desktop pid=501 port=9223");
+      expect(stderr.read()).toContain("[debug] launch: recorded managed desktop pid=501 port=39223");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -119,7 +119,7 @@ describe("CLI Launch", () => {
             listCalls += 1;
             return listCalls === 1
               ? []
-              : [{ pid: 502, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+              : [{ pid: 502, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
           },
           quitRunningApps: async () => {
             calls.push("quit");
@@ -289,7 +289,7 @@ describe("CLI Launch", () => {
           listCalls += 1;
           return listCalls <= 2
             ? [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }]
-            : [{ pid: 456, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+            : [{ pid: 456, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
         },
         quitRunningApps: async (options) => {
           calls.push(options?.force === true ? "quit:force" : "quit");
@@ -329,12 +329,12 @@ describe("CLI Launch", () => {
           listCalls += 1;
           return listCalls <= 2
             ? [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }]
-            : [{ pid: 456, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+            : [{ pid: 456, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
         },
         readManagedState: async () => ({
           pid: 123,
           app_path: "/Applications/Codex.app",
-          remote_debugging_port: 9223,
+          remote_debugging_port: 39223,
           managed_by_codexm: true,
           started_at: "2026-04-08T00:00:00.000Z",
         }),
@@ -438,7 +438,7 @@ describe("CLI Launch", () => {
         stderr: captureWritable().stream,
         desktopLauncher: createDesktopLauncherStub({
           listRunningApps: async () => [
-            { pid: 999, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" },
+            { pid: 999, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" },
           ],
           launch: async () => undefined,
           writeManagedState: async () => {
@@ -548,7 +548,7 @@ describe("CLI Launch", () => {
             listCalls += 1;
             return listCalls === 1
               ? []
-              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
           },
           launch: async () => {
             calls.push("launch");
@@ -587,7 +587,7 @@ describe("CLI Launch", () => {
             listCalls += 1;
             return listCalls === 1
               ? []
-              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }];
+              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
           },
         }),
         watchProcessManager: createWatchProcessManagerStub({

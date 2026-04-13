@@ -12,7 +12,7 @@ export type { CodexDirectClient } from "./codex-direct-client.js";
 
 const execFile = promisify(execFileCallback);
 
-export const DEFAULT_CODEX_REMOTE_DEBUGGING_PORT = 9223;
+export const DEFAULT_CODEX_REMOTE_DEBUGGING_PORT = 39223;
 const DEFAULT_CODEX_DESKTOP_STATE_PATH = join(
   homedir(),
   ".codex-team",
