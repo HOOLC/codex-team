@@ -65,6 +65,7 @@ Usage:
   codexm switch --auto [--dry-run] [--force] [--json]
   codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]
   codexm watch [--no-auto-switch] [--detach] [--status] [--stop]
+  codexm run [-- ...codexArgs]
   codexm remove <name> [--yes] [--json]
   codexm rename <old> <new> [--json]
 

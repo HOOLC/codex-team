@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from "@rstest/core";
+import { describe, expect, test, beforeEach, afterEach, rstest as rs } from "@rstest/core";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -205,7 +205,10 @@ describe("createCliProcessManager", () => {
   describe("registerProcess and getTrackedProcesses", () => {
     test("registers a process and retrieves it", async () => {
       const registryPath = join(testDir, "cli-processes.json");
-      const manager = createCliProcessManager({ registryPath });
+      const manager = createCliProcessManager({
+        registryPath,
+        isProcessAliveImpl: (pid) => pid === process.pid,
+      });
 
       await manager.registerProcess(
         { pid: process.pid, command: "/usr/bin/codex", args: ["--model", "o4-mini"] },
@@ -222,7 +225,10 @@ describe("createCliProcessManager", () => {
 
     test("registers multiple processes with different accounts", async () => {
       const registryPath = join(testDir, "cli-processes.json");
-      const manager = createCliProcessManager({ registryPath });
+      const manager = createCliProcessManager({
+        registryPath,
+        isProcessAliveImpl: (pid) => pid === process.pid,
+      });
 
       // Use current PID (guaranteed alive) for both — we'll test filtering
       await manager.registerProcess(
@@ -253,7 +259,10 @@ describe("createCliProcessManager", () => {
 
     test("filters by accountId", async () => {
       const registryPath = join(testDir, "cli-processes.json");
-      const manager = createCliProcessManager({ registryPath });
+      const manager = createCliProcessManager({
+        registryPath,
+        isProcessAliveImpl: (pid) => pid === process.pid,
+      });
 
       // Register current process
       await manager.registerProcess(
@@ -271,7 +280,10 @@ describe("createCliProcessManager", () => {
 
     test("re-registration replaces existing entry for same PID", async () => {
       const registryPath = join(testDir, "cli-processes.json");
-      const manager = createCliProcessManager({ registryPath });
+      const manager = createCliProcessManager({
+        registryPath,
+        isProcessAliveImpl: (pid) => pid === process.pid,
+      });
 
       await manager.registerProcess(
         { pid: process.pid, command: "/usr/bin/codex", args: [] },
@@ -421,37 +433,37 @@ describe("createCliProcessManager", () => {
     });
 
     test("handles client creation failure with reconnect", async () => {
+      rs.useFakeTimers();
+
       let attempts = 0;
       const statusEvents: unknown[] = [];
       const controller = new AbortController();
 
-      const manager = createCliProcessManager({
-        createDirectClientImpl: async () => {
-          attempts++;
-          if (attempts <= 2) {
-            throw new Error("connection refused");
-          }
-          controller.abort();
-          throw new Error("done");
-        },
-        pollIntervalMs: 50,
-      });
-
-      const watchPromise = manager.watchCliQuotaSignals({
-        pollIntervalMs: 50,
-        signal: controller.signal,
-        onStatus: async (event) => {
-          statusEvents.push(event);
-        },
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      controller.abort();
-
       try {
+        const manager = createCliProcessManager({
+          createDirectClientImpl: async () => {
+            attempts++;
+            if (attempts <= 2) {
+              throw new Error("connection refused");
+            }
+            controller.abort();
+            throw new Error("done");
+          },
+          pollIntervalMs: 50,
+        });
+
+        const watchPromise = manager.watchCliQuotaSignals({
+          pollIntervalMs: 50,
+          signal: controller.signal,
+          onStatus: async (event) => {
+            statusEvents.push(event);
+          },
+        });
+
+        await rs.advanceTimersByTimeAsync(3_500);
         await watchPromise;
-      } catch {
-        // Expected
+      } finally {
+        rs.useRealTimers();
       }
 
       // Should have received disconnected events

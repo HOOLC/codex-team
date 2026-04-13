@@ -263,8 +263,25 @@ function hasExhaustedRateLimit(value: unknown, depth = 0): boolean {
   return Object.values(value).some((entry) => hasExhaustedRateLimit(entry, depth + 1));
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted || ms <= 0) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(undefined);
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(undefined);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -324,12 +341,14 @@ export function createCliProcessManager(options: {
   createDirectClientImpl?: () => Promise<CodexDirectClient>;
   pollIntervalMs?: number;
   registryPath?: string;
+  isProcessAliveImpl?: (pid: number) => boolean;
 } = {}): CliProcessManager {
   const execFileImpl = options.execFileImpl;
   const createDirectClientImpl =
     options.createDirectClientImpl ?? (() => createCodexDirectClient());
   const defaultPollIntervalMs = options.pollIntervalMs ?? 30_000;
   const registryPath = options.registryPath ?? DEFAULT_CLI_PROCESSES_PATH;
+  const processAlive = options.isProcessAliveImpl ?? isProcessAlive;
 
   // ── Process discovery ──
 
@@ -402,7 +421,7 @@ export function createCliProcessManager(options: {
 
   async function pruneStaleProcesses(): Promise<TrackedCliProcess[]> {
     const existing = await readProcessRegistry(registryPath);
-    const alive = existing.filter((entry) => isProcessAlive(entry.pid));
+    const alive = existing.filter((entry) => processAlive(entry.pid));
 
     if (alive.length !== existing.length) {
       await writeProcessRegistry(registryPath, alive);
@@ -515,7 +534,7 @@ export function createCliProcessManager(options: {
             debugLogger?.(`CLI poll: quota=${currentJson?.slice(0, 200)}`);
 
             // Wait for next poll interval
-            await delay(pollInterval);
+            await delay(pollInterval, signal);
           }
         } finally {
           if (client) {
@@ -540,7 +559,7 @@ export function createCliProcessManager(options: {
 
         // Exponential backoff, max 60s
         const backoffMs = Math.min(1_000 * Math.pow(2, attempt - 1), 60_000);
-        await delay(backoffMs);
+        await delay(backoffMs, signal);
       }
     }
   }
@@ -576,7 +595,7 @@ export function createCliProcessManager(options: {
 
     for (const proc of targets) {
       // Skip if already dead
-      if (!isProcessAlive(proc.pid)) {
+      if (!processAlive(proc.pid)) {
         skipped += 1;
         continue;
       }
@@ -588,9 +607,9 @@ export function createCliProcessManager(options: {
         process.kill(proc.pid, "SIGTERM");
 
         // Wait for the process to exit
-        await delay(Math.min(timeoutMs, 3_000));
+        await delay(Math.min(timeoutMs, 3_000), restartOptions?.signal);
 
-        if (isProcessAlive(proc.pid)) {
+        if (processAlive(proc.pid)) {
           // Still running after SIGTERM — try SIGKILL
           try {
             process.kill(proc.pid, "SIGKILL");

@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { describe, expect, test } from "@rstest/core";
+import { describe, expect, rstest as rs, test } from "@rstest/core";
 
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store.js";
@@ -39,6 +39,7 @@ describe("CLI", () => {
         stdout: stdout.stream,
         stderr: stderr.stream,
         interruptSignal: controller.signal,
+        watchQuotaMinReadIntervalMs: 50,
         desktopLauncher: createDesktopLauncherStub({
           isManagedDesktopRunning: async () => false,
         }),
@@ -1102,6 +1103,7 @@ describe("CLI", () => {
         stdout: stdout.stream,
         stderr: stderr.stream,
         desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
           applyManagedSwitch: async (options) => {
             calls.push({ ...options });
             return true;
@@ -1343,6 +1345,7 @@ describe("CLI", () => {
         stdout: stdout.stream,
         stderr: stderr.stream,
         desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
           applyManagedSwitch: async (options) => {
             calls.push({ ...options });
             return true;
@@ -1381,6 +1384,7 @@ describe("CLI", () => {
         stdout: stdout.stream,
         stderr: stderr.stream,
         desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
           applyManagedSwitch: async (options) => {
             applyCalls.push({ ...options });
             throw new Error("Timed out waiting for Codex Desktop devtools response.");
@@ -1428,6 +1432,7 @@ describe("CLI", () => {
         stdout: stdout.stream,
         stderr: stderr.stream,
         desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
           applyManagedSwitch: async () => {
             throw new Error("Could not find the local Codex Desktop devtools target.");
           },

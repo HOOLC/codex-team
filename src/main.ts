@@ -837,6 +837,7 @@ async function resolveManagedDesktopState(
   desktopLauncher: CodexDesktopLauncher,
   appPath: string,
   existingApps: RunningCodexDesktop[],
+  launchPlatform: CodexmPlatform = "darwin",
 ): Promise<ManagedCodexDesktopState | null> {
   const existingPids = new Set(existingApps.map((app) => app.pid));
 
@@ -1339,6 +1340,7 @@ export async function runCli(
                 desktopLauncher,
                 appPath,
                 runningApps,
+                launchPlatform,
               );
               if (!managedState) {
                 await desktopLauncher.clearManagedState().catch(() => undefined);
@@ -1369,6 +1371,7 @@ export async function runCli(
               desktopLauncher,
               appPath,
               runningApps,
+              launchPlatform,
             );
             if (!managedState) {
               await desktopLauncher.clearManagedState().catch(() => undefined);
@@ -1955,7 +1958,7 @@ export async function runCli(
         const codexArgs =
           separatorIdx >= 0 ? process.argv.slice(separatorIdx + 1) : [];
 
-        const currentAccount = await store.getCurrentAccountInfo?.();
+        const currentAccount = await store.getCurrentStatus();
 
         streams.stderr.write(
           `[codexm run] Starting codex with auto-restart on auth changes...
@@ -1975,8 +1978,8 @@ export async function runCli(
 
         const result = await runCodexWithAutoRestart({
           codexArgs,
-          accountId: currentAccount?.accountId ?? null,
-          email: currentAccount?.email ?? null,
+          accountId: currentAccount.account_id ?? null,
+          email: null,
           debugLog,
           stderr: streams.stderr,
         });

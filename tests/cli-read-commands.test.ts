@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -9,6 +9,7 @@ import packageJson from "../package.json";
 
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store.js";
+import { COMMAND_NAMES } from "../src/cli/args.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -58,6 +59,32 @@ async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Pr
 }
 
 describe("CLI Read Commands", () => {
+  test("keeps implemented commands, parser command names, and help output in sync", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["--help"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stderr.read()).toBe("");
+
+    const mainSource = await readFile(join(process.cwd(), "src", "main.ts"), "utf8");
+    const implementedCommands = Array.from(
+      mainSource.matchAll(/case "([^"]+)": \{/g),
+      (match) => match[1],
+    );
+
+    expect([...COMMAND_NAMES].sort()).toEqual([...implementedCommands].sort());
+
+    const helpOutput = stdout.read();
+    for (const command of COMMAND_NAMES) {
+      expect(helpOutput).toContain(`codexm ${command}`);
+    }
+  });
+
   test("prints version from --version", async () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
@@ -90,6 +117,7 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    expect(output).toContain("codexm run [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(stderr.read()).toBe("");
@@ -121,6 +149,7 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("current");
       expect(script).toContain("doctor");
       expect(script).toContain("watch");
+      expect(script).toContain("run");
       expect(script).toContain("completion");
       expect(script).toContain("--device-auth");
       expect(script).toContain("--no-auto-switch");
@@ -152,6 +181,7 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("_codexm()");
       expect(script).toContain("COMPREPLY=");
       expect(script).toContain("codexm completion --accounts");
+      expect(script).toContain("run");
       expect(script).toContain("--with-api-key");
       expect(script).toContain("--detach");
       expect(stderr.read()).toBe("");
@@ -233,6 +263,10 @@ describe("CLI Read Commands", () => {
       const currentStdout = captureWritable();
       const currentCode = await runCli(["current", "--json"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => null,
+          readManagedCurrentQuota: async () => null,
+        }),
         stdout: currentStdout.stream,
         stderr: stderr.stream,
       });
