@@ -1,228 +1,68 @@
-import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import {
-  chmod,
   copyFile,
-  mkdir,
-  readdir,
-  readFile,
   rename,
   rm,
   stat,
-  writeFile,
 } from "node:fs/promises";
 
 import {
   AuthSnapshot,
   QuotaSnapshot,
-  QuotaStatus,
-  QuotaWindowSnapshot,
-  SnapshotMeta,
-  createSnapshotMeta,
-  getMetaIdentity,
   getSnapshotAccountId,
   getSnapshotIdentity,
   getSnapshotUserId,
-  isSupportedChatGPTAuthMode,
   parseAuthSnapshot,
   parseSnapshotMeta,
   readAuthSnapshotFile,
 } from "./auth-snapshot.js";
+import { AccountStoreRepository } from "./account-store-repository.js";
+import { sanitizeConfigForAccountAuth, validateConfigSnapshot } from "./account-store-config.js";
+import {
+  DIRECTORY_MODE,
+  FILE_MODE,
+  QUOTA_REFRESH_CONCURRENCY,
+  SCHEMA_VERSION,
+  atomicWriteFile,
+  chmodIfPossible,
+  defaultPaths,
+  ensureAccountName,
+  ensureDirectory,
+  pathExists,
+  readJsonFile,
+  stringifyJson,
+} from "./account-store-storage.js";
+import type {
+  AccountQuotaSummary,
+  CurrentAccountStatus,
+  DoctorReport,
+  ManagedAccount,
+  RefreshAllQuotasResult,
+  RefreshQuotaResult,
+  StorePaths,
+  UpdateAccountResult,
+  SwitchAccountResult,
+} from "./account-store-types.js";
 import {
   extractChatGPTAuth,
   fetchQuotaSnapshot,
 } from "./quota-client.js";
-
-const DIRECTORY_MODE = 0o700;
-const FILE_MODE = 0o600;
-const SCHEMA_VERSION = 1;
-const ACCOUNT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const QUOTA_REFRESH_CONCURRENCY = 3;
-
-export interface StorePaths {
-  homeDir: string;
-  codexDir: string;
-  codexTeamDir: string;
-  currentAuthPath: string;
-  currentConfigPath: string;
-  accountsDir: string;
-  backupsDir: string;
-  statePath: string;
-}
-
-export interface StoreState {
-  schema_version: number;
-  last_switched_account: string | null;
-  last_backup_path: string | null;
-}
-
-export interface ManagedAccount extends SnapshotMeta {
-  identity: string;
-  authPath: string;
-  metaPath: string;
-  configPath: string | null;
-  duplicateAccountId: boolean;
-}
-
-export interface AccountQuotaSummary {
-  name: string;
-  account_id: string;
-  user_id: string | null;
-  identity: string;
-  plan_type: string | null;
-  credits_balance: number | null;
-  status: QuotaStatus;
-  fetched_at: string | null;
-  error_message: string | null;
-  unlimited: boolean;
-  five_hour: QuotaWindowSnapshot | null;
-  one_week: QuotaWindowSnapshot | null;
-}
-
-export interface CurrentAccountStatus {
-  exists: boolean;
-  auth_mode: string | null;
-  account_id: string | null;
-  user_id: string | null;
-  identity: string | null;
-  matched_accounts: string[];
-  managed: boolean;
-  duplicate_match: boolean;
-  warnings: string[];
-}
-
-export interface DoctorReport {
-  healthy: boolean;
-  warnings: string[];
-  issues: string[];
-  account_count: number;
-  invalid_accounts: string[];
-  current_auth_present: boolean;
-}
-
-export interface SwitchAccountResult {
-  account: ManagedAccount;
-  warnings: string[];
-  backup_path: string | null;
-}
-
-export interface UpdateAccountResult {
-  account: ManagedAccount;
-}
-
-export interface RefreshQuotaResult {
-  account: ManagedAccount;
-  quota: QuotaSnapshot;
-}
-
-export interface RefreshAllQuotasResult {
-  successes: AccountQuotaSummary[];
-  failures: Array<{ name: string; error: string }>;
-}
-
-function defaultPaths(homeDir = homedir()): StorePaths {
-  const codexDir = join(homeDir, ".codex");
-  const codexTeamDir = join(homeDir, ".codex-team");
-
-  return {
-    homeDir,
-    codexDir,
-    codexTeamDir,
-    currentAuthPath: join(codexDir, "auth.json"),
-    currentConfigPath: join(codexDir, "config.toml"),
-    accountsDir: join(codexTeamDir, "accounts"),
-    backupsDir: join(codexTeamDir, "backups"),
-    statePath: join(codexTeamDir, "state.json"),
-  };
-}
-
-async function chmodIfPossible(path: string, mode: number): Promise<void> {
-  try {
-    await chmod(path, mode);
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code !== "ENOENT") {
-      throw error;
-    }
-  }
-}
-
-async function ensureDirectory(path: string, mode: number): Promise<void> {
-  await mkdir(path, { recursive: true, mode });
-  await chmodIfPossible(path, mode);
-}
-
-async function atomicWriteFile(
-  path: string,
-  content: string,
-  mode = FILE_MODE,
-): Promise<void> {
-  const directory = dirname(path);
-  const tempPath = join(
-    directory,
-    `.${basename(path)}.${process.pid}.${Date.now()}.tmp`,
-  );
-
-  await ensureDirectory(directory, DIRECTORY_MODE);
-  await writeFile(tempPath, content, { encoding: "utf8", mode });
-  await chmodIfPossible(tempPath, mode);
-  await rename(tempPath, path);
-  await chmodIfPossible(path, mode);
-}
-
-function stringifyJson(value: unknown): string {
-  return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-function ensureAccountName(name: string): void {
-  if (!ACCOUNT_NAME_PATTERN.test(name)) {
-    throw new Error(
-      'Account name must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ and cannot contain path separators.',
-    );
-  }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === "ENOENT") {
-      return false;
-    }
-
-    throw error;
-  }
-}
-
-async function readJsonFile(path: string): Promise<string> {
-  return readFile(path, "utf8");
-}
-
-function canAutoMigrateLegacyChatGPTMeta(
-  meta: SnapshotMeta,
-  snapshot: AuthSnapshot,
-): boolean {
-  if (!isSupportedChatGPTAuthMode(meta.auth_mode) || !isSupportedChatGPTAuthMode(snapshot.auth_mode)) {
-    return false;
-  }
-
-  if (typeof meta.user_id === "string" && meta.user_id.trim() !== "") {
-    return false;
-  }
-
-  const snapshotUserId = getSnapshotUserId(snapshot);
-  if (!snapshotUserId) {
-    return false;
-  }
-
-  return meta.account_id === getSnapshotAccountId(snapshot);
-}
+export type {
+  AccountQuotaSummary,
+  CurrentAccountStatus,
+  DoctorReport,
+  ManagedAccount,
+  RefreshAllQuotasResult,
+  RefreshQuotaResult,
+  StorePaths,
+  SwitchAccountResult,
+  UpdateAccountResult,
+} from "./account-store-types.js";
 
 export class AccountStore {
   readonly paths: StorePaths;
   readonly fetchImpl?: typeof fetch;
+  private readonly repository: AccountStoreRepository;
 
   constructor(paths?: Partial<StorePaths> & { homeDir?: string; fetchImpl?: typeof fetch }) {
     const resolved = defaultPaths(paths?.homeDir);
@@ -232,111 +72,7 @@ export class AccountStore {
       homeDir: paths?.homeDir ?? resolved.homeDir,
     };
     this.fetchImpl = paths?.fetchImpl;
-  }
-
-  private accountDirectory(name: string): string {
-    ensureAccountName(name);
-    return join(this.paths.accountsDir, name);
-  }
-
-  private accountAuthPath(name: string): string {
-    return join(this.accountDirectory(name), "auth.json");
-  }
-
-  private accountMetaPath(name: string): string {
-    return join(this.accountDirectory(name), "meta.json");
-  }
-
-  private accountConfigPath(name: string): string {
-    return join(this.accountDirectory(name), "config.toml");
-  }
-
-  private async writeAccountAuthSnapshot(
-    name: string,
-    snapshot: AuthSnapshot,
-  ): Promise<void> {
-    await atomicWriteFile(
-      this.accountAuthPath(name),
-      stringifyJson(snapshot),
-    );
-  }
-
-  private async writeAccountMeta(name: string, meta: SnapshotMeta): Promise<void> {
-    await atomicWriteFile(this.accountMetaPath(name), stringifyJson(meta));
-  }
-
-  private validateConfigSnapshot(name: string, snapshot: AuthSnapshot, rawConfig: string | null): void {
-    if (snapshot.auth_mode !== "apikey") {
-      return;
-    }
-
-    if (!rawConfig) {
-      throw new Error(`Current ~/.codex/config.toml is required to save apikey account "${name}".`);
-    }
-
-    if (!/^\s*model_provider\s*=\s*["'][^"']+["']/mu.test(rawConfig)) {
-      throw new Error(`Current ~/.codex/config.toml is missing model_provider for apikey account "${name}".`);
-    }
-
-    if (!/^\s*base_url\s*=\s*["'][^"']+["']/mu.test(rawConfig)) {
-      throw new Error(`Current ~/.codex/config.toml is missing base_url for apikey account "${name}".`);
-    }
-  }
-
-  private sanitizeConfigForAccountAuth(rawConfig: string): string {
-    const lines = rawConfig.split(/\r?\n/u);
-    const result: string[] = [];
-    let skippingProviderSection = false;
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-
-      if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-        skippingProviderSection = /^\[model_providers\.[^\]]+\]$/u.test(trimmed);
-        if (skippingProviderSection) {
-          continue;
-        }
-      }
-
-      if (skippingProviderSection) {
-        continue;
-      }
-
-      if (/^\s*model_provider\s*=/u.test(line)) {
-        continue;
-      }
-
-      if (/^\s*preferred_auth_method\s*=\s*["']apikey["']\s*$/u.test(line)) {
-        continue;
-      }
-
-      result.push(line);
-    }
-
-    return `${result.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
-  }
-
-  private async ensureEmptyAccountConfigSnapshot(name: string): Promise<string> {
-    const configPath = this.accountConfigPath(name);
-    await atomicWriteFile(configPath, "");
-    return configPath;
-  }
-
-  private async syncCurrentAuthIfMatching(snapshot: AuthSnapshot): Promise<void> {
-    if (!(await pathExists(this.paths.currentAuthPath))) {
-      return;
-    }
-
-    try {
-      const currentSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
-      if (getSnapshotIdentity(currentSnapshot) !== getSnapshotIdentity(snapshot)) {
-        return;
-      }
-
-      await atomicWriteFile(this.paths.currentAuthPath, stringifyJson(snapshot));
-    } catch {
-      // Ignore sync failures here; the stored snapshot is already updated.
-    }
+    this.repository = new AccountStoreRepository(this.paths);
   }
 
   private async quotaSummaryForAccount(
@@ -368,112 +104,8 @@ export class AccountStore {
     };
   }
 
-  private async ensureLayout(): Promise<void> {
-    await ensureDirectory(this.paths.codexTeamDir, DIRECTORY_MODE);
-    await ensureDirectory(this.paths.accountsDir, DIRECTORY_MODE);
-    await ensureDirectory(this.paths.backupsDir, DIRECTORY_MODE);
-  }
-
-  private async readState(): Promise<StoreState> {
-    if (!(await pathExists(this.paths.statePath))) {
-      return {
-        schema_version: SCHEMA_VERSION,
-        last_switched_account: null,
-        last_backup_path: null,
-      };
-    }
-
-    const raw = await readJsonFile(this.paths.statePath);
-    const parsed = JSON.parse(raw) as Partial<StoreState>;
-
-    return {
-      schema_version: parsed.schema_version ?? SCHEMA_VERSION,
-      last_switched_account: parsed.last_switched_account ?? null,
-      last_backup_path: parsed.last_backup_path ?? null,
-    };
-  }
-
-  private async writeState(state: StoreState): Promise<void> {
-    await this.ensureLayout();
-    await atomicWriteFile(this.paths.statePath, stringifyJson(state));
-  }
-
-  private async readManagedAccount(name: string): Promise<ManagedAccount> {
-    const metaPath = this.accountMetaPath(name);
-    const authPath = this.accountAuthPath(name);
-    const [rawMeta, snapshot] = await Promise.all([
-      readJsonFile(metaPath),
-      readAuthSnapshotFile(authPath),
-    ]);
-    let meta = parseSnapshotMeta(rawMeta);
-
-    if (meta.name !== name) {
-      throw new Error(`Account metadata name mismatch for "${name}".`);
-    }
-
-    const snapshotIdentity = getSnapshotIdentity(snapshot);
-    if (getMetaIdentity(meta) !== snapshotIdentity) {
-      if (canAutoMigrateLegacyChatGPTMeta(meta, snapshot)) {
-        meta = {
-          ...meta,
-          account_id: getSnapshotAccountId(snapshot),
-          user_id: getSnapshotUserId(snapshot),
-        };
-        await this.writeAccountMeta(name, meta);
-      } else {
-        throw new Error(`Account metadata account_id mismatch for "${name}".`);
-      }
-    }
-
-    if (getMetaIdentity(meta) !== snapshotIdentity) {
-      throw new Error(`Account metadata account_id mismatch for "${name}".`);
-    }
-
-    return {
-      ...meta,
-      identity: getMetaIdentity(meta),
-      authPath,
-      metaPath,
-      configPath: (await pathExists(this.accountConfigPath(name))) ? this.accountConfigPath(name) : null,
-      duplicateAccountId: false,
-    };
-  }
-
   async listAccounts(): Promise<{ accounts: ManagedAccount[]; warnings: string[] }> {
-    await this.ensureLayout();
-
-    const entries = await readdir(this.paths.accountsDir, { withFileTypes: true });
-    const accounts: ManagedAccount[] = [];
-    const warnings: string[] = [];
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-
-      try {
-        accounts.push(await this.readManagedAccount(entry.name));
-      } catch (error) {
-        warnings.push(
-          `Account "${entry.name}" is invalid: ${(error as Error).message}`,
-        );
-      }
-    }
-
-    const counts = new Map<string, number>();
-    for (const account of accounts) {
-      counts.set(account.identity, (counts.get(account.identity) ?? 0) + 1);
-    }
-
-    accounts.sort((left, right) => left.name.localeCompare(right.name));
-
-    return {
-      accounts: accounts.map((account) => ({
-        ...account,
-        duplicateAccountId: (counts.get(account.identity) ?? 0) > 1,
-      })),
-      warnings,
-    };
+    return await this.repository.listAccounts();
   }
 
   async getCurrentStatus(): Promise<CurrentAccountStatus> {
@@ -516,7 +148,7 @@ export class AccountStore {
 
   async saveCurrentAccount(name: string, force = false): Promise<ManagedAccount> {
     ensureAccountName(name);
-    await this.ensureLayout();
+    await this.repository.ensureLayout();
 
     if (!(await pathExists(this.paths.currentAuthPath))) {
       throw new Error("Current ~/.codex/auth.json does not exist.");
@@ -528,10 +160,10 @@ export class AccountStore {
       (await pathExists(this.paths.currentConfigPath))
         ? await readJsonFile(this.paths.currentConfigPath)
         : null;
-    const accountDir = this.accountDirectory(name);
-    const authPath = this.accountAuthPath(name);
-    const metaPath = this.accountMetaPath(name);
-    const configPath = this.accountConfigPath(name);
+    const accountDir = this.repository.accountDirectory(name);
+    const authPath = this.repository.accountAuthPath(name);
+    const metaPath = this.repository.accountMetaPath(name);
+    const configPath = this.repository.accountConfigPath(name);
     const identity = getSnapshotIdentity(snapshot);
     const accountExists = await pathExists(accountDir);
     const existingMeta =
@@ -554,7 +186,7 @@ export class AccountStore {
       );
     }
 
-    this.validateConfigSnapshot(name, snapshot, rawConfig);
+    validateConfigSnapshot(name, snapshot, rawConfig);
     await ensureDirectory(accountDir, DIRECTORY_MODE);
     await atomicWriteFile(authPath, `${rawSnapshot.trimEnd()}\n`);
     if (snapshot.auth_mode === "apikey" && rawConfig) {
@@ -562,7 +194,7 @@ export class AccountStore {
     } else if (await pathExists(configPath)) {
       await rm(configPath, { force: true });
     }
-    const meta = createSnapshotMeta(
+    const meta = this.repository.createSnapshotMeta(
       name,
       snapshot,
       new Date(),
@@ -575,7 +207,7 @@ export class AccountStore {
       stringifyJson(meta),
     );
 
-    return this.readManagedAccount(name);
+    return await this.repository.readManagedAccount(name);
   }
 
   async addAccountSnapshot(
@@ -587,15 +219,15 @@ export class AccountStore {
     } = {},
   ): Promise<ManagedAccount> {
     ensureAccountName(name);
-    await this.ensureLayout();
+    await this.repository.ensureLayout();
 
     const normalizedSnapshot = parseAuthSnapshot(JSON.stringify(snapshot));
     const rawSnapshot = stringifyJson(normalizedSnapshot);
     const rawConfig = options.rawConfig ?? null;
-    const accountDir = this.accountDirectory(name);
-    const authPath = this.accountAuthPath(name);
-    const metaPath = this.accountMetaPath(name);
-    const configPath = this.accountConfigPath(name);
+    const accountDir = this.repository.accountDirectory(name);
+    const authPath = this.repository.accountAuthPath(name);
+    const metaPath = this.repository.accountMetaPath(name);
+    const configPath = this.repository.accountConfigPath(name);
     const identity = getSnapshotIdentity(normalizedSnapshot);
     const accountExists = await pathExists(accountDir);
     const existingMeta =
@@ -629,7 +261,7 @@ export class AccountStore {
       await rm(configPath, { force: true });
     }
 
-    const meta = createSnapshotMeta(
+    const meta = this.repository.createSnapshotMeta(
       name,
       normalizedSnapshot,
       new Date(),
@@ -639,11 +271,11 @@ export class AccountStore {
     meta.quota = existingMeta?.quota ?? meta.quota;
     await atomicWriteFile(metaPath, stringifyJson(meta));
 
-    return this.readManagedAccount(name);
+    return await this.repository.readManagedAccount(name);
   }
 
   async updateCurrentManagedAccount(): Promise<UpdateAccountResult> {
-    await this.ensureLayout();
+    await this.repository.ensureLayout();
 
     if (!(await pathExists(this.paths.currentAuthPath))) {
       throw new Error("Current ~/.codex/auth.json does not exist.");
@@ -667,27 +299,27 @@ export class AccountStore {
       (await pathExists(this.paths.currentConfigPath))
         ? await readJsonFile(this.paths.currentConfigPath)
         : null;
-    const metaPath = this.accountMetaPath(name);
+    const metaPath = this.repository.accountMetaPath(name);
     const existingMeta = parseSnapshotMeta(await readJsonFile(metaPath));
 
-    this.validateConfigSnapshot(name, currentSnapshot, currentRawConfig);
+    validateConfigSnapshot(name, currentSnapshot, currentRawConfig);
     await atomicWriteFile(
-      this.accountAuthPath(name),
+      this.repository.accountAuthPath(name),
       `${currentRawSnapshot.trimEnd()}\n`,
     );
     if (currentSnapshot.auth_mode === "apikey" && currentRawConfig) {
       await atomicWriteFile(
-        this.accountConfigPath(name),
+        this.repository.accountConfigPath(name),
         currentRawConfig.endsWith("\n") ? currentRawConfig : `${currentRawConfig}\n`,
       );
-    } else if (await pathExists(this.accountConfigPath(name))) {
-      await rm(this.accountConfigPath(name), { force: true });
+    } else if (await pathExists(this.repository.accountConfigPath(name))) {
+      await rm(this.repository.accountConfigPath(name), { force: true });
     }
     await atomicWriteFile(
       metaPath,
       stringifyJson(
         {
-          ...createSnapshotMeta(
+          ...this.repository.createSnapshotMeta(
             name,
             currentSnapshot,
             new Date(),
@@ -700,15 +332,15 @@ export class AccountStore {
     );
 
     return {
-      account: await this.readManagedAccount(name),
+      account: await this.repository.readManagedAccount(name),
     };
   }
 
   async switchAccount(name: string): Promise<SwitchAccountResult> {
     ensureAccountName(name);
-    await this.ensureLayout();
+    await this.repository.ensureLayout();
 
-    const account = await this.readManagedAccount(name);
+    const account = await this.repository.readManagedAccount(name);
     const warnings: string[] = [];
     let backupPath: string | null = null;
 
@@ -734,7 +366,7 @@ export class AccountStore {
         rawConfig.endsWith("\n") ? rawConfig : `${rawConfig}\n`,
       );
     } else if (account.auth_mode === "apikey") {
-      await this.ensureEmptyAccountConfigSnapshot(name);
+      await this.repository.ensureEmptyAccountConfigSnapshot(name);
       warnings.push(
         `Saved apikey account "${name}" was missing config.toml snapshot. Created an empty snapshot; configure baseUrl manually if needed.`,
       );
@@ -742,7 +374,7 @@ export class AccountStore {
       const currentRawConfig = await readJsonFile(this.paths.currentConfigPath);
       await atomicWriteFile(
         this.paths.currentConfigPath,
-        this.sanitizeConfigForAccountAuth(currentRawConfig),
+        sanitizeConfigForAccountAuth(currentRawConfig),
       );
     }
     const writtenSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
@@ -756,14 +388,14 @@ export class AccountStore {
     meta.updated_at = meta.last_switched_at;
     await atomicWriteFile(account.metaPath, stringifyJson(meta));
 
-    await this.writeState({
+    await this.repository.writeState({
       schema_version: SCHEMA_VERSION,
       last_switched_account: name,
       last_backup_path: backupPath,
     });
 
     return {
-      account: await this.readManagedAccount(name),
+      account: await this.repository.readManagedAccount(name),
       warnings,
       backup_path: backupPath,
     };
@@ -786,9 +418,9 @@ export class AccountStore {
 
   async refreshQuotaForAccount(name: string): Promise<RefreshQuotaResult> {
     ensureAccountName(name);
-    await this.ensureLayout();
+    await this.repository.ensureLayout();
 
-    const account = await this.readManagedAccount(name);
+    const account = await this.repository.readManagedAccount(name);
     const meta = parseSnapshotMeta(await readJsonFile(account.metaPath));
     const snapshot = await readAuthSnapshotFile(account.authPath);
     const now = new Date();
@@ -801,8 +433,8 @@ export class AccountStore {
       });
 
       if (JSON.stringify(result.authSnapshot) !== JSON.stringify(snapshot)) {
-        await this.writeAccountAuthSnapshot(name, result.authSnapshot);
-        await this.syncCurrentAuthIfMatching(result.authSnapshot);
+        await this.repository.writeAccountAuthSnapshot(name, result.authSnapshot);
+        await this.repository.syncCurrentAuthIfMatching(result.authSnapshot);
       }
 
       meta.auth_mode = result.authSnapshot.auth_mode;
@@ -810,10 +442,10 @@ export class AccountStore {
       meta.user_id = getSnapshotUserId(result.authSnapshot);
       meta.updated_at = now.toISOString();
       meta.quota = result.quota;
-      await this.writeAccountMeta(name, meta);
+      await this.repository.writeAccountMeta(name, meta);
 
       return {
-        account: await this.readManagedAccount(name),
+        account: await this.repository.readManagedAccount(name),
         quota: meta.quota,
       };
     } catch (error) {
@@ -833,7 +465,7 @@ export class AccountStore {
         fetched_at: now.toISOString(),
         error_message: (error as Error).message,
       };
-      await this.writeAccountMeta(name, meta);
+      await this.repository.writeAccountMeta(name, meta);
       throw new Error(`Failed to refresh quota for "${name}": ${(error as Error).message}`);
     }
   }
@@ -905,7 +537,7 @@ export class AccountStore {
 
   async removeAccount(name: string): Promise<void> {
     ensureAccountName(name);
-    const accountDir = this.accountDirectory(name);
+    const accountDir = this.repository.accountDirectory(name);
 
     if (!(await pathExists(accountDir))) {
       throw new Error(`Account "${name}" does not exist.`);
@@ -918,8 +550,8 @@ export class AccountStore {
     ensureAccountName(oldName);
     ensureAccountName(newName);
 
-    const oldDir = this.accountDirectory(oldName);
-    const newDir = this.accountDirectory(newName);
+    const oldDir = this.repository.accountDirectory(oldName);
+    const newDir = this.repository.accountDirectory(newName);
 
     if (!(await pathExists(oldDir))) {
       throw new Error(`Account "${oldName}" does not exist.`);
@@ -930,17 +562,17 @@ export class AccountStore {
     }
 
     await rename(oldDir, newDir);
-    const metaPath = this.accountMetaPath(newName);
+    const metaPath = this.repository.accountMetaPath(newName);
     const meta = parseSnapshotMeta(await readJsonFile(metaPath));
     meta.name = newName;
     meta.updated_at = new Date().toISOString();
     await atomicWriteFile(metaPath, stringifyJson(meta));
 
-    return this.readManagedAccount(newName);
+    return await this.repository.readManagedAccount(newName);
   }
 
   async doctor(): Promise<DoctorReport> {
-    await this.ensureLayout();
+    await this.repository.ensureLayout();
 
     const issues: string[] = [];
     const warnings: string[] = [];
@@ -960,7 +592,7 @@ export class AccountStore {
           `State file permissions are ${(stateStat.mode & 0o777).toString(8)}, expected 600.`,
         );
       }
-      await this.readState();
+      await this.repository.readState();
     }
 
     const { accounts, warnings: accountWarnings } = await this.listAccounts();
