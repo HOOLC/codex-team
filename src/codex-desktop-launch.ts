@@ -1722,7 +1722,10 @@ export function createCodexDesktopLauncher(options: {
     return isManagedDesktopProcess(runningApps, state);
   }
 
-  async function readDesktopRuntimeAccount(): Promise<RuntimeAccountSnapshot | null> {
+  async function readDesktopRuntimeSnapshot<TSnapshot>(
+    expression: string,
+    normalize: (rawResult: unknown) => TSnapshot | null,
+  ): Promise<TSnapshot | null> {
     const state = await readManagedState();
     if (!state) {
       return null;
@@ -1737,131 +1740,118 @@ export function createCodexDesktopLauncher(options: {
     const rawResult = await evaluateDevtoolsExpressionWithResult<unknown>(
       createWebSocketImpl,
       webSocketDebuggerUrl,
-      buildManagedCurrentAccountExpression(),
+      expression,
       DEVTOOLS_REQUEST_TIMEOUT_MS,
     );
 
-    return normalizeRuntimeAccountSnapshot(rawResult);
+    return normalize(rawResult);
+  }
+
+  async function readDesktopRuntimeAccount(): Promise<RuntimeAccountSnapshot | null> {
+    return await readDesktopRuntimeSnapshot(
+      buildManagedCurrentAccountExpression(),
+      normalizeRuntimeAccountSnapshot,
+    );
   }
 
   async function readDesktopRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null> {
-    const state = await readManagedState();
-    if (!state) {
-      return null;
-    }
-
-    const runningApps = await listRunningApps();
-    if (!isManagedDesktopProcess(runningApps, state)) {
-      return null;
-    }
-
-    const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
-    const rawResult = await evaluateDevtoolsExpressionWithResult<unknown>(
-      createWebSocketImpl,
-      webSocketDebuggerUrl,
+    return await readDesktopRuntimeSnapshot(
       buildManagedCurrentQuotaExpression(),
-      DEVTOOLS_REQUEST_TIMEOUT_MS,
+      normalizeRuntimeQuotaSnapshot,
     );
+  }
 
-    return normalizeRuntimeQuotaSnapshot(rawResult);
+  async function readDirectRuntimeSnapshot<TSnapshot>(options: {
+    method: string;
+    params: Record<string, unknown>;
+    normalize: (rawResult: unknown) => TSnapshot | null;
+  }): Promise<TSnapshot | null> {
+    const directClient = await createDirectClientImpl();
+
+    try {
+      const rawResult = await directClient.request(options.method, options.params);
+      return options.normalize(rawResult);
+    } finally {
+      await directClient.close();
+    }
   }
 
   async function readDirectRuntimeAccount(): Promise<RuntimeAccountSnapshot | null> {
-    const directClient = await createDirectClientImpl();
-
-    try {
-      const rawResult = await directClient.request("account/read", {
+    return await readDirectRuntimeSnapshot({
+      method: "account/read",
+      params: {
         refreshToken: false,
-      });
-      return normalizeRuntimeAccountSnapshot(rawResult);
-    } finally {
-      await directClient.close();
-    }
+      },
+      normalize: normalizeRuntimeAccountSnapshot,
+    });
   }
 
   async function readDirectRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null> {
-    const directClient = await createDirectClientImpl();
+    return await readDirectRuntimeSnapshot({
+      method: "account/rateLimits/read",
+      params: {},
+      normalize: normalizeRuntimeQuotaSnapshot,
+    });
+  }
+
+  async function readCurrentRuntimeSnapshotResult<TSnapshot>(options: {
+    readDesktop: () => Promise<TSnapshot | null>;
+    readDirect: () => Promise<TSnapshot | null>;
+    desktopFailureMessage: string;
+    directFailureMessage: string;
+  }): Promise<RuntimeReadResult<TSnapshot> | null> {
+    let desktopError: Error | null = null;
 
     try {
-      const rawResult = await directClient.request("account/rateLimits/read", {});
-      return normalizeRuntimeQuotaSnapshot(rawResult);
-    } finally {
-      await directClient.close();
+      const desktopSnapshot = await options.readDesktop();
+      if (desktopSnapshot) {
+        return {
+          snapshot: desktopSnapshot,
+          source: "desktop",
+        };
+      }
+    } catch (error) {
+      desktopError = toErrorMessage(error, options.desktopFailureMessage);
+    }
+
+    try {
+      const directSnapshot = await options.readDirect();
+      if (!directSnapshot) {
+        return null;
+      }
+
+      return {
+        snapshot: directSnapshot,
+        source: "direct",
+      };
+    } catch (error) {
+      const directError = toErrorMessage(error, options.directFailureMessage);
+      if (!desktopError) {
+        throw directError;
+      }
+
+      throw new Error(
+        `${desktopError.message} Fallback direct runtime read failed: ${directError.message}`,
+      );
     }
   }
 
   async function readCurrentRuntimeAccountResult(): Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null> {
-    let desktopError: Error | null = null;
-
-    try {
-      const desktopAccount = await readDesktopRuntimeAccount();
-      if (desktopAccount) {
-        return {
-          snapshot: desktopAccount,
-          source: "desktop",
-        };
-      }
-    } catch (error) {
-      desktopError = toErrorMessage(error, "Failed to read the current Desktop runtime account.");
-    }
-
-    try {
-      const directAccount = await readDirectRuntimeAccount();
-      if (!directAccount) {
-        return null;
-      }
-
-      return {
-        snapshot: directAccount,
-        source: "direct",
-      };
-    } catch (error) {
-      const directError = toErrorMessage(error, "Failed to read the direct runtime account.");
-      if (!desktopError) {
-        throw directError;
-      }
-
-      throw new Error(
-        `${desktopError.message} Fallback direct runtime account read failed: ${directError.message}`,
-      );
-    }
+    return await readCurrentRuntimeSnapshotResult({
+      readDesktop: readDesktopRuntimeAccount,
+      readDirect: readDirectRuntimeAccount,
+      desktopFailureMessage: "Failed to read the current Desktop runtime account.",
+      directFailureMessage: "Failed to read the direct runtime account.",
+    });
   }
 
   async function readCurrentRuntimeQuotaResult(): Promise<RuntimeReadResult<RuntimeQuotaSnapshot> | null> {
-    let desktopError: Error | null = null;
-
-    try {
-      const desktopQuota = await readDesktopRuntimeQuota();
-      if (desktopQuota) {
-        return {
-          snapshot: desktopQuota,
-          source: "desktop",
-        };
-      }
-    } catch (error) {
-      desktopError = toErrorMessage(error, "Failed to read the current Desktop runtime quota.");
-    }
-
-    try {
-      const directQuota = await readDirectRuntimeQuota();
-      if (!directQuota) {
-        return null;
-      }
-
-      return {
-        snapshot: directQuota,
-        source: "direct",
-      };
-    } catch (error) {
-      const directError = toErrorMessage(error, "Failed to read the direct runtime quota.");
-      if (!desktopError) {
-        throw directError;
-      }
-
-      throw new Error(
-        `${desktopError.message} Fallback direct runtime quota read failed: ${directError.message}`,
-      );
-    }
+    return await readCurrentRuntimeSnapshotResult({
+      readDesktop: readDesktopRuntimeQuota,
+      readDirect: readDirectRuntimeQuota,
+      desktopFailureMessage: "Failed to read the current Desktop runtime quota.",
+      directFailureMessage: "Failed to read the direct runtime quota.",
+    });
   }
 
   async function readCurrentRuntimeAccount(): Promise<RuntimeAccountSnapshot | null> {
