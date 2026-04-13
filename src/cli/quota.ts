@@ -63,6 +63,83 @@ const AUTO_SWITCH_SCORING = {
 
 const AUTO_SWITCH_PROJECTION_HORIZON_SECONDS = 3_600;
 const AUTO_SWITCH_CURRENT_SCORE_TIEBREAK_DELTA = 5;
+const ANSI_RESET = "\u001b[0m";
+const ANSI_BOLD = "\u001b[1m";
+const ANSI_RED = "\u001b[31m";
+const ANSI_BRIGHT_YELLOW = "\u001b[93m";
+const ANSI_CYAN = "\u001b[36m";
+const ANSI_BLACK = "\u001b[30m";
+const ANSI_BG_RED = "\u001b[41m";
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function visibleWidth(value: string): number {
+  return stripAnsi(value).length;
+}
+
+function padVisibleEnd(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  return `${value}${" ".repeat(padding)}`;
+}
+
+function styleText(
+  value: string,
+  ...codes: Array<
+    | typeof ANSI_BOLD
+    | typeof ANSI_RED
+    | typeof ANSI_BRIGHT_YELLOW
+    | typeof ANSI_CYAN
+    | typeof ANSI_BLACK
+    | typeof ANSI_BG_RED
+  >
+): string {
+  return `${codes.join("")}${value}${ANSI_RESET}`;
+}
+
+function colorizeRow(value: string, background: typeof ANSI_BG_RED): string {
+  return styleText(value, ANSI_BLACK, background);
+}
+
+function colorize(value: string, color: typeof ANSI_RED | typeof ANSI_BRIGHT_YELLOW): string {
+  return styleText(value, color);
+}
+
+function colorizeWarning(value: string, color: typeof ANSI_RED | typeof ANSI_BRIGHT_YELLOW): string {
+  return styleText(value, ANSI_BOLD, color);
+}
+
+function colorizeRecovery(value: string, bold = false): string {
+  return bold ? styleText(value, ANSI_BOLD, ANSI_CYAN) : styleText(value, ANSI_CYAN);
+}
+
+function resolveLowRemainingColor(
+  remainingPercent: number | null,
+): typeof ANSI_RED | typeof ANSI_BRIGHT_YELLOW | null {
+  if (remainingPercent === null) {
+    return null;
+  }
+
+  if (remainingPercent <= 10) {
+    return ANSI_RED;
+  }
+
+  if (remainingPercent < 20) {
+    return ANSI_BRIGHT_YELLOW;
+  }
+
+  return null;
+}
+
+function colorizeLowRemaining(value: string, remainingPercent: number | null): string {
+  const color = resolveLowRemainingColor(remainingPercent);
+  if (!color) {
+    return value;
+  }
+
+  return colorizeWarning(value, color);
+}
 
 function formatTable(
   rows: Array<Record<string, string>>,
@@ -73,14 +150,18 @@ function formatTable(
   }
 
   const widths = columns.map(({ key, label }) =>
-    Math.max(label.length, ...rows.map((row) => row[key].length)),
+    Math.max(visibleWidth(label), ...rows.map((row) => visibleWidth(row[key]))),
   );
 
   const renderRow = (row: Record<string, string>) =>
-    columns
-      .map(({ key }, index) => row[key].padEnd(widths[index]))
+    {
+      const rendered = columns
+      .map(({ key }, index) => padVisibleEnd(row[key], widths[index]))
       .join("  ")
       .trimEnd();
+
+      return row.__row_style === "red-bg" ? colorizeRow(rendered, ANSI_BG_RED) : rendered;
+    };
 
   const header = renderRow(
     Object.fromEntries(columns.map(({ key, label }) => [key, label])),
@@ -113,7 +194,21 @@ function formatUsagePercent(
     return "-";
   }
 
-  return `${window.used_percent}%`;
+  const raw = `${window.used_percent}%`;
+  return colorizeLowRemaining(raw, computeRemainingPercent(window.used_percent));
+}
+
+function formatResetCountdown(
+  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
+): string {
+  const resetAfterSeconds = window?.reset_after_seconds;
+  if (typeof resetAfterSeconds !== "number" || resetAfterSeconds < 0 || resetAfterSeconds > 3_600) {
+    return "";
+  }
+
+  const remainingMinutes = Math.max(1, Math.ceil(resetAfterSeconds / 60));
+  const suffix = ` (${remainingMinutes}m)`;
+  return colorizeRecovery(suffix, resetAfterSeconds <= 900);
 }
 
 function formatResetAt(
@@ -123,7 +218,8 @@ function formatResetAt(
     return "-";
   }
 
-  return dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
+  const absolute = dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
+  return `${absolute}${formatResetCountdown(window)}`;
 }
 
 export function computeAvailability(account: AccountQuotaSummary): string | null {
@@ -141,10 +237,6 @@ export function computeAvailability(account: AccountQuotaSummary): string | null
 
   if (usedPercents.some((value) => value >= 100)) {
     return "unavailable";
-  }
-
-  if (usedPercents.some((value) => 100 - value < 10)) {
-    return "almost unavailable";
   }
 
   return "available";
@@ -602,17 +694,20 @@ function describeQuotaAccounts(
   const rows = accounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
+    const availability = computeAvailability(account);
+    const currentScore = candidate
+      ? normalizeDisplayedScore(candidate.current_score, candidate.five_hour_windows_per_week)
+      : null;
     const row: Record<string, string> = {
       name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
       account_id: maskAccountId(account.identity),
       plan_type: account.plan_type ?? "-",
-      available: computeAvailability(account) ?? "-",
+      available:
+        availability === "unavailable"
+          ? colorize(availability, ANSI_RED)
+          : availability ?? "-",
       eta: formatEtaSummary(eta),
-      score: candidate
-        ? formatRemainingPercent(
-            normalizeDisplayedScore(candidate.current_score, candidate.five_hour_windows_per_week),
-          )
-        : "-",
+      score: colorizeLowRemaining(formatRemainingPercent(currentScore), currentScore),
       five_hour: formatUsagePercent(account.five_hour),
       five_hour_reset: formatResetAt(account.five_hour),
       one_week: formatUsagePercent(account.one_week),
@@ -630,13 +725,26 @@ function describeQuotaAccounts(
       row.projected_5h_in_1w_units_1h = candidate
         ? formatRawScore(candidate.projected_5h_in_1w_units_1h)
         : "-";
+      const score1h = candidate
+        ? normalizeDisplayedScore(candidate.score_1h, candidate.five_hour_windows_per_week)
+        : null;
       row.score_1h = candidate
-        ? formatRemainingPercent(
-            normalizeDisplayedScore(candidate.score_1h, candidate.five_hour_windows_per_week),
+        ? colorizeLowRemaining(formatRemainingPercent(score1h), score1h)
+        : "-";
+      row.projected_1w_1h = candidate
+        ? colorizeLowRemaining(
+            formatRemainingPercent(candidate.projected_1w_1h),
+            candidate.projected_1w_1h,
           )
         : "-";
-      row.projected_1w_1h = candidate ? formatRemainingPercent(candidate.projected_1w_1h) : "-";
       row.five_hour_windows_per_week = candidate ? String(candidate.five_hour_windows_per_week) : "-";
+    }
+
+    if (availability === "unavailable") {
+      for (const key of Object.keys(row)) {
+        row[key] = stripAnsi(row[key]);
+      }
+      row.__row_style = "red-bg";
     }
 
     return row;
@@ -647,8 +755,8 @@ function describeQuotaAccounts(
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN TYPE" },
     { key: "available", label: "AVAILABLE" },
-    { key: "eta", label: "ETA" },
     { key: "score", label: "CURRENT SCORE" },
+    { key: "eta", label: "ETA" },
     { key: "five_hour", label: "5H USED" },
     { key: "five_hour_reset", label: "5H RESET AT" },
     { key: "one_week", label: "1W USED" },

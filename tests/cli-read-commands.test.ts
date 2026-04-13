@@ -1024,6 +1024,125 @@ wire_api = "responses"
       expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
       expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
       expect(tableLines[0]?.indexOf("PLAN TYPE")).toBe(tableLines[3]?.indexOf("plus"));
+      expect((tableLines[0]?.indexOf("CURRENT SCORE") ?? -1)).toBeGreaterThan(
+        tableLines[0]?.indexOf("AVAILABLE") ?? -1,
+      );
+      expect((tableLines[0]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
+        tableLines[0]?.indexOf("CURRENT SCORE") ?? -1,
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output uses unified thresholds for low remaining quota signals", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+            const primaryUsedPercent =
+              accountId === "acct-cli-color-unavailable"
+                ? 100
+                : accountId === "acct-cli-color-critical"
+                  ? 92
+                  : 85;
+            const secondaryUsedPercent =
+              accountId === "acct-cli-color-unavailable"
+                ? 88
+                : accountId === "acct-cli-color-critical"
+                  ? 59
+                  : 25;
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: primaryUsedPercent,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 300,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: secondaryUsedPercent,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-low");
+      await runCli(["save", "quota-low", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-critical");
+      await runCli(["save", "quota-critical", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-unavailable");
+      await runCli(["save", "quota-unavailable", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const output = listStdout.read();
+      expect(output).toContain("\u001b[30m\u001b[41m* quota-unavailable");
+      expect(output).toContain("\u001b[1m\u001b[31m92%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[31m8%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m85%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m15.04%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[36m (5m)\u001b[0m");
+
+      const plainOutput = output.replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 5);
+      const unavailableRow = tableLines.find((line) => line.includes("quota-unavailable"));
+      const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
+      const lowRow = tableLines.find((line) => line.includes("quota-low"));
+
+      expect(unavailableRow).toBeDefined();
+      expect(criticalRow).toBeDefined();
+      expect(lowRow).toBeDefined();
+      const availableColumn = tableLines[0]?.indexOf("AVAILABLE") ?? -1;
+      const scoreColumn = tableLines[0]?.indexOf("CURRENT SCORE") ?? -1;
+      const used5hColumn = tableLines[0]?.indexOf("5H USED") ?? -1;
+      const reset5hColumn = tableLines[0]?.indexOf("5H RESET AT") ?? -1;
+      expect(unavailableRow?.indexOf("unavailable", availableColumn)).toBe(availableColumn);
+      expect(criticalRow?.indexOf("8%", scoreColumn)).toBe(scoreColumn);
+      expect(criticalRow?.indexOf("92%", used5hColumn)).toBe(used5hColumn);
+      expect(lowRow?.indexOf("85%", used5hColumn)).toBe(used5hColumn);
+      expect(lowRow?.includes("(5m)")).toBe(true);
+      expect(lowRow?.indexOf("(5m)", reset5hColumn)).toBeGreaterThan(reset5hColumn);
     } finally {
       await cleanupTempHome(homeDir);
     }

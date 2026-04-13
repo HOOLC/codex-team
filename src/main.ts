@@ -1115,7 +1115,6 @@ export async function runCli(
           try {
             const switched = await store.switchAccount(name);
             switched.warnings = stripManagedDesktopWarning(switched.warnings);
-<<<<<<< HEAD
             const skipDesktopRefresh = await shouldSkipManagedDesktopRefresh(
               store,
               desktopLauncher,

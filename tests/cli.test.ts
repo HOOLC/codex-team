@@ -1637,7 +1637,7 @@ describe("CLI", () => {
         successes: [
           {
             name: "alpha",
-            available: "almost unavailable",
+            available: "available",
           },
           {
             name: "beta",
