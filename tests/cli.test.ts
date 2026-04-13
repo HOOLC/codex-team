@@ -19,6 +19,7 @@ import {
   createInteractiveStdin,
   createWatchProcessManagerStub,
 } from "./cli-fixtures.js";
+import { setPlatformForTesting } from "../src/platform.js";
 
 describe("CLI", () => {
   test("watch enters CLI mode when there is no managed desktop session", async () => {
@@ -1938,4 +1939,145 @@ describe("CLI", () => {
       await cleanupTempHome(homeDir);
     }
   });
+
+  test("launch rejects on Linux with guidance to use codexm run", async () => {
+    const homeDir = await createTempHome();
+    const restorePlatform = setPlatformForTesting("linux");
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["launch"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub(),
+      });
+
+      expect(exitCode).toBe(1);
+      const output = stderr.read();
+      expect(output).toContain("codexm launch is not supported on Linux");
+      expect(output).toContain("codexm run");
+    } finally {
+      restorePlatform();
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launch rejects on WSL with guidance to use codexm run", async () => {
+    const homeDir = await createTempHome();
+    const restorePlatform = setPlatformForTesting("wsl");
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["launch"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub(),
+      });
+
+      expect(exitCode).toBe(1);
+      const output = stderr.read();
+      expect(output).toContain("codexm launch is not supported on WSL");
+      expect(output).toContain("codexm run");
+    } finally {
+      restorePlatform();
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launch --auto also rejects on non-macOS", async () => {
+    const homeDir = await createTempHome();
+    const restorePlatform = setPlatformForTesting("linux");
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["launch", "--auto"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub(),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("codexm launch is not supported on Linux");
+    } finally {
+      restorePlatform();
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch --force warns and downgrades when no Desktop session is running", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 10,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 500,
+                  reset_at: 1_775_000_500,
+                },
+                secondary_window: {
+                  used_percent: 15,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 6_000,
+                  reset_at: 1_775_006_000,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "5",
+              },
+            });
+          }
+          return textResponse("not found", 404);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-force-test");
+      await runCli(["save", "force-test", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "force-test", "--force"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => false,
+          applyManagedSwitch: async () => false,
+          listRunningApps: async () => [],
+        }),
+      });
+
+      // Switch should still succeed (downgraded, not rejected)
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Switched to");
+      // But stderr should warn about --force being meaningless
+      const stderrOutput = stderr.read();
+      expect(stderrOutput).toContain("--force is only meaningful with a managed Desktop session");
+      expect(stderrOutput).toContain("codexm run");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
 });
