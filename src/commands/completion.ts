@@ -1,4 +1,4 @@
-import type { AccountStore } from "../account-store.js";
+import type { AccountStore } from "../account-store/index.js";
 import {
   buildCompletionBashScript,
   buildCompletionZshScript,

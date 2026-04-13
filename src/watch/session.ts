@@ -1,24 +1,24 @@
-import type { AccountStore } from "./account-store.js";
+import type { AccountStore } from "../account-store/index.js";
 import type {
   CodexDesktopLauncher,
   ManagedQuotaSignal,
   ManagedWatchActivitySignal,
-} from "./codex-desktop-launch.js";
-import { createCliProcessManager } from "./codex-cli-watcher.js";
+} from "../desktop/launcher.js";
+import { createCliProcessManager } from "./cli-watcher.js";
 import {
   isTerminalWatchQuota,
   toCliQuotaSummaryFromRuntimeQuota,
-} from "./cli/quota.js";
+} from "../cli/quota.js";
 import {
   appendWatchQuotaHistory,
   createWatchHistoryStore,
-} from "./watch-history.js";
+} from "./history.js";
 import {
   describeBusySwitchLock,
   performAutoSwitch,
   tryAcquireSwitchLock,
   tryReadManagedDesktopQuota,
-} from "./switching.js";
+} from "../switching.js";
 import {
   describeWatchAutoSwitchEvent,
   describeWatchAutoSwitchSkippedEvent,
@@ -26,7 +26,7 @@ import {
   describeWatchStatusEvent,
   formatWatchLogLine,
   resolveWatchAccountLabel,
-} from "./watch-output.js";
+} from "./output.js";
 
 const WATCH_AUTO_SWITCH_TIMEOUT_MS = 600_000;
 
@@ -60,7 +60,7 @@ export async function runCliWatchSession(options: {
     managedDesktopWaitStatusIntervalMs,
   } = options;
 
-  const platformModule = await import("./platform.js");
+  const platformModule = await import("../platform.js");
   const platform = await platformModule.getPlatform();
   debugLog(`watch: no managed Desktop detected, entering CLI watch mode (platform=${platform})`);
   streams.stderr.write(

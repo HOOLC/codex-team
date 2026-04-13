@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
 
-import { createAccountStore } from "../src/account-store.js";
+import { createAccountStore } from "../src/account-store/index.js";
 import { parseAuthSnapshot } from "../src/auth-snapshot.js";
 import { extractChatGPTAuth } from "../src/quota-client.js";
 import {

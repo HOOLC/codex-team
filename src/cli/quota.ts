@@ -3,15 +3,15 @@ import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
 
 import { maskAccountId } from "../auth-snapshot.js";
-import type { AccountQuotaSummary } from "../account-store.js";
-import type { RuntimeQuotaSnapshot } from "../codex-desktop-launch.js";
+import type { AccountQuotaSummary } from "../account-store/index.js";
+import type { RuntimeQuotaSnapshot } from "../desktop/launcher.js";
 import {
   convertFiveHourPercentToPlusWeeklyUnits,
   convertOneWeekPercentToPlusWeeklyUnits,
   normalizeDisplayedScore,
   resolveFiveHourWindowsPerWeek,
 } from "../plan-quota-profile.js";
-import type { WatchHistoryEtaContext } from "../watch-history.js";
+import type { WatchHistoryEtaContext } from "../watch/history.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);

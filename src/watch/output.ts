@@ -1,8 +1,8 @@
 import dayjs from "dayjs";
 
-import type { AccountStore } from "./account-store.js";
-import type { CliQuotaSummary } from "./cli/quota.js";
-import type { ManagedWatchStatusEvent } from "./codex-desktop-launch.js";
+import type { AccountStore } from "../account-store/index.js";
+import type { CliQuotaSummary } from "../cli/quota.js";
+import type { ManagedWatchStatusEvent } from "../desktop/launcher.js";
 
 function formatWatchField(key: string, value: string | number): string {
   if (typeof value === "number") {

@@ -1,9 +1,9 @@
-import type { ManagedCodexDesktopState } from "./codex-desktop-types.js";
+import type { ManagedCodexDesktopState } from "./types.js";
 import {
   CODEX_LOCAL_HOST_ID,
   isNonEmptyString,
   isRecord,
-} from "./codex-desktop-shared.js";
+} from "./shared.js";
 
 export interface FetchLikeResponse {
   ok: boolean;

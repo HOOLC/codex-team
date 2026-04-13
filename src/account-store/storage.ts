@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 
-import type { StorePaths } from "./account-store-types.js";
+import type { StorePaths } from "./types.js";
 
 export const DIRECTORY_MODE = 0o700;
 export const FILE_MODE = 0o600;

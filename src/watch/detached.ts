@@ -1,4 +1,4 @@
-import type { WatchProcessManager, WatchProcessState } from "./watch-process.js";
+import type { WatchProcessManager, WatchProcessState } from "./process.js";
 
 export async function ensureDetachedWatch(
   watchProcessManager: Pick<WatchProcessManager, "getStatus" | "startDetached" | "stop">,

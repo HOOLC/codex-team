@@ -1,4 +1,4 @@
-import type { QuotaSnapshot, QuotaStatus, QuotaWindowSnapshot, SnapshotMeta } from "./auth-snapshot.js";
+import type { QuotaSnapshot, QuotaStatus, QuotaWindowSnapshot, SnapshotMeta } from "../auth-snapshot.js";
 
 export interface StorePaths {
   homeDir: string;

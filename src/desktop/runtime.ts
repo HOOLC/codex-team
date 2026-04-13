@@ -3,7 +3,7 @@ import type {
   ManagedWatchActivitySignal,
   RuntimeAccountSnapshot,
   RuntimeQuotaSnapshot,
-} from "./codex-desktop-types.js";
+} from "./types.js";
 import {
   buildCodexDesktopGuardExpression,
   CODEXM_WATCH_CONSOLE_PREFIX,
@@ -12,7 +12,7 @@ import {
   DEVTOOLS_REQUEST_TIMEOUT_MS,
   normalizeBodySnippet,
   isRecord,
-} from "./codex-desktop-shared.js";
+} from "./shared.js";
 
 interface ProbeConsolePayload {
   kind?: unknown;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
 
-import type { AccountQuotaSummary } from "../src/account-store.js";
+import type { AccountQuotaSummary } from "../src/account-store/index.js";
 import { rankAutoSwitchCandidates } from "../src/cli/quota.js";
 
 describe("auto switch ranking", () => {

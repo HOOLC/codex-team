@@ -11,8 +11,8 @@ import {
   isSupportedChatGPTAuthMode,
   parseSnapshotMeta,
   readAuthSnapshotFile,
-} from "./auth-snapshot.js";
-import type { ManagedAccount, StorePaths, StoreState } from "./account-store-types.js";
+} from "../auth-snapshot.js";
+import type { ManagedAccount, StorePaths, StoreState } from "./types.js";
 import {
   DIRECTORY_MODE,
   FILE_MODE,
@@ -23,7 +23,7 @@ import {
   pathExists,
   readJsonFile,
   stringifyJson,
-} from "./account-store-storage.js";
+} from "./storage.js";
 
 function canAutoMigrateLegacyChatGPTMeta(
   meta: SnapshotMeta,

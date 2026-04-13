@@ -6,7 +6,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
   createCodexDesktopLauncher,
-} from "../src/codex-desktop-launch.js";
+} from "../src/desktop/launcher.js";
 import { cleanupTempHome, createTempHome } from "./test-helpers.js";
 
 describe("codex-desktop-launch", () => {

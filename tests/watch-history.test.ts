@@ -5,11 +5,11 @@ import {
   computeWatchEtaContext,
   computeWatchHistoryEta,
   createWatchHistoryStore,
-} from "../src/watch-history.js";
+} from "../src/watch/history.js";
 import type {
   WatchHistoryRecord,
   WatchHistoryTargetSnapshot,
-} from "../src/watch-history.js";
+} from "../src/watch/history.js";
 import { cleanupTempHome, createTempHome } from "./test-helpers.js";
 
 function makeWindow(used_percent: number, reset_at: string) {

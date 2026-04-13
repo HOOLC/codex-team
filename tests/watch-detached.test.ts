@@ -1,6 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
 
-import { ensureDetachedWatch } from "../src/watch-detached.js";
+import { ensureDetachedWatch } from "../src/watch/detached.js";
 
 describe("watch-detached", () => {
   test("reuses an existing detached watch when options match", async () => {

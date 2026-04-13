@@ -5,7 +5,7 @@ import {
   describeWatchAutoSwitchSkippedEvent,
   describeWatchQuotaEvent,
   describeWatchStatusEvent,
-} from "../src/watch-output.js";
+} from "../src/watch/output.js";
 
 describe("watch-output", () => {
   test("renders structured quota lines for usable quota", () => {

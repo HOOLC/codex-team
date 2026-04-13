@@ -1,17 +1,17 @@
-import type { AccountStore } from "../account-store.js";
+import type { AccountStore } from "../account-store/index.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import type { ParsedArgs } from "../cli/args.js";
-import type { CodexDesktopLauncher } from "../codex-desktop-launch.js";
+import type { CodexDesktopLauncher } from "../desktop/launcher.js";
 import { writeJson } from "../cli/output.js";
 import {
   confirmDesktopRelaunch,
   isOnlyManagedDesktopInstanceRunning,
   resolveManagedDesktopState,
   restoreLaunchBackup,
-} from "../desktop-managed-state.js";
+} from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
-import type { WatchProcessManager } from "../watch-process.js";
-import { ensureDetachedWatch } from "../watch-detached.js";
+import type { WatchProcessManager } from "../watch/process.js";
+import { ensureDetachedWatch } from "../watch/detached.js";
 import {
   describeBusySwitchLock,
   resolveManagedAccountByName,
@@ -19,7 +19,7 @@ import {
   stripManagedDesktopWarning,
   tryAcquireSwitchLock,
 } from "../switching.js";
-import { runCliWatchSession, runManagedDesktopWatchSession } from "../watch-session.js";
+import { runCliWatchSession, runManagedDesktopWatchSession } from "../watch/session.js";
 
 const INTERNAL_LAUNCH_REFUSAL_MESSAGE =
   'Refusing to run "codexm launch" from inside Codex Desktop because quitting the app would terminate this session. Run this command from an external terminal instead.';

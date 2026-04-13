@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { ManagedCodexDesktopState } from "./codex-desktop-types.js";
-import { isNonEmptyString, isRecord } from "./codex-desktop-shared.js";
+import type { ManagedCodexDesktopState } from "./types.js";
+import { isNonEmptyString, isRecord } from "./shared.js";
 
 export function parseManagedState(raw: string): ManagedCodexDesktopState | null {
   if (raw.trim() === "") {

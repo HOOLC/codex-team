@@ -42,7 +42,7 @@ import { createHash } from "node:crypto";
 import {
   createCliProcessManager,
   type CliProcessManager,
-} from "./codex-cli-watcher.js";
+} from "./watch/cli-watcher.js";
 
 // ── Types ──
 

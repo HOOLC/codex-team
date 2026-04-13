@@ -4,8 +4,8 @@ import type {
   ExecFileLike,
   ManagedCodexDesktopState,
   RunningCodexDesktop,
-} from "./codex-desktop-types.js";
-import { CODEX_BINARY_SUFFIX } from "./codex-desktop-shared.js";
+} from "./types.js";
+import { CODEX_BINARY_SUFFIX } from "./shared.js";
 
 export type LaunchProcessLike = (options: {
   appPath: string;

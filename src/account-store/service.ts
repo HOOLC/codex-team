@@ -15,9 +15,9 @@ import {
   parseAuthSnapshot,
   parseSnapshotMeta,
   readAuthSnapshotFile,
-} from "./auth-snapshot.js";
-import { AccountStoreRepository } from "./account-store-repository.js";
-import { sanitizeConfigForAccountAuth, validateConfigSnapshot } from "./account-store-config.js";
+} from "../auth-snapshot.js";
+import { AccountStoreRepository } from "./repository.js";
+import { sanitizeConfigForAccountAuth, validateConfigSnapshot } from "./config.js";
 import {
   DIRECTORY_MODE,
   FILE_MODE,
@@ -31,7 +31,7 @@ import {
   pathExists,
   readJsonFile,
   stringifyJson,
-} from "./account-store-storage.js";
+} from "./storage.js";
 import type {
   AccountQuotaSummary,
   CurrentAccountStatus,
@@ -42,11 +42,11 @@ import type {
   StorePaths,
   UpdateAccountResult,
   SwitchAccountResult,
-} from "./account-store-types.js";
+} from "./types.js";
 import {
   extractChatGPTAuth,
   fetchQuotaSnapshot,
-} from "./quota-client.js";
+} from "../quota-client.js";
 export type {
   AccountQuotaSummary,
   CurrentAccountStatus,
@@ -57,7 +57,7 @@ export type {
   StorePaths,
   SwitchAccountResult,
   UpdateAccountResult,
-} from "./account-store-types.js";
+} from "./types.js";
 
 export class AccountStore {
   readonly paths: StorePaths;

@@ -32,7 +32,7 @@ import { dirname, join } from "node:path";
 import {
   createCodexDirectClient,
   type CodexDirectClient,
-} from "./codex-direct-client.js";
+} from "../codex-direct-client.js";
 
 import type {
   RuntimeQuotaSnapshot,
@@ -40,7 +40,7 @@ import type {
   ManagedQuotaSignal,
   ManagedWatchActivitySignal,
   ManagedWatchStatusEvent,
-} from "./codex-desktop-launch.js";
+} from "../desktop/launcher.js";
 
 // ── Constants ──
 

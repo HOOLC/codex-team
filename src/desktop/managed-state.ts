@@ -1,15 +1,15 @@
 import { copyFile, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { getSnapshotEmail, parseAuthSnapshot } from "./auth-snapshot.js";
-import type { AccountStore } from "./account-store.js";
+import { getSnapshotEmail, parseAuthSnapshot } from "../auth-snapshot.js";
+import type { AccountStore } from "../account-store/index.js";
 import {
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
   type CodexDesktopLauncher,
   type ManagedCodexDesktopState,
   type RunningCodexDesktop,
-} from "./codex-desktop-launch.js";
-import { isCodexDesktopCommand, type CodexmPlatform } from "./platform.js";
+} from "../desktop/launcher.js";
+import { isCodexDesktopCommand, type CodexmPlatform } from "../platform.js";
 
 interface CliStreams {
   stdin: NodeJS.ReadStream;

@@ -8,7 +8,7 @@ import utc from "dayjs/plugin/utc.js";
 import packageJson from "../package.json";
 
 import { runCli } from "../src/main.js";
-import { createAccountStore } from "../src/account-store.js";
+import { createAccountStore } from "../src/account-store/index.js";
 import {
   cleanupTempHome,
   createTempHome,

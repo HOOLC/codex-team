@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import {
   createCodexDirectClient,
   type CodexDirectClient,
-} from "./codex-direct-client.js";
+} from "../codex-direct-client.js";
 import {
   createDefaultWebSocket,
   evaluateDevtoolsExpression,
@@ -15,14 +15,14 @@ import {
   resolveLocalDevtoolsTarget,
   type CreateWebSocketLike,
   type FetchLike,
-} from "./codex-desktop-devtools.js";
+} from "./devtools.js";
 import {
   isManagedDesktopProcess,
   launchManagedDesktopProcess,
   pathExistsViaStat,
   readProcessParentAndCommand,
   type LaunchProcessLike,
-} from "./codex-desktop-process.js";
+} from "./process.js";
 import {
   CODEX_APP_NAME,
   CODEX_APP_SERVER_RESTART_EXPRESSION,
@@ -39,8 +39,8 @@ import {
   isRecord,
   toErrorMessage,
   waitForPromiseOrAbort,
-} from "./codex-desktop-shared.js";
-import { ensureStateDirectory, parseManagedState } from "./codex-desktop-state.js";
+} from "./shared.js";
+import { ensureStateDirectory, parseManagedState } from "./state.js";
 import {
   buildManagedCurrentAccountExpression,
   buildManagedCurrentQuotaExpression,
@@ -54,7 +54,7 @@ import {
   normalizeBridgeProbePayload,
   normalizeRuntimeAccountSnapshot,
   normalizeRuntimeQuotaSnapshot,
-} from "./codex-desktop-runtime.js";
+} from "./runtime.js";
 import type {
   CodexDesktopLauncher,
   ExecFileLike,
@@ -66,8 +66,8 @@ import type {
   RuntimeAccountSnapshot,
   RuntimeQuotaSnapshot,
   RuntimeReadResult,
-} from "./codex-desktop-types.js";
-export type { CodexDirectClient } from "./codex-direct-client.js";
+} from "./types.js";
+export type { CodexDirectClient } from "../codex-direct-client.js";
 export type {
   CodexDesktopLauncher,
   ExecFileLike,
@@ -82,11 +82,11 @@ export type {
   RuntimeQuotaSnapshot,
   RuntimeReadResult,
   RuntimeReadSource,
-} from "./codex-desktop-types.js";
+} from "./types.js";
 export {
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
-} from "./codex-desktop-shared.js";
+} from "./shared.js";
 
 const execFile = promisify(execFileCallback);
 

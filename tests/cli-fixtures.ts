@@ -9,8 +9,8 @@ import type {
   RuntimeQuotaSnapshot,
   RuntimeReadResult,
   RunningCodexDesktop,
-} from "../src/codex-desktop-launch.js";
-import type { WatchProcessManager, WatchProcessState } from "../src/watch-process.js";
+} from "../src/desktop/launcher.js";
+import type { WatchProcessManager, WatchProcessState } from "../src/watch/process.js";
 
 export function captureWritable(): {
   stream: NodeJS.WriteStream;

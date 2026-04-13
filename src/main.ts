@@ -6,12 +6,12 @@ import { getSnapshotAccountId, getSnapshotEmail, maskAccountId, parseAuthSnapsho
 import {
   AccountStore,
   createAccountStore,
-} from "./account-store.js";
-import { type CodexDesktopLauncher } from "./codex-desktop-launch.js";
+} from "./account-store/index.js";
+import { type CodexDesktopLauncher } from "./desktop/launcher.js";
 import {
   createWatchProcessManager,
   type WatchProcessManager,
-} from "./watch-process.js";
+} from "./watch/process.js";
 import {
   createCodexLoginProvider,
   type CodexLoginProvider,
@@ -64,7 +64,7 @@ import {
 } from "./platform-desktop-adapter.js";
 import {
   shouldSkipManagedDesktopRefresh,
-} from "./desktop-managed-state.js";
+} from "./desktop/managed-state.js";
 
 export { rankAutoSwitchCandidates } from "./cli/quota.js";
 

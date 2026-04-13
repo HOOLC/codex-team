@@ -1,4 +1,4 @@
-import type { AuthSnapshot } from "./auth-snapshot.js";
+import type { AuthSnapshot } from "../auth-snapshot.js";
 
 export function validateConfigSnapshot(
   name: string,

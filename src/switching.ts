@@ -4,14 +4,14 @@ import { join } from "node:path";
 import type {
   AccountQuotaSummary,
   AccountStore,
-} from "./account-store.js";
+} from "./account-store/index.js";
 import type {
   CodexDesktopLauncher,
   RuntimeQuotaSnapshot,
-} from "./codex-desktop-launch.js";
+} from "./desktop/launcher.js";
 import {
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
-} from "./codex-desktop-launch.js";
+} from "./desktop/launcher.js";
 import {
   rankAutoSwitchCandidates,
   toCliQuotaSummary,

@@ -3,7 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   isOnlyManagedDesktopInstanceRunning,
   isRunningDesktopFromApp,
-} from "../src/desktop-managed-state.js";
+} from "../src/desktop/managed-state.js";
 
 describe("desktop-managed-state", () => {
   test("matches the managed macOS Desktop binary path", () => {
