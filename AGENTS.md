@@ -8,14 +8,16 @@ Detailed design notes live in `docs/internal/`.
 - Do not add a command by querying both Desktop and direct runtime paths unless the command semantics explicitly require it.
 - Do not spread new platform-specific Desktop process logic outside the Desktop launcher boundary.
 - Do not duplicate plan or quota normalization rules outside `src/plan-quota-profile.ts`.
+- Before adding legacy interface, data, or code compatibility paths, confirm with the user that backward compatibility is necessary.
 
 ## Module Boundaries
 
 - `src/main.ts`: CLI orchestration only.
 - `src/commands/*`: command handlers.
-- `src/codex-desktop-launch.ts`: managed Desktop lifecycle, DevTools bridge, Desktop runtime reads, and watch stream handling.
+- `src/desktop/launcher.ts`: managed Desktop lifecycle, DevTools bridge, Desktop runtime reads, and watch stream handling.
 - `src/codex-direct-client.ts`: direct `codex app-server` client for one-shot runtime reads.
-- `src/watch-history.ts`: watch history persistence and ETA calculation.
+- `src/watch/history.ts`: watch history persistence and ETA calculation.
+- `src/account-store/service.ts`: account store orchestration and mutation flows.
 - `src/plan-quota-profile.ts`: centralized plan normalization and quota ratio rules.
 - `src/cli/quota.ts`: quota presentation, list ordering, and auto-switch candidate formatting.
 
