@@ -664,10 +664,34 @@ function describeQuotaAccounts(
   }
 
   const currentAccounts = new Set(currentStatus.matched_accounts);
+  const rankedCandidates = rankAutoSwitchCandidates(accounts);
   const autoSwitchCandidates = new Map(
-    rankAutoSwitchCandidates(accounts).map((candidate) => [candidate.name, candidate] as const),
+    rankedCandidates.map((candidate) => [candidate.name, candidate] as const),
   );
-  const rows = accounts.map((account) => {
+  const originalOrder = new Map(accounts.map((account, index) => [account.name, index] as const));
+  const rankedOrder = new Map(
+    rankedCandidates.map((candidate, index) => [candidate.name, index] as const),
+  );
+  const orderedAccounts = [...accounts].sort((left, right) => {
+    const leftRank = rankedOrder.get(left.name);
+    const rightRank = rankedOrder.get(right.name);
+
+    if (leftRank !== undefined && rightRank !== undefined) {
+      return leftRank - rightRank;
+    }
+
+    if (leftRank !== undefined) {
+      return -1;
+    }
+
+    if (rightRank !== undefined) {
+      return 1;
+    }
+
+    return (originalOrder.get(left.name) ?? 0) - (originalOrder.get(right.name) ?? 0);
+  });
+
+  const rows = orderedAccounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
     const availability = computeAvailability(account);
