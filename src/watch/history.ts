@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import {
   convertFiveHourPercentToPlusWeeklyUnits,
   convertOneWeekPercentToPlusWeeklyUnits,
-} from "./plan-quota-profile.js";
+} from "../plan-quota-profile.js";
 
 const WATCH_HISTORY_FILE_NAME = "watch-quota-history.jsonl";
 const WATCH_HISTORY_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;

@@ -6,7 +6,7 @@ import {
   createCliProcessManager,
   type ExecFileLike,
   type TrackedCliProcess,
-} from "../src/codex-cli-watcher.js";
+} from "../src/watch/cli-watcher.js";
 import type { CodexDirectClient } from "../src/codex-direct-client.js";
 
 // ── Test helpers ──
@@ -445,7 +445,7 @@ describe("createCliProcessManager", () => {
         },
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, 500));
       controller.abort();
 
       try {

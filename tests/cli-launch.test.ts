@@ -1,9 +1,10 @@
 import { writeFile } from "node:fs/promises";
 
-import { describe, expect, test } from "@rstest/core";
+import { afterEach, beforeEach, describe, expect, test } from "@rstest/core";
 
 import { runCli } from "../src/main.js";
-import { createAccountStore } from "../src/account-store.js";
+import { createAccountStore } from "../src/account-store/index.js";
+import { setPlatformForTesting } from "../src/platform.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -20,6 +21,17 @@ import {
 } from "./cli-fixtures.js";
 
 describe("CLI Launch", () => {
+  let restorePlatform: (() => void) | undefined;
+
+  beforeEach(() => {
+    restorePlatform = setPlatformForTesting("darwin");
+  });
+
+  afterEach(() => {
+    restorePlatform?.();
+    restorePlatform = undefined;
+  });
+
   test("launches desktop with current auth when no account is provided", async () => {
     const homeDir = await createTempHome();
 

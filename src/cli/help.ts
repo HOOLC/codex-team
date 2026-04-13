@@ -1,4 +1,4 @@
-import type { AccountStore } from "../account-store.js";
+import type { AccountStore } from "../account-store/index.js";
 import { COMMAND_FLAGS, COMMAND_NAMES, GLOBAL_FLAGS } from "./args.js";
 
 const COMPLETION_ACCOUNT_COMMANDS = new Set(["launch", "list", "remove", "rename", "switch"] as const);

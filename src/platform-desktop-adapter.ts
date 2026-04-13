@@ -22,8 +22,8 @@ import type {
   ExecFileLike,
   RunningCodexDesktop,
   CodexDesktopLauncher,
-} from "./codex-desktop-launch.js";
-import { createCodexDesktopLauncher } from "./codex-desktop-launch.js";
+} from "./desktop/launcher.js";
+import { createCodexDesktopLauncher } from "./desktop/launcher.js";
 
 const execFile = promisify(execFileCallback);
 

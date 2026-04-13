@@ -32,7 +32,7 @@ import { dirname, join } from "node:path";
 import {
   createCodexDirectClient,
   type CodexDirectClient,
-} from "./codex-direct-client.js";
+} from "../codex-direct-client.js";
 
 import type {
   RuntimeQuotaSnapshot,
@@ -40,7 +40,7 @@ import type {
   ManagedQuotaSignal,
   ManagedWatchActivitySignal,
   ManagedWatchStatusEvent,
-} from "./codex-desktop-launch.js";
+} from "../desktop/launcher.js";
 
 // ── Constants ──
 
@@ -267,7 +267,37 @@ async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function delayOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await delay(ms);
+    return;
+  }
+
+  if (signal.aborted) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function isProcessAlive(pid: number): boolean {
+  if (pid === process.pid) {
+    return true;
+  }
+
   try {
     process.kill(pid, 0);
     return true;
@@ -515,7 +545,7 @@ export function createCliProcessManager(options: {
             debugLogger?.(`CLI poll: quota=${currentJson?.slice(0, 200)}`);
 
             // Wait for next poll interval
-            await delay(pollInterval);
+            await delayOrAbort(pollInterval, signal);
           }
         } finally {
           if (client) {
@@ -540,7 +570,7 @@ export function createCliProcessManager(options: {
 
         // Exponential backoff, max 60s
         const backoffMs = Math.min(1_000 * Math.pow(2, attempt - 1), 60_000);
-        await delay(backoffMs);
+        await delayOrAbort(backoffMs, signal);
       }
     }
   }

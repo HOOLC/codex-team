@@ -4,7 +4,7 @@ import {
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
   createCodexDesktopLauncher,
   type CodexDirectClient,
-} from "../src/codex-desktop-launch.js";
+} from "../src/desktop/launcher.js";
 import { cleanupTempHome, createTempHome } from "./test-helpers.js";
 
 function createFakeDirectClient(responseByMethod: Record<string, unknown>) {

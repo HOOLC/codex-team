@@ -1,5 +1,5 @@
 import { describe, expect, test } from "@rstest/core";
-import type { ExecFileLike } from "../src/codex-desktop-launch.js";
+import type { ExecFileLike } from "../src/desktop/launcher.js";
 
 // ── Helpers ──
 

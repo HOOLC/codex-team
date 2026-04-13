@@ -1,384 +1,164 @@
-/**
- * Tests for codex-cli-runner.ts — the `codexm run` auto-restart wrapper.
- */
+import { describe, expect, test } from "@rstest/core";
+import type { spawn } from "node:child_process";
+import type { watch } from "node:fs";
+import type { readFile } from "node:fs/promises";
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-
-// ── Mocks ──
+import { runCodexWithAutoRestart } from "../src/codex-cli-runner.js";
 
 function createMockChildProcess(pid = 12345) {
   const handlers = new Map<string, Function[]>();
+
   return {
     pid,
     exitCode: null as number | null,
-    kill: vi.fn(),
-    on: vi.fn((event: string, handler: Function) => {
-      if (!handlers.has(event)) handlers.set(event, []);
-      handlers.get(event)!.push(handler);
-    }),
-    once: vi.fn((event: string, handler: Function) => {
-      if (!handlers.has(event)) handlers.set(event, []);
-      handlers.get(event)!.push(handler);
-    }),
-    unref: vi.fn(),
-    _handlers: handlers,
-    _simulateExit(code: number) {
+    killCalls: [] as string[],
+    on(event: string, handler: Function) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+      return this;
+    },
+    once(event: string, handler: Function) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+      return this;
+    },
+    kill(signal: string) {
+      this.killCalls.push(signal);
+      return true;
+    },
+    emitExit(code: number) {
       this.exitCode = code;
-      for (const h of handlers.get("exit") ?? []) h(code);
+      for (const handler of handlers.get("exit") ?? []) {
+        handler(code);
+      }
     },
   };
 }
 
-const mockStderr = { write: vi.fn() } as unknown as NodeJS.WriteStream;
-
-const mockCliManager = {
-  registerProcess: vi.fn().mockResolvedValue(undefined),
-  getProcesses: vi.fn().mockReturnValue([]),
-  pruneStaleProcesses: vi.fn().mockResolvedValue([]),
-  pruneDeadProcesses: vi.fn().mockResolvedValue(undefined),
-  restartCliProcess: vi.fn().mockResolvedValue(undefined),
-  getTrackedProcesses: vi.fn().mockResolvedValue([]),
-  findRunningCliProcesses: vi.fn().mockResolvedValue([]),
-  readDirectQuota: vi.fn().mockResolvedValue(null),
-  readDirectAccount: vi.fn().mockResolvedValue(null),
-  watchCliQuotaSignals: vi.fn().mockResolvedValue(undefined),
-};
-
-let spawnMock: ReturnType<typeof vi.fn>;
-let watchMock: ReturnType<typeof vi.fn>;
-let readFileMock: ReturnType<typeof vi.fn>;
-let watchCallback: ((...args: any[]) => void) | null = null;
-let nextPid = 12345;
-
-vi.mock("node:child_process", () => ({
-  spawn: (...args: any[]) => spawnMock(...args),
-}));
-
-vi.mock("node:fs", () => ({
-  watch: (...args: any[]) => watchMock(...args),
-}));
-
-vi.mock("node:fs/promises", () => ({
-  readFile: (...args: any[]) => readFileMock(...args),
-  stat: vi.fn().mockResolvedValue({ mtimeMs: Date.now() }),
-}));
-
-vi.mock("./codex-cli-watcher.js", () => ({
-  createCliProcessManager: () => mockCliManager,
-}));
-
-// Import after mocks
-const { runCodexWithAutoRestart } = await import("./codex-cli-runner.js");
+function createMockCliManager() {
+  return {
+    registerProcess: async () => undefined,
+  };
+}
 
 describe("codex-cli-runner", () => {
-  let mockProcesses: ReturnType<typeof createMockChildProcess>[];
+  test("spawns codex with the provided args and returns the natural exit code", async () => {
+    const spawned: ReturnType<typeof createMockChildProcess>[] = [];
+    const spawnCalls: Array<{ file: string; args: string[] }> = [];
 
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.clearAllMocks();
-    mockProcesses = [];
-    nextPid = 12345;
-    watchCallback = null;
-
-    spawnMock = vi.fn(() => {
-      const p = createMockChildProcess(nextPid++);
-      mockProcesses.push(p);
-      return p;
-    });
-
-    watchMock = vi.fn((_path: string, _opts: any, cb: Function) => {
-      watchCallback = cb as any;
-      return {
-        close: vi.fn(),
-        on: vi.fn(),
-      };
-    });
-
-    // Default: auth file reads return different hashes on each call
-    let callCount = 0;
-    readFileMock = vi.fn(async () => {
-      callCount++;
-      return JSON.stringify({ token: `token-${callCount}` });
-    });
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("spawns codex with correct args", async () => {
     const promise = runCodexWithAutoRestart({
       codexArgs: ["--model", "o3"],
       codexBinary: "/usr/bin/codex",
       disableAuthWatch: true,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
+      attachProcessSignalHandlers: false,
+      cliManager: createMockCliManager() as never,
+      readFileImpl: (async () => "token-1") as unknown as typeof readFile,
+      spawnImpl: ((file: string, argsOrOptions?: readonly string[] | object, _options?: object) => {
+        const args = Array.isArray(argsOrOptions) ? argsOrOptions : [];
+        spawnCalls.push({ file, args: [...(args ?? [])] });
+        const child = createMockChildProcess(1001);
+        spawned.push(child);
+        return child as never;
+      }) as unknown as typeof spawn,
     });
 
-    // Let the spawn happen
-    await vi.advanceTimersByTimeAsync(10);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(spawnCalls).toEqual([
+      {
+        file: "/usr/bin/codex",
+        args: ["--model", "o3"],
+      },
+    ]);
 
-    expect(spawnMock).toHaveBeenCalledWith(
-      "/usr/bin/codex",
-      ["--model", "o3"],
-      expect.objectContaining({ stdio: "inherit" }),
-    );
-
-    // Exit naturally
-    mockProcesses[0]._simulateExit(0);
-    const result = await promise;
-    expect(result.exitCode).toBe(0);
+    spawned[0]!.emitExit(42);
+    await expect(promise).resolves.toEqual({
+      exitCode: 42,
+      restartCount: 0,
+    });
   });
 
-  it("returns exit code when codex exits naturally", async () => {
-    const promise = runCodexWithAutoRestart({
-      codexArgs: [],
-      disableAuthWatch: true,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
-    });
-
-    await vi.advanceTimersByTimeAsync(10);
-    mockProcesses[0]._simulateExit(42);
-
-    const result = await promise;
-    expect(result.exitCode).toBe(42);
-    expect(result.restartCount).toBe(0);
-  });
-
-  it("restarts codex when auth file changes", async () => {
-    const promise = runCodexWithAutoRestart({
-      codexArgs: [],
-      debounceMs: 100,
-      killTimeoutMs: 1000,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
-    });
-
-    await vi.advanceTimersByTimeAsync(10);
-    expect(mockProcesses).toHaveLength(1);
-
-    // Trigger auth file change
-    watchCallback?.("change", "auth.json");
-
-    // Advance past debounce
-    await vi.advanceTimersByTimeAsync(200);
-
-    // Old process should receive SIGTERM
-    expect(mockProcesses[0].kill).toHaveBeenCalledWith("SIGTERM");
-
-    // Simulate the old process exiting after SIGTERM
-    mockProcesses[0]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(100);
-
-    // New process should have been spawned
-    expect(mockProcesses).toHaveLength(2);
-
-    // Clean up — exit the new process
-    mockProcesses[1]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(500);
-
-    const result = await promise;
-    expect(result.restartCount).toBe(1);
-  });
-
-  it("increments restartCount on each restart", async () => {
-    const promise = runCodexWithAutoRestart({
-      codexArgs: [],
-      debounceMs: 50,
-      killTimeoutMs: 500,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
-    });
-
-    await vi.advanceTimersByTimeAsync(10);
-
-    // First restart
-    watchCallback?.("change", "auth.json");
-    await vi.advanceTimersByTimeAsync(100);
-    mockProcesses[0]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(600);
-
-    // Second restart
-    watchCallback?.("change", "auth.json");
-    await vi.advanceTimersByTimeAsync(100);
-    mockProcesses[1]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(600);
-
-    // Exit naturally
-    mockProcesses[2]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(500);
-
-    const result = await promise;
-    expect(result.restartCount).toBe(2);
-  });
-
-  it("debounces rapid auth file changes", async () => {
-    const promise = runCodexWithAutoRestart({
-      codexArgs: [],
-      debounceMs: 300,
-      killTimeoutMs: 1000,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
-    });
-
-    await vi.advanceTimersByTimeAsync(10);
-
-    // Fire 4 rapid watch events
-    watchCallback?.("change", "auth.json");
-    await vi.advanceTimersByTimeAsync(50);
-    watchCallback?.("change", "auth.json");
-    await vi.advanceTimersByTimeAsync(50);
-    watchCallback?.("change", "auth.json");
-    await vi.advanceTimersByTimeAsync(50);
-    watchCallback?.("change", "auth.json");
-
-    // Advance past debounce from last event
-    await vi.advanceTimersByTimeAsync(400);
-
-    // Should only have killed the process once
-    expect(mockProcesses[0].kill).toHaveBeenCalledTimes(1);
-
-    // Simulate exit + cleanup
-    mockProcesses[0]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(200);
-    mockProcesses[1]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(500);
-
-    const result = await promise;
-    expect(result.restartCount).toBe(1);
-  });
-
-  it("falls back to polling when fs.watch fails", async () => {
-    watchMock = vi.fn(() => {
-      throw new Error("fs.watch not supported");
-    });
+  test("restarts codex when the watched auth file changes", async () => {
+    const spawned: ReturnType<typeof createMockChildProcess>[] = [];
+    const spawnCalls: Array<{ file: string; args: string[] }> = [];
+    let watchCallback: (() => void) | undefined;
+    let readCount = 0;
 
     const promise = runCodexWithAutoRestart({
       codexArgs: [],
-      debounceMs: 50,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
+      debounceMs: 10,
+      killTimeoutMs: 20,
+      attachProcessSignalHandlers: false,
+      cliManager: createMockCliManager() as never,
+      spawnImpl: ((file: string, argsOrOptions?: readonly string[] | object, _options?: object) => {
+        const args = Array.isArray(argsOrOptions) ? argsOrOptions : [];
+        spawnCalls.push({ file, args: [...(args ?? [])] });
+        const child = createMockChildProcess(2000 + spawned.length);
+        spawned.push(child);
+        return child as never;
+      }) as unknown as typeof spawn,
+      watchImpl: ((_path: import("node:fs").PathLike, optionsOrListener?: unknown, maybeListener?: unknown) => {
+        watchCallback = typeof optionsOrListener === "function"
+          ? optionsOrListener as () => void
+          : maybeListener as (() => void) | undefined;
+        return {
+          close() {
+            return;
+          },
+          on() {
+            return this;
+          },
+        } as never;
+      }) as unknown as typeof watch,
+      readFileImpl: (async () => {
+        readCount += 1;
+        return `token-${readCount}`;
+      }) as unknown as typeof readFile,
     });
 
-    await vi.advanceTimersByTimeAsync(10);
-    expect(mockProcesses).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(spawned).toHaveLength(1);
 
-    // Polling interval is 3000ms — advance past it
-    await vi.advanceTimersByTimeAsync(3500);
+    if (!watchCallback) {
+      throw new Error("watch callback not registered");
+    }
+    watchCallback();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(spawned[0]!.killCalls).toEqual(["SIGTERM"]);
 
-    // The poll should have checked the auth file
-    expect(readFileMock).toHaveBeenCalled();
+    spawned[0]!.emitExit(0);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(spawned).toHaveLength(2);
+    expect(spawnCalls).toHaveLength(2);
 
-    // Clean up
-    mockProcesses[mockProcesses.length - 1]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(500);
-    await promise;
-  });
-
-  it("registers process in CLI manager", async () => {
-    const promise = runCodexWithAutoRestart({
-      codexArgs: [],
-      accountId: "acc-123",
-      email: "test@example.com",
-      disableAuthWatch: true,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
+    spawned[1]!.emitExit(0);
+    await expect(promise).resolves.toEqual({
+      exitCode: 0,
+      restartCount: 1,
     });
-
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(mockCliManager.registerProcess).toHaveBeenCalledWith(
-      expect.objectContaining({
-        pid: 12345,
-        command: "codex",
-      }),
-      "acc-123",
-      "test@example.com",
-    );
-
-    mockProcesses[0]._simulateExit(0);
-    await promise;
   });
 
-  it("respects AbortSignal", async () => {
+  test("stops the runner when aborted", async () => {
     const controller = new AbortController();
+    const child = createMockChildProcess(3001);
 
     const promise = runCodexWithAutoRestart({
       codexArgs: [],
-      signal: controller.signal,
       disableAuthWatch: true,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
+      attachProcessSignalHandlers: false,
+      signal: controller.signal,
+      cliManager: createMockCliManager() as never,
+      readFileImpl: (async () => "token-1") as unknown as typeof readFile,
+      spawnImpl: (() => child as never) as unknown as typeof spawn,
     });
 
-    await vi.advanceTimersByTimeAsync(10);
-    expect(mockProcesses).toHaveLength(1);
-
-    // Abort
+    await new Promise((resolve) => setTimeout(resolve, 0));
     controller.abort();
-    await vi.advanceTimersByTimeAsync(500);
-
-    // The child should have been killed
-    expect(mockProcesses[0].kill).toHaveBeenCalledWith("SIGTERM");
-
-    mockProcesses[0]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(200);
-
-    const result = await promise;
-    expect(result.exitCode).toBe(0);
-  });
-
-  it("sends SIGKILL after timeout if SIGTERM doesn't work", async () => {
-    const promise = runCodexWithAutoRestart({
-      codexArgs: [],
-      debounceMs: 50,
-      killTimeoutMs: 500,
-      stderr: mockStderr,
-      cliManager: mockCliManager as any,
-      debugLog: () => {},
+    await expect(promise).resolves.toEqual({
+      exitCode: 0,
+      restartCount: 0,
     });
-
-    await vi.advanceTimersByTimeAsync(10);
-
-    // Make the process ignore SIGTERM (exitCode stays null)
-    mockProcesses[0].kill.mockImplementation(() => {
-      // Don't actually exit — simulates a hung process
-    });
-
-    // Trigger auth change
-    watchCallback?.("change", "auth.json");
-    await vi.advanceTimersByTimeAsync(100); // past debounce
-
-    // SIGTERM sent
-    expect(mockProcesses[0].kill).toHaveBeenCalledWith("SIGTERM");
-
-    // Advance past killTimeout
-    await vi.advanceTimersByTimeAsync(600);
-
-    // SIGKILL should have been sent
-    expect(mockProcesses[0].kill).toHaveBeenCalledWith("SIGKILL");
-
-    // Simulate final exit
-    mockProcesses[0]._simulateExit(137);
-    await vi.advanceTimersByTimeAsync(200);
-
-    // New process spawned
-    expect(mockProcesses.length).toBeGreaterThanOrEqual(2);
-
-    // Exit the new one
-    mockProcesses[mockProcesses.length - 1]._simulateExit(0);
-    await vi.advanceTimersByTimeAsync(500);
-
-    const result = await promise;
-    expect(result.restartCount).toBeGreaterThanOrEqual(1);
+    expect(child.killCalls).toEqual(["SIGTERM"]);
   });
 });

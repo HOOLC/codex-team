@@ -1,4 +1,4 @@
-import type { AccountStore } from "../account-store.js";
+import type { AccountStore } from "../account-store/index.js";
 import type { CodexLoginProvider } from "../codex-login.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import { toCliQuotaSummary } from "../cli/quota.js";

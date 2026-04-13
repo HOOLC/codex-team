@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "@rstest/core";
 
 import { runCli } from "../src/main.js";
-import { createAccountStore } from "../src/account-store.js";
+import { createAccountStore } from "../src/account-store/index.js";
 import {
   cleanupTempHome,
   createTempHome,

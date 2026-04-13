@@ -33,7 +33,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -42,7 +42,7 @@ import { createHash } from "node:crypto";
 import {
   createCliProcessManager,
   type CliProcessManager,
-} from "./codex-cli-watcher.js";
+} from "./watch/cli-watcher.js";
 
 // ── Types ──
 
@@ -71,6 +71,14 @@ export interface RunnerOptions {
   disableAuthWatch?: boolean;
   /** CLI process manager instance (for DI/testing). */
   cliManager?: CliProcessManager;
+  /** Spawn implementation override for tests. */
+  spawnImpl?: typeof spawn;
+  /** File watch implementation override for tests. */
+  watchImpl?: typeof watch;
+  /** File read implementation override for tests. */
+  readFileImpl?: typeof readFile;
+  /** Attach process-level SIGINT/SIGTERM handlers. Default: true. */
+  attachProcessSignalHandlers?: boolean;
 }
 
 export interface RunnerResult {
@@ -86,9 +94,12 @@ function hashFileContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-async function readAuthHash(authFilePath: string): Promise<string | null> {
+async function readAuthHash(
+  authFilePath: string,
+  readFileImpl: typeof readFile,
+): Promise<string | null> {
   try {
-    const content = await readFile(authFilePath, "utf-8");
+    const content = await readFileImpl(authFilePath, "utf-8");
     return hashFileContent(content);
   } catch {
     return null;
@@ -119,9 +130,13 @@ export async function runCodexWithAutoRestart(
   const stderr = options.stderr ?? process.stderr;
   const cliManager =
     options.cliManager ?? createCliProcessManager({});
+  const spawnImpl = options.spawnImpl ?? spawn;
+  const watchImpl = options.watchImpl ?? watch;
+  const readFileImpl = options.readFileImpl ?? readFile;
+  const attachProcessSignalHandlers = options.attachProcessSignalHandlers ?? true;
 
   let currentProcess: ChildProcess | null = null;
-  let currentAuthHash = await readAuthHash(authFilePath);
+  let currentAuthHash = await readAuthHash(authFilePath, readFileImpl);
   let restartCount = 0;
   let lastExitCode = 0;
   let isRestarting = false;
@@ -134,7 +149,7 @@ export async function runCodexWithAutoRestart(
   function spawnCodex(): ChildProcess {
     debugLog(`run: spawning ${codexBinary} ${codexArgs.join(" ")}`);
 
-    const child = spawn(codexBinary, codexArgs, {
+    const child = spawnImpl(codexBinary, codexArgs, {
       stdio: "inherit",
       env: process.env,
     });
@@ -198,7 +213,7 @@ export async function runCodexWithAutoRestart(
       }
 
       // Update auth hash
-      currentAuthHash = await readAuthHash(authFilePath);
+      currentAuthHash = await readAuthHash(authFilePath, readFileImpl);
 
       // Spawn new process
       currentProcess = spawnCodex();
@@ -233,7 +248,7 @@ export async function runCodexWithAutoRestart(
     }
 
     try {
-      authWatcher = watch(authFilePath, { persistent: false }, () => {
+      authWatcher = watchImpl(authFilePath, { persistent: false }, () => {
         // Debounce: auth file may be written in multiple steps
         if (debounceTimer) {
           clearTimeout(debounceTimer);
@@ -284,7 +299,7 @@ export async function runCodexWithAutoRestart(
       return;
     }
 
-    const newHash = await readAuthHash(authFilePath);
+    const newHash = await readAuthHash(authFilePath, readFileImpl);
     if (newHash && newHash !== currentAuthHash) {
       debugLog(
         `run: auth file changed (old=${currentAuthHash?.slice(0, 8)}, new=${newHash.slice(0, 8)})`,
@@ -340,12 +355,14 @@ export async function runCodexWithAutoRestart(
     }
   };
 
-  process.on("SIGINT", () => forwardSignal("SIGINT"));
-  process.on("SIGTERM", () => {
-    forwardSignal("SIGTERM");
-    stopped = true;
-    cleanup();
-  });
+  if (attachProcessSignalHandlers) {
+    process.on("SIGINT", () => forwardSignal("SIGINT"));
+    process.on("SIGTERM", () => {
+      forwardSignal("SIGTERM");
+      stopped = true;
+      cleanup();
+    });
+  }
 
   // ── Start ──
 

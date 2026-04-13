@@ -4,12 +4,12 @@ import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
 
 import { getSnapshotIdentity, maskAccountId, parseAuthSnapshot } from "../auth-snapshot.js";
-import type { AccountStore } from "../account-store.js";
+import type { AccountStore } from "../account-store/index.js";
 import type {
   CodexDesktopLauncher,
   RuntimeAccountSnapshot,
   RuntimeReadSource,
-} from "../codex-desktop-launch.js";
+} from "../desktop/launcher.js";
 import {
   computeAvailability,
   describeCurrentUsageSummary,
@@ -24,7 +24,7 @@ import {
   computeWatchHistoryEta,
   createWatchHistoryStore,
   type WatchHistoryEtaContext,
-} from "../watch-history.js";
+} from "../watch/history.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
