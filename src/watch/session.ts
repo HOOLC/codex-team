@@ -28,11 +28,49 @@ import {
   resolveWatchAccountLabel,
 } from "./output.js";
 
-const WATCH_AUTO_SWITCH_TIMEOUT_MS = 600_000;
+const WATCH_AUTO_SWITCH_TIMEOUT_MS = 900_000;
 
 interface CliStreams {
   stdout: NodeJS.WriteStream;
   stderr: NodeJS.WriteStream;
+}
+
+async function resolveWatchHistoryIdentity(
+  store: AccountStore,
+  accountLabel: string,
+  debugLog: (message: string) => void,
+): Promise<{ accountId: string; identity: string } | null> {
+  try {
+    const { accounts } = await store.listAccounts();
+
+    if (accountLabel !== "current") {
+      const named = accounts.find((account) => account.name === accountLabel);
+      if (named) {
+        return {
+          accountId: named.account_id,
+          identity: named.identity,
+        };
+      }
+    }
+
+    const current = await store.getCurrentStatus();
+    if (current.matched_accounts.length !== 1) {
+      return null;
+    }
+
+    const matched = accounts.find((account) => account.name === current.matched_accounts[0]);
+    if (!matched) {
+      return null;
+    }
+
+    return {
+      accountId: matched.account_id,
+      identity: matched.identity,
+    };
+  } catch (error) {
+    debugLog(`watch: failed to resolve managed account identity: ${(error as Error).message}`);
+    return null;
+  }
 }
 
 export async function runCliWatchSession(options: {
@@ -270,11 +308,16 @@ export async function runManagedDesktopWatchSession(options: {
     const quota = quotaSignal.quota;
     if (quota?.refresh_status === "ok") {
       try {
+        const historyIdentity = await resolveWatchHistoryIdentity(
+          store,
+          currentWatchAccountLabel,
+          debugLog,
+        );
         await appendWatchQuotaHistory(watchHistoryStore, {
           recordedAt: quota.fetched_at ?? new Date().toISOString(),
           accountName: currentWatchAccountLabel,
-          accountId: quota.account_id,
-          identity: quota.identity,
+          accountId: historyIdentity?.accountId ?? quota.account_id,
+          identity: historyIdentity?.identity ?? quota.identity,
           planType: quota.plan_type,
           available: quota.available,
           fiveHour: quota.five_hour

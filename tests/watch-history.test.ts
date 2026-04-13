@@ -366,7 +366,7 @@ describe("watch history eta", () => {
     });
   });
 
-  test("computes observed ratio diagnostics by bucket and plan", () => {
+  test("computes observed ratio diagnostics by plan only", () => {
     const history = [
       makeRecord("2026-04-13T09:00:00.000Z", {
         account_name: "plus-main",
@@ -412,17 +412,6 @@ describe("watch history eta", () => {
     );
 
     expect(diagnostics).toContainEqual({
-      dimension: "bucket",
-      key: "plus",
-      sample_count: 3,
-      observed_mean_raw_ratio: 6.33,
-      observed_weighted_raw_ratio: 6.33,
-      variance: 0.22,
-      expected_raw_ratio: 6.25,
-      relative_delta: 0.01,
-      warning: false,
-    });
-    expect(diagnostics).toContainEqual({
       dimension: "plan",
       key: "plus",
       sample_count: 3,
@@ -433,6 +422,7 @@ describe("watch history eta", () => {
       relative_delta: 0.01,
       warning: false,
     });
+    expect(diagnostics).toHaveLength(1);
   });
 
   test("supports the store-backed ETA wrapper", async () => {

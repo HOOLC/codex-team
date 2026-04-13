@@ -30,9 +30,8 @@ describe("CLI", () => {
       const stdout = captureWritable();
       const stderr = captureWritable();
 
-      // Abort after a short delay to prevent the CLI watcher from blocking
       const controller = new AbortController();
-      setTimeout(() => controller.abort(), 500);
+      controller.abort();
 
       const exitCode = await runCli(["watch"], {
         store,
@@ -45,6 +44,7 @@ describe("CLI", () => {
       });
 
       // CLI watch mode should report entering CLI mode
+      expect(exitCode).toBe(0);
       const stderrOutput = stderr.read();
       expect(stderrOutput).toContain("CLI watch mode");
     } finally {
@@ -897,7 +897,7 @@ describe("CLI", () => {
       expect(stdout.read()).toMatch(
         /\[\d{2}:\d{2}:\d{2}\] auto-switch from="watch-a" to="watch-b"/,
       );
-      expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 600_000 }]);
+      expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 900_000 }]);
     } finally {
       await cleanupTempHome(homeDir);
     }
