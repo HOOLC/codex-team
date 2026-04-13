@@ -1,4 +1,41 @@
 # codex-team AGENTS
 
-- When working from inside a Codex Desktop agent session, do not suggest or execute `codexm launch` to restart Codex Desktop. Quitting the app terminates the hosting session.
-- If restarting Codex Desktop is required, tell the user to run `codexm launch` from an external terminal instead.
+This file contains repository-stable engineering constraints for agents.
+Detailed design notes live in `docs/internal/`.
+
+## Guardrails
+
+- Do not add a command by querying both Desktop and direct runtime paths unless the command semantics explicitly require it.
+- Do not spread new platform-specific Desktop process logic outside the Desktop launcher boundary.
+- Do not duplicate plan or quota normalization rules outside `src/plan-quota-profile.ts`.
+
+## Module Boundaries
+
+- `src/main.ts`: CLI orchestration only.
+- `src/commands/*`: command handlers.
+- `src/codex-desktop-launch.ts`: managed Desktop lifecycle, DevTools bridge, Desktop runtime reads, and watch stream handling.
+- `src/codex-direct-client.ts`: direct `codex app-server` client for one-shot runtime reads.
+- `src/watch-history.ts`: watch history persistence and ETA calculation.
+- `src/plan-quota-profile.ts`: centralized plan normalization and quota ratio rules.
+- `src/cli/quota.ts`: quota presentation, list ordering, and auto-switch candidate formatting.
+
+## Runtime Path Rules
+
+- `current`: Desktop-first, direct fallback.
+- `watch`: Desktop-only.
+- `switch`: Desktop-only.
+- `doctor`: direct-first; Desktop only for supplemental consistency checks.
+
+## Quota And Ranking Rules
+
+- Keep plan normalization centralized in `src/plan-quota-profile.ts`.
+- Treat ETA as display and analysis data unless a command explicitly uses it for decisions.
+- Keep `list` ordering and `auto-switch` ranking as separate concerns when their user goals differ.
+
+## Verification
+
+- For user-visible CLI behavior changes, run `pnpm typecheck` and `pnpm test`.
+
+## References
+
+- `docs/internal/codex-runtime-channels.md`

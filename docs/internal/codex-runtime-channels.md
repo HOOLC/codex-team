@@ -23,7 +23,7 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 最早的 launch 设计稿在：
 
-- [2026-04-07-codexm-launch-design.md](/Users/bytedance/code/codex-team/docs/superpowers/specs/2026-04-07-codexm-launch-design.md)
+- [2026-04-07-codexm-launch-design.md](/Users/bytedance/code/codex-team/docs/internal/design-history/2026-04-07-codexm-launch-design.md)
 
 这份 internal 文档不重复设计过程，只记录目前代码里的稳定结论。
 
