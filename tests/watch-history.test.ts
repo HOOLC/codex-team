@@ -225,6 +225,126 @@ describe("watch history eta", () => {
     });
   });
 
+  test("does not mix rate history across account switches", () => {
+    const history = [
+      makeRecord("2026-04-08T10:00:00.000Z", {
+        account_name: "alpha",
+        account_id: "acct-alpha",
+        identity: "acct-alpha:user-alpha",
+        five_hour: makeWindow(10, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T11:00:00.000Z", {
+        account_name: "beta",
+        account_id: "acct-beta",
+        identity: "acct-beta:user-beta",
+        five_hour: makeWindow(80, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(40, "2026-04-15T00:00:00.000Z"),
+      }),
+    ];
+
+    const result = computeWatchHistoryEta(history, makeTarget(), new Date("2026-04-08T11:00:00.000Z"));
+
+    expect(result).toMatchObject({
+      status: "insufficient_history",
+      rate_1w_units_per_hour: null,
+    });
+  });
+
+  test("uses cumulative delta across a continuous burn segment", () => {
+    const history = [
+      makeRecord("2026-04-08T10:00:00.000Z", {
+        five_hour: makeWindow(10, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T10:10:00.000Z", {
+        five_hour: makeWindow(11, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T10:20:00.000Z", {
+        five_hour: makeWindow(12, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T10:30:00.000Z", {
+        five_hour: makeWindow(13, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T10:40:00.000Z", {
+        five_hour: makeWindow(14, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T10:50:00.000Z", {
+        five_hour: makeWindow(15, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T11:00:00.000Z", {
+        five_hour: makeWindow(18, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(11, "2026-04-15T00:00:00.000Z"),
+      }),
+    ];
+
+    const result = computeWatchHistoryEta(history, makeTarget(), new Date("2026-04-08T11:00:00.000Z"));
+
+    expect(result).toMatchObject({
+      status: "ok",
+      rate_1w_units_per_hour: 1,
+      remaining_5h_eq_1w: 5,
+      etaHours: 5,
+    });
+  });
+
+  test("treats reset_at jitter within one minute as the same continuous segment", () => {
+    const history = [
+      makeRecord("2026-04-08T10:00:00.000Z", {
+        five_hour: makeWindow(10, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T10:30:00.000Z", {
+        five_hour: makeWindow(14, "2026-04-08T12:00:45.000Z"),
+        one_week: makeWindow(11, "2026-04-15T00:00:30.000Z"),
+      }),
+      makeRecord("2026-04-08T11:00:00.000Z", {
+        five_hour: makeWindow(18, "2026-04-08T12:00:30.000Z"),
+        one_week: makeWindow(12, "2026-04-15T00:00:15.000Z"),
+      }),
+    ];
+
+    const result = computeWatchHistoryEta(history, makeTarget(), new Date("2026-04-08T11:00:00.000Z"));
+
+    expect(result).toMatchObject({
+      status: "ok",
+      rate_1w_units_per_hour: 2,
+      remaining_5h_eq_1w: 5,
+      etaHours: 2.5,
+    });
+  });
+
+  test("breaks a segment when used percent rolls back after a reset", () => {
+    const history = [
+      makeRecord("2026-04-08T10:00:00.000Z", {
+        five_hour: makeWindow(90, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(40, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T10:30:00.000Z", {
+        five_hour: makeWindow(95, "2026-04-08T12:00:30.000Z"),
+        one_week: makeWindow(41, "2026-04-15T00:00:30.000Z"),
+      }),
+      makeRecord("2026-04-08T11:00:00.000Z", {
+        five_hour: makeWindow(5, "2026-04-08T17:00:00.000Z"),
+        one_week: makeWindow(42, "2026-04-15T00:00:45.000Z"),
+      }),
+    ];
+
+    const result = computeWatchHistoryEta(history, makeTarget(), new Date("2026-04-08T11:00:00.000Z"));
+
+    expect(result).toMatchObject({
+      status: "ok",
+      rate_1w_units_per_hour: 2,
+      remaining_5h_eq_1w: 5,
+      etaHours: 2.5,
+    });
+  });
+
   test("reports idle when the history has no observed usage change", () => {
     const history = [
       makeRecord("2026-04-08T10:00:00.000Z", {

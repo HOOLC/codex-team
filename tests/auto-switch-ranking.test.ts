@@ -323,4 +323,67 @@ describe("auto switch ranking", () => {
       },
     ]);
   });
+
+  test("prefers the earliest bottleneck reset instead of always checking 5h first", () => {
+    const weeklyBottleneckResetsSooner: AccountQuotaSummary = {
+      name: "weekly-bottleneck-sooner",
+      account_id: "acct-weekly-bottleneck-sooner",
+      user_id: null,
+      identity: "acct-weekly-bottleneck-sooner",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T06:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 90,
+        window_seconds: 604_800,
+        reset_at: "2026-04-08T02:00:00.000Z",
+      },
+    };
+
+    const fiveHourBottleneckResetsLater: AccountQuotaSummary = {
+      name: "five-hour-bottleneck-later",
+      account_id: "acct-five-hour-bottleneck-later",
+      user_id: null,
+      identity: "acct-five-hour-bottleneck-later",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T03:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 90,
+        window_seconds: 604_800,
+        reset_at: "2026-04-08T07:00:00.000Z",
+      },
+    };
+
+    expect(
+      rankAutoSwitchCandidates([weeklyBottleneckResetsSooner, fiveHourBottleneckResetsLater]),
+    ).toMatchObject([
+      {
+        name: "weekly-bottleneck-sooner",
+        current_score: 10,
+        score_1h: 10,
+      },
+      {
+        name: "five-hour-bottleneck-later",
+        current_score: 10,
+        score_1h: 10,
+      },
+    ]);
+  });
 });

@@ -183,19 +183,34 @@ rate_per_hour = delta_used_percent_in_1w_units / delta_hours
 - 至少有一个窗口的 `used_percent` 和 `reset_at` 完整
 - 时间戳有效
 
-计算相邻样本增量时，分别得到：
+速率计算不再直接对每一对相邻样本分别求增量，而是先按“连续 burn 段”分段。
+
+一段连续样本需要同时满足：
+
+- 属于同一账号
+- `plan_type` 不变
+- `five_hour.used_percent` 不下降
+- `one_week.used_percent` 不下降
+
+`reset_at` 只作为辅助信号，不再要求严格字符串相等。
+
+- `reset_at` 在 `±1 分钟` 内波动，视为同一窗口的时间戳抖动
+- 如果 `used_percent` 回落，说明观察到了 reset，必须开始新的连续段
+- 如果账号或 `plan_type` 变化，也必须开始新的连续段
+
+对每个连续段，只看该段首尾两点，分别得到：
 
 - `delta_5h_eq_1w`
 - `delta_1w`
 
 其中：
 
-- `5H` 增量只有在前后两点 `five_hour.reset_at` 相同的前提下才有效
-- `1W` 增量只有在前后两点 `one_week.reset_at` 相同的前提下才有效
+- `5H` 增量来自该连续段首尾 `five_hour.used_percent` 的差值
+- `1W` 增量来自该连续段首尾 `one_week.used_percent` 的差值
 
-如果某个窗口的 `reset_at` 变化，说明该窗口已经重置；新旧窗口之间不能直接连算。
+之所以可以直接取首尾差值，是因为分段阶段已经保证这一段内没有观察到 reset。
 
-对于同一对样本，最终增量采用更保守的瓶颈语义：
+对于同一连续段，最终增量采用更保守的瓶颈语义：
 
 ```text
 delta_in_1w_units = max(delta_5h_eq_1w, delta_1w)
@@ -204,8 +219,10 @@ delta_in_1w_units = max(delta_5h_eq_1w, delta_1w)
 理由是：
 
 - 两个窗口都在反映同一份真实消耗
+- `1W` 更新粒度通常比 `5H` 更粗，逐对相邻样本会被离散跳变放大或低估
 - 观测数据存在量化误差、刷新时序差和不同窗口的离散化差异
-- 取更大的那个增量更接近“本次真实至少消耗了多少”
+- 先按连续段累计，再取更大的那个增量，更接近“这一整段真实至少消耗了多少”
+- `reset_at` 抖动不会再把同一段连续 burn 错切成许多碎片
 
 ### 6.3 回看窗口
 
@@ -221,18 +238,19 @@ delta_in_1w_units = max(delta_5h_eq_1w, delta_1w)
 
 ### 6.4 计算方式
 
-对回看区间内所有可连接的相邻样本段，计算：
+对回看区间内所有有效连续段，计算：
 
-- 总消耗增量（统一到 `1W` 等价单位）
-- 总经过时长
+- 每段的总消耗增量（统一到 `1W` 等价单位）
+- 每段的总经过时长
 
 然后按总量法得到全局速率：
 
 ```text
-global_rate_in_1w_units_per_hour = sum(delta_in_1w_units) / sum(delta_hours)
+global_rate_in_1w_units_per_hour =
+  sum(segment_delta_in_1w_units) / sum(segment_delta_hours)
 ```
 
-如果总经过时长为 `0`，或没有可用样本段，则该全局速率为空。
+如果总经过时长为 `0`，或没有可用连续段，则该全局速率为空。
 
 ### 6.5 低活跃与空闲
 

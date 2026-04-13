@@ -1246,6 +1246,161 @@ wire_api = "responses"
     }
   });
 
+  test("list text output prefers the earliest bottleneck reset over a fixed 5h-first reset tie-break", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const primaryResetAt =
+            accountId === "acct-cli-bottleneck-weekly"
+              ? 1_775_610_400
+              : 1_775_599_600;
+          const secondaryResetAt =
+            accountId === "acct-cli-bottleneck-weekly"
+              ? 1_775_596_800
+              : 1_775_614_000;
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 20,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 7_200,
+                reset_at: primaryResetAt,
+              },
+              secondary_window: {
+                used_percent: 90,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 7_200,
+                reset_at: secondaryResetAt,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-bottleneck-five-hour");
+      await runCli(["save", "five-hour-bottleneck-later", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-bottleneck-weekly");
+      await runCli(["save", "weekly-bottleneck-sooner", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+
+      expect(dataRows[0]).toContain("* weekly-bottleneck-sooner");
+      expect(dataRows[1]).toContain("five-hour-bottleneck-later");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output prefers zero-score accounts that recover sooner over static 5h remain", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const isWeeklyBlocked = accountId === "acct-cli-zero-score-weekly";
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: isWeeklyBlocked ? 20 : 100,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: isWeeklyBlocked ? 7_200 : 1_200,
+                reset_at: isWeeklyBlocked ? 1_775_610_400 : 1_775_588_800,
+              },
+              secondary_window: {
+                used_percent: isWeeklyBlocked ? 100 : 50,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: isWeeklyBlocked ? 14_400 : 86_400,
+                reset_at: isWeeklyBlocked ? 1_775_617_600 : 1_775_671_200,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-weekly");
+      await runCli(["save", "weekly-blocked-later", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-five-hour");
+      await runCli(["save", "five-hour-blocked-sooner", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+
+      expect(dataRows[0]).toContain("five-hour-blocked-sooner");
+      expect(dataRows[1]).toContain("weekly-blocked-later");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("list --verbose includes auto-switch score breakdown columns", async () => {
     const homeDir = await createTempHome();
 

@@ -61,6 +61,8 @@ export interface QuotaEtaSummary {
   remaining_1w: number | null;
 }
 
+type QuotaWindowKey = "five_hour" | "one_week";
+
 const AUTO_SWITCH_PROJECTION_HORIZON_SECONDS = 3_600;
 const AUTO_SWITCH_CURRENT_SCORE_TIEBREAK_DELTA = 5;
 const ANSI_RESET = "\u001b[0m";
@@ -461,6 +463,83 @@ function compareNullableDateAscending(left: string | null, right: string | null)
   return left.localeCompare(right);
 }
 
+function resolveBottleneckWindows(
+  fiveHourScore: number | null,
+  oneWeekScore: number | null,
+): QuotaWindowKey[] {
+  if (fiveHourScore !== null && oneWeekScore !== null) {
+    if (fiveHourScore < oneWeekScore) {
+      return ["five_hour"];
+    }
+    if (oneWeekScore < fiveHourScore) {
+      return ["one_week"];
+    }
+    return ["five_hour", "one_week"];
+  }
+
+  if (fiveHourScore !== null) {
+    return ["five_hour"];
+  }
+
+  if (oneWeekScore !== null) {
+    return ["one_week"];
+  }
+
+  return [];
+}
+
+function getCandidateResetAt(candidate: AutoSwitchCandidate, window: QuotaWindowKey): string | null {
+  return window === "five_hour" ? candidate.five_hour_reset_at : candidate.one_week_reset_at;
+}
+
+function getEarliestResetAt(
+  candidate: AutoSwitchCandidate,
+  windows: QuotaWindowKey[],
+): string | null {
+  return windows
+    .map((window) => getCandidateResetAt(candidate, window))
+    .filter((resetAt): resetAt is string => resetAt !== null)
+    .sort((left, right) => left.localeCompare(right))[0] ?? null;
+}
+
+function compareCandidateResets(
+  left: AutoSwitchCandidate,
+  right: AutoSwitchCandidate,
+  options: {
+    fiveHourScore: (candidate: AutoSwitchCandidate) => number | null;
+    oneWeekScore: (candidate: AutoSwitchCandidate) => number | null;
+  },
+): number {
+  const leftBottleneckWindows = resolveBottleneckWindows(
+    options.fiveHourScore(left),
+    options.oneWeekScore(left),
+  );
+  const rightBottleneckWindows = resolveBottleneckWindows(
+    options.fiveHourScore(right),
+    options.oneWeekScore(right),
+  );
+
+  const primaryResetOrder = compareNullableDateAscending(
+    getEarliestResetAt(left, leftBottleneckWindows),
+    getEarliestResetAt(right, rightBottleneckWindows),
+  );
+  if (primaryResetOrder !== 0) {
+    return primaryResetOrder;
+  }
+
+  const leftSecondaryWindows = (["five_hour", "one_week"] as QuotaWindowKey[]).filter(
+    (window) => !leftBottleneckWindows.includes(window),
+  );
+  const rightSecondaryWindows = (["five_hour", "one_week"] as QuotaWindowKey[]).filter(
+    (window) => !rightBottleneckWindows.includes(window),
+  );
+
+  return compareNullableDateAscending(
+    getEarliestResetAt(left, leftSecondaryWindows),
+    getEarliestResetAt(right, rightSecondaryWindows),
+  );
+}
+
 export function rankAutoSwitchCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidate[] {
   return accounts
     .map(toAutoSwitchCandidate)
@@ -505,20 +584,12 @@ export function rankAutoSwitchCandidates(accounts: AccountQuotaSummary[]): AutoS
         return remain1wOrder;
       }
 
-      const fiveHourResetOrder = compareNullableDateAscending(
-        left.five_hour_reset_at,
-        right.five_hour_reset_at,
-      );
-      if (fiveHourResetOrder !== 0) {
-        return fiveHourResetOrder;
-      }
-
-      const oneWeekResetOrder = compareNullableDateAscending(
-        left.one_week_reset_at,
-        right.one_week_reset_at,
-      );
-      if (oneWeekResetOrder !== 0) {
-        return oneWeekResetOrder;
+      const resetOrder = compareCandidateResets(left, right, {
+        fiveHourScore: (candidate) => candidate.projected_5h_in_1w_units_1h,
+        oneWeekScore: (candidate) => candidate.projected_1w_in_plus_units_1h,
+      });
+      if (resetOrder !== 0) {
+        return resetOrder;
       }
 
       return left.name.localeCompare(right.name);
@@ -532,6 +603,20 @@ function rankListCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidat
     .sort((left, right) => {
       if (right.current_score !== left.current_score) {
         return right.current_score - left.current_score;
+      }
+
+      if (left.current_score === 0 && right.current_score === 0) {
+        const resetOrder = compareCandidateResets(left, right, {
+          fiveHourScore: (candidate) => candidate.remain_5h_in_1w_units,
+          oneWeekScore: (candidate) => candidate.remain_1w_in_plus_units,
+        });
+        if (resetOrder !== 0) {
+          return resetOrder;
+        }
+
+        if (right.score_1h !== left.score_1h) {
+          return right.score_1h - left.score_1h;
+        }
       }
 
       const remain5hOrder = compareNullableNumberDescending(
@@ -550,20 +635,12 @@ function rankListCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidat
         return remain1wOrder;
       }
 
-      const fiveHourResetOrder = compareNullableDateAscending(
-        left.five_hour_reset_at,
-        right.five_hour_reset_at,
-      );
-      if (fiveHourResetOrder !== 0) {
-        return fiveHourResetOrder;
-      }
-
-      const oneWeekResetOrder = compareNullableDateAscending(
-        left.one_week_reset_at,
-        right.one_week_reset_at,
-      );
-      if (oneWeekResetOrder !== 0) {
-        return oneWeekResetOrder;
+      const resetOrder = compareCandidateResets(left, right, {
+        fiveHourScore: (candidate) => candidate.remain_5h_in_1w_units,
+        oneWeekScore: (candidate) => candidate.remain_1w_in_plus_units,
+      });
+      if (resetOrder !== 0) {
+        return resetOrder;
       }
 
       return left.name.localeCompare(right.name);
