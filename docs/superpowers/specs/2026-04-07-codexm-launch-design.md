@@ -105,7 +105,7 @@ codexm launch [account] [--json]
 统一使用 macOS 的 `open` 启动 Codex Desktop，并附带固定的远程调试端口参数：
 
 ```bash
-open -na /Applications/Codex.app --args --remote-debugging-port=9223
+open -na /Applications/Codex.app --args --remote-debugging-port=39223
 ```
 
 设计原因：
@@ -116,7 +116,7 @@ open -na /Applications/Codex.app --args --remote-debugging-port=9223
 
 ### 5.2 端口策略
 
-本次固定使用单一端口常量，例如 `9223`。
+本次固定使用单一端口常量，例如 `39223`。
 
 暂不做用户配置，原因是：
 

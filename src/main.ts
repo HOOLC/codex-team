@@ -6,7 +6,7 @@ import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
 import packageJson from "../package.json";
 
-import { maskAccountId } from "./auth-snapshot.js";
+import { getSnapshotEmail, maskAccountId, parseAuthSnapshot } from "./auth-snapshot.js";
 import {
   AccountStore,
   type AccountQuotaSummary,
@@ -64,6 +64,10 @@ import {
   handleDoctorCommand,
   handleListCommand,
 } from "./commands/inspection.js";
+import {
+  appendWatchQuotaHistory,
+  createWatchHistoryStore,
+} from "./watch-history.js";
 
 import {
   createCliProcessManager,
@@ -228,6 +232,21 @@ async function refreshManagedDesktopAfterSwitch(
       return;
     }
 
+    if (options.force === true) {
+      try {
+        await desktopLauncher.quitRunningApps({ force: true });
+        warnings.push(
+          `Force-killed the running codexm-managed Codex Desktop session because the immediate refresh path failed: ${(error as Error).message} Relaunch Codex Desktop to continue with the new auth.`,
+        );
+        return;
+      } catch (fallbackError) {
+        warnings.push(
+          `Failed to refresh the running codexm-managed Codex Desktop session: ${(error as Error).message} Fallback force-kill also failed: ${(fallbackError as Error).message}`,
+        );
+        return;
+      }
+    }
+
     warnings.push(
       `Failed to refresh the running codexm-managed Codex Desktop session: ${(error as Error).message}`,
     );
@@ -248,6 +267,41 @@ async function refreshManagedDesktopAfterSwitch(
     }
   } catch {
     // Keep Desktop detection best-effort so switch success does not depend on local process inspection.
+  }
+}
+
+async function shouldSkipManagedDesktopRefresh(
+  store: AccountStore,
+  desktopLauncher: CodexDesktopLauncher,
+  debugLog?: (message: string) => void,
+): Promise<boolean> {
+  try {
+    const runtimeAccount = await desktopLauncher.readManagedCurrentAccount();
+    if (!runtimeAccount?.email || !runtimeAccount.auth_mode) {
+      debugLog?.("switch: managed Desktop runtime identity unavailable");
+      return false;
+    }
+
+    const rawAuth = await readFile(store.paths.currentAuthPath, "utf8");
+    const currentSnapshot = parseAuthSnapshot(rawAuth);
+    const currentEmail = getSnapshotEmail(currentSnapshot);
+    if (!currentEmail) {
+      debugLog?.("switch: current auth email unavailable");
+      return false;
+    }
+
+    const sameAuthMode = runtimeAccount.auth_mode === currentSnapshot.auth_mode;
+    const sameEmail = runtimeAccount.email.trim().toLowerCase() === currentEmail.trim().toLowerCase();
+    if (!sameAuthMode || !sameEmail) {
+      debugLog?.("switch: managed Desktop runtime differs from target auth");
+      return false;
+    }
+
+    debugLog?.("switch: skipping managed Desktop refresh because runtime already matches target auth");
+    return true;
+  } catch (error) {
+    debugLog?.(`switch: managed Desktop refresh skip check failed: ${(error as Error).message}`);
+    return false;
   }
 }
 
@@ -1115,13 +1169,20 @@ export async function runCli(
           try {
             const switched = await store.switchAccount(name);
             switched.warnings = stripManagedDesktopWarning(switched.warnings);
-            await refreshManagedDesktopAfterSwitch(switched.warnings, desktopLauncher, {
-              force: effectiveForce,
-              signal: interruptSignal,
-              statusStream: streams.stderr,
-              statusDelayMs: managedDesktopWaitStatusDelayMs,
-              statusIntervalMs: managedDesktopWaitStatusIntervalMs,
-            });
+            const skipDesktopRefresh = await shouldSkipManagedDesktopRefresh(
+              store,
+              desktopLauncher,
+              debugLog,
+            );
+            if (!skipDesktopRefresh) {
+              await refreshManagedDesktopAfterSwitch(switched.warnings, desktopLauncher, {
+                force: effectiveForce,
+                signal: interruptSignal,
+                statusStream: streams.stderr,
+                statusDelayMs: managedDesktopWaitStatusDelayMs,
+                statusIntervalMs: managedDesktopWaitStatusIntervalMs,
+              });
+            }
             return switched;
           } finally {
             await lock.release();
@@ -1628,6 +1689,7 @@ export async function runCli(
         let lastSwitchStartedAt = 0;
         let lastQuotaUpdateLine: string | null = null;
         let currentWatchAccountLabel = await resolveWatchAccountLabel(store);
+        const watchHistoryStore = createWatchHistoryStore(store.paths.codexTeamDir);
         const WATCH_SWITCH_COOLDOWN_MS = 5_000;
 
         debugLog("watch: starting managed desktop quota watch");
@@ -1639,6 +1701,34 @@ export async function runCli(
           shouldAutoSwitch: boolean;
         }) => {
           const quota = options.quota;
+          if (quota?.refresh_status === "ok") {
+            try {
+              await appendWatchQuotaHistory(watchHistoryStore, {
+                recordedAt: quota.fetched_at ?? new Date().toISOString(),
+                accountName: currentWatchAccountLabel,
+                accountId: quota.account_id,
+                identity: quota.identity,
+                planType: quota.plan_type,
+                available: quota.available,
+                fiveHour: quota.five_hour
+                  ? {
+                      usedPercent: quota.five_hour.used_percent,
+                      windowSeconds: quota.five_hour.window_seconds,
+                      resetAt: quota.five_hour.reset_at ?? null,
+                    }
+                  : null,
+                oneWeek: quota.one_week
+                  ? {
+                      usedPercent: quota.one_week.used_percent,
+                      windowSeconds: quota.one_week.window_seconds,
+                      resetAt: quota.one_week.reset_at ?? null,
+                    }
+                  : null,
+              });
+            } catch (error) {
+              debugLog(`watch: failed to persist watch history: ${(error as Error).message}`);
+            }
+          }
           const quotaUpdateLine = describeWatchQuotaEvent(currentWatchAccountLabel, quota);
           if (quotaUpdateLine !== lastQuotaUpdateLine) {
             streams.stdout.write(`${formatWatchLogLine(quotaUpdateLine)}\n`);

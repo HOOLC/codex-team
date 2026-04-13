@@ -12,7 +12,7 @@ export type { CodexDirectClient } from "./codex-direct-client.js";
 
 const execFile = promisify(execFileCallback);
 
-export const DEFAULT_CODEX_REMOTE_DEBUGGING_PORT = 9223;
+export const DEFAULT_CODEX_REMOTE_DEBUGGING_PORT = 39223;
 const DEFAULT_CODEX_DESKTOP_STATE_PATH = join(
   homedir(),
   ".codex-team",
@@ -22,14 +22,36 @@ const CODEX_BINARY_SUFFIX = "/Contents/MacOS/Codex";
 const CODEX_APP_NAME = "Codex";
 const CODEX_LOCAL_HOST_ID = "local";
 export const DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS = 120_000;
-const CODEX_APP_SERVER_RESTART_EXPRESSION =
-  'window.electronBridge.sendMessageFromView({ type: "codex-app-server-restart", hostId: "local" })';
 const CODEXM_WATCH_CONSOLE_PREFIX = "__codexm_watch__";
 const DEVTOOLS_REQUEST_TIMEOUT_MS = 5_000;
 const DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS = 10_000;
 const DEFAULT_WATCH_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_WATCH_HEALTH_CHECK_INTERVAL_MS = 5_000;
 const DEFAULT_WATCH_HEALTH_CHECK_TIMEOUT_MS = 3_000;
+
+function buildCodexDesktopGuardExpression(): string {
+  return `
+  const expectedHref = ${JSON.stringify(`app://-/index.html?hostId=${CODEX_LOCAL_HOST_ID}`)};
+  const actualHref =
+    typeof window !== "undefined" &&
+    window.location &&
+    typeof window.location.href === "string"
+      ? window.location.href
+      : null;
+  const hasBridge =
+    typeof window !== "undefined" &&
+    !!window.electronBridge &&
+    typeof window.electronBridge.sendMessageFromView === "function";
+
+  if (actualHref !== expectedHref || !hasBridge) {
+    throw new Error("Connected debug console target is not Codex Desktop.");
+  }
+`;
+}
+
+const CODEX_APP_SERVER_RESTART_EXPRESSION = `(async () => {${buildCodexDesktopGuardExpression()}
+  await window.electronBridge.sendMessageFromView({ type: "codex-app-server-restart", hostId: "local" });
+})()`;
 
 export interface ExecFileLike {
   (
@@ -418,10 +440,34 @@ async function resolveLocalDevtoolsTarget(
   });
 
   if (!localTarget || !isNonEmptyString(localTarget.webSocketDebuggerUrl)) {
-    throw new Error("Could not find the local Codex Desktop devtools target.");
+    throw new Error("Current debug port is not connected to Codex Desktop.");
   }
 
   return localTarget.webSocketDebuggerUrl;
+}
+
+function extractDevtoolsExceptionMessage(result: Record<string, unknown> | null): string | null {
+  if (!result || !isRecord(result.exceptionDetails)) {
+    return null;
+  }
+
+  const exceptionDetails = result.exceptionDetails;
+  const exception = isRecord(exceptionDetails.exception) ? exceptionDetails.exception : null;
+  const description =
+    typeof exception?.description === "string" && exception.description.trim() !== ""
+      ? exception.description.trim()
+      : typeof exception?.value === "string" && exception.value.trim() !== ""
+        ? exception.value.trim()
+        : typeof exceptionDetails.text === "string" && exceptionDetails.text.trim() !== ""
+          ? exceptionDetails.text.trim()
+          : null;
+
+  if (!description) {
+    return null;
+  }
+
+  const firstLine = description.split("\n")[0]?.trim() ?? description;
+  return firstLine || null;
 }
 
 function normalizeBodySnippet(body: string | null): string | null {
@@ -464,6 +510,7 @@ function hasStructuredQuotaError(value: unknown, depth = 0): boolean {
 
 function buildManagedWatchProbeExpression(): string {
   return `(() => {
+  ${buildCodexDesktopGuardExpression()}
   const prefix = ${JSON.stringify(CODEXM_WATCH_CONSOLE_PREFIX)};
   const globalState = window.__codexmWatchState ?? { installed: false };
 
@@ -497,6 +544,7 @@ function buildManagedWatchProbeExpression(): string {
 
 function buildManagedCurrentQuotaExpression(): string {
   return `(async () => {
+  ${buildCodexDesktopGuardExpression()}
   const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
   const rpcTimeoutMs = 5000;
 
@@ -604,6 +652,7 @@ function buildManagedCurrentQuotaExpression(): string {
 
 function buildManagedCurrentAccountExpression(): string {
   return `(async () => {
+  ${buildCodexDesktopGuardExpression()}
   const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
   const rpcTimeoutMs = ${DEVTOOLS_REQUEST_TIMEOUT_MS};
   const pendingResponses = new Map();
@@ -1102,7 +1151,12 @@ async function evaluateDevtoolsExpression(
       const result = isRecord(payload.result) ? payload.result : null;
       if (result && isRecord(result.exceptionDetails)) {
         cleanup();
-        reject(new Error("Codex Desktop rejected the app-server restart request."));
+        reject(
+          new Error(
+            extractDevtoolsExceptionMessage(result)
+              ?? "Codex Desktop rejected the app-server restart request.",
+          ),
+        );
         return;
       }
 
@@ -1191,7 +1245,11 @@ async function evaluateDevtoolsExpressionWithResult<T>(
 
       if (isRecord(result.exceptionDetails)) {
         cleanup();
-        reject(new Error("Codex Desktop rejected the devtools request."));
+        reject(
+          new Error(
+            extractDevtoolsExceptionMessage(result) ?? "Codex Desktop rejected the devtools request.",
+          ),
+        );
         return;
       }
 
@@ -1219,6 +1277,7 @@ function buildManagedSwitchExpression(options?: {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS;
 
   return `(async () => {
+  ${buildCodexDesktopGuardExpression()}
   const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
   const force = ${JSON.stringify(force)};
   const timeoutMs = ${JSON.stringify(timeoutMs)};

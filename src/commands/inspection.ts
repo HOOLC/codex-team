@@ -11,6 +11,7 @@ import type {
   RuntimeReadSource,
 } from "../codex-desktop-launch.js";
 import {
+  computeAvailability,
   describeCurrentUsageSummary,
   describeQuotaRefresh,
   toCliQuotaRefreshResult,
@@ -19,6 +20,11 @@ import {
   type CliQuotaSummary,
 } from "../cli/quota.js";
 import { writeJson } from "../cli/output.js";
+import {
+  computeWatchHistoryEta,
+  createWatchHistoryStore,
+  type WatchHistoryEtaContext,
+} from "../watch-history.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -74,6 +80,50 @@ interface CliDoctorReport {
 }
 
 type DebugLogger = (message: string) => void;
+
+function toWatchEtaTarget(account: Awaited<ReturnType<AccountStore["refreshAllQuotas"]>>["successes"][number]) {
+  return {
+    plan_type: account.plan_type,
+    available: computeAvailability(account),
+    five_hour: account.five_hour
+      ? {
+          used_percent: account.five_hour.used_percent,
+          window_seconds: account.five_hour.window_seconds,
+          reset_at: account.five_hour.reset_at ?? null,
+        }
+      : null,
+    one_week: account.one_week
+      ? {
+          used_percent: account.one_week.used_percent,
+          window_seconds: account.one_week.window_seconds,
+          reset_at: account.one_week.reset_at ?? null,
+        }
+      : null,
+  };
+}
+
+function toJsonEta(eta: WatchHistoryEtaContext) {
+  const rate = eta.rate_1w_units_per_hour;
+  const eta5hEq1wHours =
+    eta.status === "ok" && rate && rate > 0 && typeof eta.remaining_5h_eq_1w === "number"
+      ? Number((eta.remaining_5h_eq_1w / rate).toFixed(2))
+      : null;
+  const eta1wHours =
+    eta.status === "ok" && rate && rate > 0 && typeof eta.remaining_1w === "number"
+      ? Number((eta.remaining_1w / rate).toFixed(2))
+      : null;
+
+  return {
+    status: eta.status,
+    hours: eta.etaHours,
+    bottleneck: eta.bottleneck,
+    eta_5h_eq_1w_hours: eta5hEq1wHours,
+    eta_1w_hours: eta1wHours,
+    rate_1w_units_per_hour: eta.rate_1w_units_per_hour,
+    remaining_5h_eq_1w: eta.remaining_5h_eq_1w,
+    remaining_1w: eta.remaining_1w,
+  };
+}
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -596,8 +646,17 @@ export async function handleListCommand(options: {
   const result = await options.store.refreshAllQuotas(options.targetName);
   const current = await options.store.getCurrentStatus();
   const currentAccounts = new Set(current.matched_accounts);
+  const now = new Date();
+  const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
+  const watchHistory = await watchHistoryStore.read(now);
+  const etaByName = new Map(
+    result.successes.map((account) => [
+      account.name,
+      computeWatchHistoryEta(watchHistory, toWatchEtaTarget(account), now),
+    ] as const),
+  );
   options.debugLog(
-    `list: target=${options.targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} current_matches=${current.matched_accounts.length}`,
+    `list: target=${options.targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
   );
   if (options.json) {
     writeJson(options.stdout, {
@@ -606,10 +665,16 @@ export async function handleListCommand(options: {
       successes: result.successes.map((account) => ({
         ...toCliQuotaSummary(account),
         is_current: currentAccounts.has(account.name),
+        eta: toJsonEta(
+          etaByName.get(account.name)
+            ?? computeWatchHistoryEta([], toWatchEtaTarget(account), now),
+        ),
       })),
     });
   } else {
-    options.stdout.write(`${describeQuotaRefresh(result, current, { verbose: options.verbose })}\n`);
+    options.stdout.write(
+      `${describeQuotaRefresh(result, current, { verbose: options.verbose, etaByName })}\n`,
+    );
   }
   return result.failures.length === 0 ? 0 : 1;
 }

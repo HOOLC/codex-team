@@ -166,6 +166,17 @@ export function getSnapshotUserId(snapshot: AuthSnapshot): string | undefined {
   return undefined;
 }
 
+export function getSnapshotEmail(snapshot: AuthSnapshot): string | undefined {
+  for (const payload of extractSnapshotJwtPayloads(snapshot)) {
+    const email = extractStringClaim(payload, "email");
+    if (email) {
+      return email;
+    }
+  }
+
+  return undefined;
+}
+
 function fingerprintApiKey(apiKey: string): string {
   return createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
 }

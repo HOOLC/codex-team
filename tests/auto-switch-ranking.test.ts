@@ -50,26 +50,26 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([singleWindowAccount, twoWindowAccount])).toMatchObject([
       {
         name: "alpha",
-        current_score: 26.67,
-        score_1h: 26.67,
+        current_score: 10,
+        score_1h: 10,
         remain_5h: 80,
         remain_1w: null,
-        remain_5h_in_1w_units: 26.67,
+        remain_5h_in_1w_units: 10,
         projected_5h_1h: 80,
-        projected_5h_in_1w_units_1h: 26.67,
-        five_hour_windows_per_week: 3,
+        projected_5h_in_1w_units_1h: 10,
+        five_hour_windows_per_week: 8,
       },
       {
         name: "beta",
-        current_score: 13.33,
-        score_1h: 13.33,
+        current_score: 5,
+        score_1h: 5,
         remain_5h: 40,
         remain_1w: 30,
-        remain_5h_in_1w_units: 13.33,
+        remain_5h_in_1w_units: 5,
         projected_5h_1h: 40,
-        projected_5h_in_1w_units_1h: 13.33,
+        projected_5h_in_1w_units_1h: 5,
         projected_1w_1h: 30,
-        five_hour_windows_per_week: 3,
+        five_hour_windows_per_week: 8,
       },
     ]);
   });
@@ -124,13 +124,13 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([plusAccount, teamAccount])).toMatchObject([
       {
         name: "plus",
-        current_score: 26.67,
-        score_1h: 26.67,
+        current_score: 10,
+        score_1h: 10,
         remain_1w: 50,
-        remain_5h_in_1w_units: 26.67,
-        projected_5h_in_1w_units_1h: 26.67,
+        remain_5h_in_1w_units: 10,
+        projected_5h_in_1w_units_1h: 10,
         projected_1w_1h: 50,
-        five_hour_windows_per_week: 3,
+        five_hour_windows_per_week: 8,
       },
       {
         name: "team",
@@ -140,6 +140,77 @@ describe("auto switch ranking", () => {
         remain_5h_in_1w_units: 10,
         projected_5h_in_1w_units_1h: 10,
         projected_1w_1h: 50,
+        five_hour_windows_per_week: 8,
+      },
+    ]);
+  });
+
+  test("normalizes pro and prolite against plus capacity profiles", () => {
+    const plusAccount: AccountQuotaSummary = {
+      name: "plus",
+      account_id: "acct-plus",
+      user_id: null,
+      identity: "acct-plus",
+      plan_type: "plus",
+      credits_balance: 5,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 50,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+    };
+
+    const proliteAccount: AccountQuotaSummary = {
+      ...plusAccount,
+      name: "prolite",
+      account_id: "acct-prolite",
+      identity: "acct-prolite",
+      plan_type: "prolite",
+    };
+
+    const proAccount: AccountQuotaSummary = {
+      ...plusAccount,
+      name: "pro",
+      account_id: "acct-pro",
+      identity: "acct-pro",
+      plan_type: "pro",
+    };
+
+    expect(rankAutoSwitchCandidates([plusAccount, proliteAccount, proAccount])).toMatchObject([
+      {
+        name: "pro",
+        current_score: 100,
+        score_1h: 100,
+        remain_5h: 80,
+        remain_5h_in_1w_units: 100,
+        remain_1w: 50,
+        five_hour_windows_per_week: 6.66,
+      },
+      {
+        name: "prolite",
+        current_score: 50,
+        score_1h: 50,
+        remain_5h: 80,
+        remain_5h_in_1w_units: 50,
+        remain_1w: 50,
+        five_hour_windows_per_week: 6.66,
+      },
+      {
+        name: "plus",
+        current_score: 10,
+        score_1h: 10,
+        remain_5h: 80,
+        remain_5h_in_1w_units: 10,
+        remain_1w: 50,
         five_hour_windows_per_week: 8,
       },
     ]);
@@ -188,13 +259,13 @@ describe("auto switch ranking", () => {
       {
         name: "early-reset",
         remain_5h: 60,
-        current_score: 20,
+        current_score: 7.5,
         projected_5h_1h: 96.67,
       },
       {
         name: "late-reset",
         remain_5h: 65,
-        current_score: 21.67,
+        current_score: 8.13,
         projected_5h_1h: 65,
       },
     ]);
@@ -232,7 +303,7 @@ describe("auto switch ranking", () => {
       error_message: null,
       unlimited: false,
       five_hour: {
-        used_percent: 70,
+        used_percent: 50,
         window_seconds: 18_000,
         reset_at: "2026-04-08T04:30:00.000Z",
       },
@@ -242,13 +313,13 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([nearResetButEmpty, modestButAvailable])).toMatchObject([
       {
         name: "modest-available",
-        current_score: 10,
-        score_1h: 10,
+        current_score: 6.25,
+        score_1h: 6.25,
       },
       {
         name: "near-reset-empty",
         current_score: 0,
-        score_1h: 30.56,
+        score_1h: 11.46,
       },
     ]);
   });

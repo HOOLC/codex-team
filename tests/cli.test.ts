@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -71,6 +71,80 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(1);
       expect(stderr.read()).toContain("Detached CLI watch is not yet supported");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch writes quota history records when runtime quota changes", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-watch-history");
+      await store.saveCurrentAccount("plus-main");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 0,
+            fetched_at: "2026-04-10T10:00:00.000Z",
+            unlimited: false,
+            five_hour: {
+              used_percent: 10,
+              window_seconds: 18_000,
+              reset_at: "2026-04-10T14:00:00.000Z",
+            },
+            one_week: {
+              used_percent: 3,
+              window_seconds: 604_800,
+              reset_at: "2026-04-16T10:00:00.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "req-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "quota_dirty",
+              bodySnippet: null,
+              shouldAutoSwitch: false,
+              quota: {
+                plan_type: "plus",
+                credits_balance: 0,
+                fetched_at: "2026-04-10T10:15:00.000Z",
+                unlimited: false,
+                five_hour: {
+                  used_percent: 20,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-10T14:00:00.000Z",
+                },
+                one_week: {
+                  used_percent: 6,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-16T10:00:00.000Z",
+                },
+              },
+            });
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      const historyPath = join(homeDir, ".codex-team", "watch-quota-history.jsonl");
+      const history = await readFile(historyPath, "utf8");
+      expect(history).toContain("\"source\":\"watch\"");
+      expect(history).toContain("\"account_name\":\"plus-main\"");
+      expect(history).toContain("\"used_percent\":10");
+      expect(history).toContain("\"used_percent\":20");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1044,6 +1118,92 @@ describe("CLI", () => {
     }
   });
 
+  test("switch skips managed Desktop refresh when the runtime already matches the target account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-same-runtime");
+      await runCli(["save", "switch-same-runtime", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let applyManagedSwitchCalls = 0;
+
+      const exitCode = await runCli(["switch", "switch-same-runtime"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "acct-switch-same-runtime@example.com",
+            plan_type: "plus",
+            requires_openai_auth: false,
+          }),
+          applyManagedSwitch: async () => {
+            applyManagedSwitchCalls += 1;
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(applyManagedSwitchCalls).toBe(0);
+      expect(stdout.read()).toContain('Switched to "switch-same-runtime"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch still refreshes managed Desktop when the runtime account differs from the target account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-runtime-drift");
+      await runCli(["save", "switch-runtime-drift", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const calls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+
+      const exitCode = await runCli(["switch", "switch-runtime-drift"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "other-account@example.com",
+            plan_type: "plus",
+            requires_openai_auth: false,
+          }),
+          applyManagedSwitch: async (options) => {
+            calls.push({ ...options });
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual([{ force: false, timeoutMs: 120_000 }]);
+      expect(stdout.read()).toContain('Switched to "switch-runtime-drift"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("switch reports wait progress while refreshing a managed Desktop session", async () => {
     const homeDir = await createTempHome();
 
@@ -1193,6 +1353,96 @@ describe("CLI", () => {
       expect(exitCode).toBe(0);
       expect(calls).toEqual([{ force: true, timeoutMs: 120_000 }]);
       expect(stdout.read()).toContain('Switched to "switch-force"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch --force falls back to force-kill when managed Desktop devtools times out", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-force-timeout");
+      await runCli(["save", "switch-force-timeout", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const applyCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+      const quitCalls: Array<{ force?: boolean } | undefined> = [];
+
+      const exitCode = await runCli(["switch", "switch-force-timeout", "--force", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async (options) => {
+            applyCalls.push({ ...options });
+            throw new Error("Timed out waiting for Codex Desktop devtools response.");
+          },
+          quitRunningApps: async (options) => {
+            quitCalls.push(options);
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(applyCalls).toEqual([{ force: true, timeoutMs: 120_000 }]);
+      expect(quitCalls).toEqual([{ force: true }]);
+      const payload = JSON.parse(stdout.read());
+      expect(payload.ok).toBe(true);
+      expect(payload.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("Force-killed the running codexm-managed Codex Desktop session"),
+        ]),
+      );
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch --force falls back to force-kill when managed Desktop devtools target info is unavailable", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-switch-force-target");
+      await runCli(["save", "switch-force-target", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const quitCalls: Array<{ force?: boolean } | undefined> = [];
+
+      const exitCode = await runCli(["switch", "switch-force-target", "--force"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async () => {
+            throw new Error("Could not find the local Codex Desktop devtools target.");
+          },
+          quitRunningApps: async (options) => {
+            quitCalls.push(options);
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(quitCalls).toEqual([{ force: true }]);
+      expect(stdout.read()).toContain('Switched to "switch-force-target"');
+      expect(stdout.read()).toContain(
+        "Warning: Force-killed the running codexm-managed Codex Desktop session",
+      );
       expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
@@ -1508,7 +1758,7 @@ describe("CLI", () => {
         successes: [
           {
             name: "alpha",
-            available: "almost unavailable",
+            available: "available",
           },
           {
             name: "beta",
@@ -1648,19 +1898,19 @@ describe("CLI", () => {
         mode: "auto",
         dry_run: true,
         selected: {
-          name: "alpha",
+          name: "beta",
           available: "available",
-          current_score: 13.33,
-          remain_5h: 40,
-          remain_1w: 30,
-          remain_5h_in_1w_units: 13.33,
-          five_hour_windows_per_week: 3,
+          current_score: 6.25,
+          remain_5h: 50,
+          remain_1w: 20,
+          remain_5h_in_1w_units: 6.25,
+          five_hour_windows_per_week: 8,
         },
       });
-      expect(dryRunPayload.selected.score_1h).toBeCloseTo(30, 2);
-      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(91.67, 1);
-      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(30.56, 2);
-      expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(30, 2);
+      expect(dryRunPayload.selected.score_1h).toBeCloseTo(11.63, 2);
+      expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(93.06, 1);
+      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(11.63, 2);
+      expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(20, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-gamma");
 
@@ -1682,28 +1932,150 @@ describe("CLI", () => {
         action: "switch",
         mode: "auto",
         account: {
-          name: "alpha",
-          account_id: "acct-auto-alpha",
+          name: "beta",
+          account_id: "acct-auto-beta",
         },
         selected: {
-          name: "alpha",
-          current_score: 13.33,
-          five_hour_windows_per_week: 3,
+          name: "beta",
+          current_score: 6.25,
+          five_hour_windows_per_week: 8,
         },
         quota: {
           available: "available",
           refresh_status: "ok",
           five_hour: {
-            used_percent: 60,
+            used_percent: 50,
           },
           one_week: {
-            used_percent: 70,
+            used_percent: 80,
           },
         },
       });
-      expect(switchPayload.selected.score_1h).toBeCloseTo(30, 2);
+      expect(switchPayload.selected.score_1h).toBeCloseTo(11.63, 2);
 
-      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-alpha");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-beta");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch --auto --force falls back to force-kill when managed Desktop devtools refresh fails", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const headers = new Headers(init?.headers);
+          const accountId = headers.get("ChatGPT-Account-Id");
+
+          if (accountId === "acct-auto-force-best") {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 20,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 500,
+                  reset_at: nowSeconds + 500,
+                },
+                secondary_window: {
+                  used_percent: 30,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 6_000,
+                  reset_at: nowSeconds + 6_000,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "9",
+              },
+            });
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 95,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 500,
+                reset_at: nowSeconds + 500,
+              },
+              secondary_window: {
+                used_percent: 90,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 6_000,
+                reset_at: nowSeconds + 6_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "1",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auto-force-current");
+      await runCli(["save", "currentish", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auto-force-best");
+      await runCli(["save", "best", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auto-force-current");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const quitCalls: Array<{ force?: boolean } | undefined> = [];
+
+      const exitCode = await runCli(["switch", "--auto", "--force", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async () => {
+            throw new Error("Failed to communicate with Codex Desktop devtools.");
+          },
+          quitRunningApps: async (options) => {
+            quitCalls.push(options);
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(quitCalls).toEqual([{ force: true }]);
+      const payload = JSON.parse(stdout.read());
+      expect(payload).toMatchObject({
+        ok: true,
+        action: "switch",
+        mode: "auto",
+        account: {
+          name: "best",
+          account_id: "acct-auto-force-best",
+        },
+      });
+      expect(payload.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("Force-killed the running codexm-managed Codex Desktop session"),
+        ]),
+      );
+      expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
     }

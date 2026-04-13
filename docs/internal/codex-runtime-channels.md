@@ -122,6 +122,7 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 - 需要知道 Desktop 当前 loaded threads 里是否还有 active thread
 - 需要在受管 Desktop 上发送 `codex-app-server-restart`
+- 如果受管 Desktop 当前 runtime 已经是目标账号，则跳过这次 refresh，不做无意义 restart
 
 这两个动作都是 Desktop 运行态动作，不是一次性读取动作。
 

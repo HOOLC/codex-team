@@ -97,13 +97,14 @@ Use `--json` for machine-readable output and `--debug` for stderr diagnostics.
 ### Account management
 
 - `codexm add <name>` creates a new managed account without changing the active `~/.codex/auth.json`. By default it uses the built-in browser ChatGPT login flow; add `--device-auth` for device-code login on remote/headless machines. `--with-api-key` reads an API key from stdin, for example `printenv OPENAI_API_KEY | codexm add work-api --with-api-key`. On WSL, the browser opening chain is `wslview` → `powershell.exe Start-Process` → `xdg-open`.
-- `codexm current` shows the active account. It uses the running managed Desktop session when available, falls back to local `auth.json`, and warns if those differ. Add `--refresh` to include current quota usage.
-- `codexm list` refreshes quota data before printing, shows the current managed account above the table, marks current rows with `*`, and includes top-level `current` plus per-row `is_current` fields in JSON mode. The default table shows normalized `CURRENT SCORE`; add `--verbose` for normalized `1H SCORE`, raw 5H/1W breakdown, and plan ratio details.
+- `codexm current` shows the active account. Add `--refresh` to include current quota usage.
+- `codexm list` refreshes saved accounts before printing, shows which row is current with `*`, and summarizes availability, score, ETA, usage, and reset times. Add `--verbose` for more quota detail. In the default table, unavailable accounts use a red row background, low remaining quota values use bold yellow/red text, and reset times within one hour get a cyan `(Xm)` suffix.
 
 ### Desktop mode (macOS)
 
 - `codexm launch` starts Codex Desktop with current auth, switches first when you pass a saved account name, or picks the best saved account with `codexm launch --auto`. Add `--watch` to keep a detached watcher running after launch. Run `codexm launch` from an external terminal if you need to restart Desktop.
-- `codexm switch`, `codexm switch --auto`, and auth-changing `codexm launch` flows share a cross-process lock under `~/.codex-team/locks/switch.lock` so only one auth-changing operation runs at a time. If the lock is busy, the CLI reports the lock path and the owning command; `watch` skips that cycle instead of queueing behind an in-flight switch.
+- `codexm switch`, `codexm switch --auto`, and auth-changing `codexm launch` only let one auth-changing operation run at a time. If another switch is already in progress, the CLI tells you and asks you to retry later.
+- `codexm switch --force` and `codexm switch --auto --force` try to apply the auth change to the running managed Desktop immediately. If that fails, codexm closes the managed Desktop so it does not keep running on the old account.
 - `codexm watch` (with Desktop) watches the managed Codex Desktop session, prints quota updates, and by default auto-switches when the active account is exhausted. Use `--no-auto-switch` for read-only watching. `--detach` runs it in the background; use `--status` and `--stop` to inspect or stop it.
 
 ### CLI mode (WSL / Linux / any platform)

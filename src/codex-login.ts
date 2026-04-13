@@ -1,6 +1,5 @@
 import { randomBytes, createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
 import type { AuthSnapshot } from "./auth-snapshot.js";
@@ -84,23 +83,7 @@ function buildAuthorizeUrl(state: string, redirectUri: string, pkce: PkceCodes):
   return `${CODEX_AUTH_BASE_URL}/oauth/authorize?${params.toString()}`;
 }
 
-let _isWsl: boolean | null = null;
-async function detectWsl(): Promise<boolean> {
-  if (_isWsl !== null) return _isWsl;
-  if (process.platform !== "linux") {
-    _isWsl = false;
-    return false;
-  }
-  try {
-    const version = await readFile("/proc/version", "utf-8");
-    _isWsl = /microsoft|wsl/i.test(version);
-  } catch {
-    _isWsl = false;
-  }
-  return _isWsl;
-}
-
-function openBrowserSync(url: string): void {
+function openBrowser(url: string): void {
   const command =
     process.platform === "darwin"
       ? "open"
@@ -114,46 +97,6 @@ function openBrowserSync(url: string): void {
   });
 
   child.unref();
-}
-
-function openBrowser(url: string): void {
-  // On WSL, xdg-open often doesn't work — prefer wslview or powershell.exe
-  void detectWsl().then((isWsl) => {
-    if (!isWsl) {
-      openBrowserSync(url);
-      return;
-    }
-
-    // WSL: try wslview first (from wslu package), then powershell.exe
-    try {
-      const child = spawn("wslview", [url], {
-        detached: true,
-        stdio: "ignore",
-      });
-      child.unref();
-      child.on("error", () => {
-        // wslview not available, try powershell.exe
-        try {
-          const psChild = spawn("powershell.exe", ["-Command", `Start-Process "${url}"`], {
-            detached: true,
-            stdio: "ignore",
-          });
-          psChild.unref();
-          psChild.on("error", () => {
-            // Last resort: try xdg-open anyway
-            openBrowserSync(url);
-          });
-        } catch {
-          openBrowserSync(url);
-        }
-      });
-    } catch {
-      openBrowserSync(url);
-    }
-  }).catch(() => {
-    // detectWsl failed, fall back to sync
-    openBrowserSync(url);
-  });
 }
 
 function decodeJwtPayload(jwt: string): Record<string, unknown> {
