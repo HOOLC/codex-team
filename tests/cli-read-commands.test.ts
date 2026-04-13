@@ -1035,6 +1035,104 @@ wire_api = "responses"
     }
   });
 
+  test("list text output follows current score ranking without pinning the current account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const primaryUsedPercent =
+            accountId === "acct-cli-rank-alpha"
+              ? 76
+              : accountId === "acct-cli-rank-beta"
+                ? 20
+                : 40;
+          const secondaryUsedPercent =
+            accountId === "acct-cli-rank-alpha"
+              ? 50
+              : accountId === "acct-cli-rank-beta"
+                ? 20
+                : 30;
+          const primaryResetAfterSeconds =
+            accountId === "acct-cli-rank-alpha" ? 600 : 1_800;
+          const primaryResetAt = nowSeconds + primaryResetAfterSeconds;
+          const secondaryResetAt = nowSeconds + 86_400;
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: primaryUsedPercent,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: primaryResetAfterSeconds,
+                reset_at: primaryResetAt,
+              },
+              secondary_window: {
+                used_percent: secondaryUsedPercent,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 86_400,
+                reset_at: secondaryResetAt,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-rank-alpha");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-rank-beta");
+      await runCli(["save", "beta", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-rank-gamma");
+      await runCli(["save", "gamma", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 5);
+
+      expect(dataRows[0]).toContain("beta");
+      expect(dataRows[1]).toContain("* gamma");
+      expect(dataRows[2]).toContain("alpha");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("list text output uses unified thresholds for low remaining quota signals", async () => {
     const homeDir = await createTempHome();
 

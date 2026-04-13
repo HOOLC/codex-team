@@ -525,6 +525,51 @@ export function rankAutoSwitchCandidates(accounts: AccountQuotaSummary[]): AutoS
     });
 }
 
+function rankListCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidate[] {
+  return accounts
+    .map(toAutoSwitchCandidate)
+    .filter((candidate): candidate is AutoSwitchCandidate => candidate !== null)
+    .sort((left, right) => {
+      if (right.current_score !== left.current_score) {
+        return right.current_score - left.current_score;
+      }
+
+      const remain5hOrder = compareNullableNumberDescending(
+        left.remain_5h_in_1w_units,
+        right.remain_5h_in_1w_units,
+      );
+      if (remain5hOrder !== 0) {
+        return remain5hOrder;
+      }
+
+      const remain1wOrder = compareNullableNumberDescending(
+        left.remain_1w_in_plus_units,
+        right.remain_1w_in_plus_units,
+      );
+      if (remain1wOrder !== 0) {
+        return remain1wOrder;
+      }
+
+      const fiveHourResetOrder = compareNullableDateAscending(
+        left.five_hour_reset_at,
+        right.five_hour_reset_at,
+      );
+      if (fiveHourResetOrder !== 0) {
+        return fiveHourResetOrder;
+      }
+
+      const oneWeekResetOrder = compareNullableDateAscending(
+        left.one_week_reset_at,
+        right.one_week_reset_at,
+      );
+      if (oneWeekResetOrder !== 0) {
+        return oneWeekResetOrder;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+}
+
 function formatRemainingPercent(value: number | null): string {
   return value === null ? "-" : `${value}%`;
 }
@@ -664,10 +709,37 @@ function describeQuotaAccounts(
   }
 
   const currentAccounts = new Set(currentStatus.matched_accounts);
+  const rankedCandidates = rankListCandidates(accounts);
   const autoSwitchCandidates = new Map(
-    rankAutoSwitchCandidates(accounts).map((candidate) => [candidate.name, candidate] as const),
+    accounts
+      .map(toAutoSwitchCandidate)
+      .filter((candidate): candidate is AutoSwitchCandidate => candidate !== null)
+      .map((candidate) => [candidate.name, candidate] as const),
   );
-  const rows = accounts.map((account) => {
+  const originalOrder = new Map(accounts.map((account, index) => [account.name, index] as const));
+  const rankedOrder = new Map(
+    rankedCandidates.map((candidate, index) => [candidate.name, index] as const),
+  );
+  const orderedAccounts = [...accounts].sort((left, right) => {
+    const leftRank = rankedOrder.get(left.name);
+    const rightRank = rankedOrder.get(right.name);
+
+    if (leftRank !== undefined && rightRank !== undefined) {
+      return leftRank - rightRank;
+    }
+
+    if (leftRank !== undefined) {
+      return -1;
+    }
+
+    if (rightRank !== undefined) {
+      return 1;
+    }
+
+    return (originalOrder.get(left.name) ?? 0) - (originalOrder.get(right.name) ?? 0);
+  });
+
+  const rows = orderedAccounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
     const availability = computeAvailability(account);
