@@ -810,7 +810,7 @@ function formatEtaSummary(eta: QuotaEtaSummary | null): string {
     case "idle":
       return "idle";
     case "unavailable":
-      return "unavailable";
+      return "-";
     case "insufficient_history":
     default:
       return "-";
@@ -827,8 +827,8 @@ export function describeAutoSwitchSelection(
     dryRun
       ? `Best account: "${candidate.name}" (${maskAccountId(candidate.identity)}).`
       : `Auto-switched to "${candidate.name}" (${maskAccountId(candidate.identity)}).`,
-    `Plus score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
-    `1H plus score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -850,8 +850,8 @@ export function describeAutoSwitchSelection(
 export function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings: string[]): string {
   const lines = [
     `Current account "${candidate.name}" (${maskAccountId(candidate.identity)}) is already the best available account.`,
-    `Plus score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
-    `1H plus score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -868,7 +868,11 @@ export function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings:
 }
 
 function formatPoolValue(value: number | null): string {
-  return value === null ? "-" : String(roundToTwo(value));
+  if (value === null) {
+    return "-";
+  }
+
+  return String(roundToTwo(value / 100));
 }
 
 function buildListSummary(accounts: AccountQuotaSummary[]): {
@@ -921,7 +925,9 @@ function buildListSummary(accounts: AccountQuotaSummary[]): {
     .map(([plan, count]) => `${plan} x${count}`)
     .join(", ");
 
-  const summaryLine = `Accounts: ${usableCount}/${accounts.length} usable | ${oneWeekBlockedCount} blocked by 1W | ${fiveHourBlockedCount} blocked by 5H${
+  const blockedSegment = `blocked: 1W ${oneWeekBlockedCount}, 5H ${fiveHourBlockedCount}`;
+
+  const summaryLine = `Accounts: ${usableCount}/${accounts.length} usable | ${blockedSegment}${
     plansSegment ? ` | ${plansSegment}` : ""
   }`;
 
@@ -935,7 +941,7 @@ function buildListSummary(accounts: AccountQuotaSummary[]): {
   const poolLine =
     `Total: bottleneck ${formatPoolValue(bottleneckPool)} | ` +
     `5H->1W ${formatPoolValue(fiveHourPool)} | ` +
-    `1W ${formatPoolValue(oneWeekPool)} (plus 1W units)`;
+    `1W ${formatPoolValue(oneWeekPool)} (plus 1W)`;
 
   return {
     summaryLine,
@@ -1051,7 +1057,7 @@ function describeQuotaAccounts(
     { key: "name", label: "  NAME" },
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN" },
-    { key: "score", label: "PLUS SCORE" },
+    { key: "score", label: "SCORE" },
     { key: "eta", label: "ETA" },
     { key: "five_hour", label: "5H USED" },
     { key: "one_week", label: "1W USED" },
@@ -1066,7 +1072,7 @@ function describeQuotaAccounts(
       { key: "eta_1w", label: "ETA 1W" },
       { key: "rate_1w_units", label: "RATE 1W UNITS" },
       { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W" },
-      { key: "score_1h", label: "1H PLUS SCORE" },
+      { key: "score_1h", label: "1H SCORE" },
       { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H" },
       { key: "projected_1w_1h", label: "1W 1H" },
       { key: "five_hour_to_one_week_ratio", label: "5H:1W" },

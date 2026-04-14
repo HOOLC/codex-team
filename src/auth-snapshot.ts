@@ -403,11 +403,11 @@ export function parseSnapshotMeta(raw: string): SnapshotMeta {
 }
 
 export function maskAccountId(accountId: string): string {
-  if (accountId.length <= 10) {
+  if (accountId.length <= 8) {
     return accountId;
   }
 
-  return `${accountId.slice(0, 6)}...${accountId.slice(-4)}`;
+  return `${accountId.slice(0, 4)}...${accountId.slice(-3)}`;
 }
 
 export function decodeJwtPayload(token: string): Record<string, unknown> {
