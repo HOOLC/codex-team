@@ -4,12 +4,12 @@
 
 `codex-team` provides the `codexm` CLI for managing multiple Codex ChatGPT login snapshots on one machine.
 
-It is built for people who regularly switch between multiple Codex accounts and want a simpler workflow for:
+Use it when you regularly switch between multiple Codex accounts and want a simpler way to:
 
-- saving named account snapshots
-- switching the active `~/.codex/auth.json`
-- checking quota usage across saved accounts
-- automatically switching and restarting when the current account is exhausted
+- save named account snapshots
+- switch the active `~/.codex/auth.json`
+- check quota usage across saved accounts
+- automatically switch and restart when the current account is exhausted
 
 ## Platform support
 
@@ -37,11 +37,7 @@ codexm add team1
 codexm launch --watch
 ```
 
-Typical flow:
-
-- `codexm add <name>` opens the ChatGPT login flow and stores a named snapshot
-- `codexm launch --watch` starts Codex Desktop and keeps a background watcher running
-- when the active account is exhausted, the watcher can switch to the best saved account automatically
+This adds a couple of named snapshots, launches Codex Desktop, and keeps a watcher running in the background.
 
 ### Linux / WSL with Codex CLI
 
@@ -57,11 +53,25 @@ In another terminal, start Codex through the wrapper:
 codexm run -- --model o3
 ```
 
-Typical flow:
+`codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI and restarts it when `~/.codex/auth.json` changes, so a long-running CLI session can follow account switches automatically.
 
-- `codexm watch` monitors quota and can auto-switch accounts
-- `codexm run` wraps the `codex` CLI and restarts it when `~/.codex/auth.json` changes
-- this lets a long-running CLI session follow account switches automatically
+## Example output
+
+Redacted `codexm list` example:
+
+```text
+$ codexm list
+Current managed account: plus-main
+Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
+Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
+
+  NAME         IDENTITY   PLAN  SCORE  ETA   5H USED  1W USED  NEXT RESET
+* plus-main    acct...123 plus  72%    2.1h  58%      41%      04-14 18:30
+  team-backup  acct...987 team  64%    1.7h  61%      39%      04-14 19:10
+  plus-old     acct...456 plus  0%     -     43%      100%     04-16 09:00
+```
+
+This is the main command to use when deciding which account to switch to next.
 
 ## Core commands
 
@@ -95,18 +105,18 @@ Typical flow:
 
 Use `codexm --help` for the full command reference.
 
-## Notes
+## When should I use each command?
 
-- `codexm list` is the best overview command when choosing which account to use next.
+- `codexm list` is the best overview when choosing the next account.
 - `codexm watch` is the automation loop that reacts to quota exhaustion.
-- `codexm run` is mainly useful for CLI workflows where you want the running `codex` process to follow account switches.
-- Use `--json` for scripting and `--debug` for stderr diagnostics.
+- `codexm run` is useful in CLI workflows where the running `codex` process should follow account switches.
+- Use `--json` for scripting and `--debug` for diagnostics.
 
 For ChatGPT auth snapshots, `codex-team` can save and switch different users under the same ChatGPT account or workspace as separate managed entries when the local login tokens distinguish them.
 
 ## Shell completion
 
-Generate a shell completion script and install it with your shell's standard mechanism:
+Generate a completion script and install it with your shell's standard mechanism:
 
 ```bash
 mkdir -p ~/.zsh/completions

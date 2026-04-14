@@ -41,3 +41,8 @@ Detailed design notes live in `docs/internal/`.
 ## References
 
 - `docs/internal/codex-runtime-channels.md`
+
+## User Docs
+
+- Treat `README.md` and `README.zh-CN.md` as user-facing onboarding guides, not internal reference manuals.
+- Keep README sections short and task-oriented; prefer a few high-signal commands and examples over exhaustive command listings.

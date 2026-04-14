@@ -4,7 +4,7 @@
 
 `codex-team` 提供 `codexm` 命令，用来在一台机器上管理多个 Codex ChatGPT 登录快照。
 
-它适合经常在多个 Codex 账号之间切换的用户，主要解决这些问题：
+如果你经常在多个 Codex 账号之间切换，它可以帮你更简单地：
 
 - 保存多个命名账号快照
 - 切换当前生效的 `~/.codex/auth.json`
@@ -37,11 +37,7 @@ codexm add team1
 codexm launch --watch
 ```
 
-典型流程：
-
-- `codexm add <name>` 打开 ChatGPT 登录流程并保存一个命名快照
-- `codexm launch --watch` 启动 Codex Desktop，同时保持后台 watcher 运行
-- 当当前账号耗尽时，watcher 可以自动切换到最合适的已保存账号
+这会新增几个命名快照、启动 Codex Desktop，并在后台保持 watcher 运行。
 
 ### Linux / WSL + Codex CLI
 
@@ -57,11 +53,25 @@ codexm watch
 codexm run -- --model o3
 ```
 
-典型流程：
+`codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，在 `~/.codex/auth.json` 变化后自动重启，这样长时间运行的 CLI 会话就能自动跟随切号。
 
-- `codexm watch` 持续监控 quota，并在耗尽时自动切号
-- `codexm run` 包装 `codex` CLI，在 `~/.codex/auth.json` 变化后自动重启
-- 这样长时间运行的 CLI 会话可以自动跟随切号
+## 输出示例
+
+下面是一个脱敏后的 `codexm list` 示例：
+
+```text
+$ codexm list
+Current managed account: plus-main
+Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
+Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
+
+  NAME         IDENTITY   PLAN  SCORE  ETA   5H USED  1W USED  NEXT RESET
+* plus-main    acct...123 plus  72%    2.1h  58%      41%      04-14 18:30
+  team-backup  acct...987 team  64%    1.7h  61%      39%      04-14 19:10
+  plus-old     acct...456 plus  0%     -     43%      100%     04-16 09:00
+```
+
+如果你想判断“接下来该切到哪个账号”，优先看这个命令。
 
 ## 常用命令
 
@@ -95,7 +105,7 @@ codexm run -- --model o3
 
 完整命令参考请使用 `codexm --help`。
 
-## 使用建议
+## 什么时候该用哪个命令？
 
 - 如果你想判断“接下来该用哪个账号”，优先看 `codexm list`
 - 如果你想自动切号，使用 `codexm watch`
