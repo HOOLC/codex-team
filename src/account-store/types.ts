@@ -74,9 +74,11 @@ export interface UpdateAccountResult {
 export interface RefreshQuotaResult {
   account: ManagedAccount;
   quota: QuotaSnapshot;
+  warning?: string;
 }
 
 export interface RefreshAllQuotasResult {
   successes: AccountQuotaSummary[];
   failures: Array<{ name: string; error: string }>;
+  warnings: string[];
 }

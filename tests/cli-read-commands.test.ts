@@ -1218,6 +1218,82 @@ wire_api = "responses"
     }
   });
 
+  test("list falls back to recent cached quota and warns when fast refresh fails", async () => {
+    const homeDir = await createTempHome();
+    let fetchAttempts = 0;
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          fetchAttempts += 1;
+          throw new TypeError("fetch failed");
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-cached-main");
+      await runCli(["save", "cached-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-cached-backup");
+      await runCli(["save", "cached-backup", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const seededStore = createAccountStore(homeDir, {
+        fetchImpl: async (_input, init) => {
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: accountId === "acct-cli-cached-main" ? 40 : 70,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 300,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: accountId === "acct-cli-cached-main" ? 30 : 45,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await seededStore.refreshAllQuotas();
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["list"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(fetchAttempts).toBe(2);
+      expect(output).toContain("cached-main");
+      expect(output).toContain("cached-backup");
+      expect(output).toContain('Warning: cached-main using cached quota from');
+      expect(output).toContain('Warning: cached-backup using cached quota from');
+      expect(output).toContain("after refresh failed");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("list text output uses distinct score and usage color thresholds", async () => {
     const homeDir = await createTempHome();
 
@@ -1532,6 +1608,94 @@ wire_api = "responses"
 
       expect(dataRows[0]).toContain("five-hour-blocked-sooner");
       expect(dataRows[1]).toContain("weekly-blocked-later");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output uses recovery reset when multiple exhausted windows block the account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const bothBlockedFiveHourResetAt = 1_775_588_800;
+      const bothBlockedOneWeekResetAt = 1_775_617_600;
+      const fiveHourOnlyResetAt = 1_775_599_600;
+
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const isBothBlocked = accountId === "acct-cli-zero-score-both-blocked";
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 100,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: isBothBlocked ? 1_200 : 2_400,
+                reset_at: isBothBlocked ? bothBlockedFiveHourResetAt : fiveHourOnlyResetAt,
+              },
+              secondary_window: {
+                used_percent: isBothBlocked ? 100 : 50,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: isBothBlocked ? 30_000 : 86_400,
+                reset_at: isBothBlocked ? bothBlockedOneWeekResetAt : 1_775_671_200,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-both-blocked");
+      await runCli(["save", "both-blocked-later", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-five-hour-recovery");
+      await runCli(["save", "five-hour-only-sooner", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
+      const dataRows = tableLines.slice(2);
+      const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
+      const bothBlockedRow = dataRows.find((line) => line.includes("both-blocked-later"));
+
+      expect(dataRows[0]).toContain("five-hour-only-sooner");
+      expect(dataRows[1]).toContain("both-blocked-later");
+      expect(bothBlockedRow).toBeDefined();
+
+      const expectedRecoveryReset = dayjs
+        .unix(bothBlockedOneWeekResetAt)
+        .tz(dayjs.tz.guess())
+        .format("MM-DD HH:mm");
+      expect(bothBlockedRow?.indexOf(expectedRecoveryReset, nextResetColumn)).toBe(nextResetColumn);
     } finally {
       await cleanupTempHome(homeDir);
     }

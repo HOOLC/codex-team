@@ -283,10 +283,12 @@ export function toCliQuotaSummary(account: AccountQuotaSummary): CliQuotaSummary
 export function toCliQuotaRefreshResult(result: {
   successes: AccountQuotaSummary[];
   failures: Array<{ name: string; error: string }>;
+  warnings?: string[];
 }) {
   return {
     successes: result.successes.map(toCliQuotaSummary),
     failures: result.failures,
+    warnings: result.warnings ?? [],
   };
 }
 
@@ -529,25 +531,59 @@ function getEarliestResetAt(
     .sort((left, right) => left.localeCompare(right))[0] ?? null;
 }
 
-function getCurrentBottleneckResetAt(candidate: AutoSwitchCandidate): string | null {
+function getLatestResetAt(
+  candidate: AutoSwitchCandidate,
+  windows: QuotaWindowKey[],
+): string | null {
+  return windows
+    .map((window) => getCandidateResetAt(candidate, window))
+    .filter((resetAt): resetAt is string => resetAt !== null)
+    .sort((left, right) => left.localeCompare(right))
+    .at(-1) ?? null;
+}
+
+function resolveExhaustedWindows(candidate: AutoSwitchCandidate): QuotaWindowKey[] {
+  const windows: QuotaWindowKey[] = [];
+
+  if (candidate.remain_5h === 0) {
+    windows.push("five_hour");
+  }
+
+  if (candidate.remain_1w === 0) {
+    windows.push("one_week");
+  }
+
+  return windows;
+}
+
+function getRecoveryResetAt(candidate: AutoSwitchCandidate): string | null {
+  return getLatestResetAt(candidate, resolveExhaustedWindows(candidate));
+}
+
+function getCurrentNextResetAt(candidate: AutoSwitchCandidate): string | null {
+  const recoveryResetAt = getRecoveryResetAt(candidate);
+  if (recoveryResetAt !== null) {
+    return recoveryResetAt;
+  }
+
   return getEarliestResetAt(
     candidate,
     resolveBottleneckWindows(candidate.remain_5h_in_1w_units, candidate.remain_1w_in_plus_units),
   );
 }
 
-function selectCurrentBottleneckWindow(
+function selectCurrentNextResetWindow(
   account: AccountQuotaSummary,
   candidate: AutoSwitchCandidate,
 ): AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"] {
-  const bottleneckResetAt = getCurrentBottleneckResetAt(candidate);
-  if (!bottleneckResetAt) {
+  const nextResetAt = getCurrentNextResetAt(candidate);
+  if (!nextResetAt) {
     return null;
   }
 
   const candidateWindows = [account.five_hour, account.one_week].filter(
     (window): window is NonNullable<AccountQuotaSummary["five_hour"]> =>
-      window !== null && window.reset_at === bottleneckResetAt,
+      window !== null && window.reset_at === nextResetAt,
   );
 
   return candidateWindows[0] ?? null;
@@ -561,6 +597,15 @@ function compareCandidateResets(
     oneWeekScore: (candidate: AutoSwitchCandidate) => number | null;
   },
 ): number {
+  const leftRecoveryResetAt = getRecoveryResetAt(left);
+  const rightRecoveryResetAt = getRecoveryResetAt(right);
+  const recoveryResetOrder = compareNullableDateAscending(leftRecoveryResetAt, rightRecoveryResetAt);
+  if (leftRecoveryResetAt !== null || rightRecoveryResetAt !== null) {
+    if (recoveryResetOrder !== 0) {
+      return recoveryResetOrder;
+    }
+  }
+
   const leftBottleneckWindows = resolveBottleneckWindows(
     options.fiveHourScore(left),
     options.oneWeekScore(left),
@@ -952,7 +997,7 @@ function describeQuotaAccounts(
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
     const currentScore = candidate ? normalizePlusScore(candidate.current_score) : null;
     const nextResetAt = candidate
-      ? formatResetAt(selectCurrentBottleneckWindow(account, candidate))
+      ? formatResetAt(selectCurrentNextResetWindow(account, candidate))
       : "-";
     const row: Record<string, string> = {
       name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
@@ -1053,6 +1098,7 @@ export function describeQuotaRefresh(
   result: {
     successes: AccountQuotaSummary[];
     failures: Array<{ name: string; error: string }>;
+    warnings?: string[];
   },
   currentStatus: CurrentListStatusLike,
   options: {
@@ -1070,6 +1116,10 @@ export function describeQuotaRefresh(
 
   for (const failure of result.failures) {
     lines.push(`Failure: ${failure.name}: ${failure.error}`);
+  }
+
+  for (const warning of result.warnings ?? []) {
+    lines.push(`Warning: ${warning}`);
   }
 
   if (lines.length === 0) {

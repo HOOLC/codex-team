@@ -645,7 +645,10 @@ export async function handleListCommand(options: {
   targetName?: string;
   verbose: boolean;
 }): Promise<number> {
-  const result = await options.store.refreshAllQuotas(options.targetName);
+  const result = await options.store.refreshAllQuotas(options.targetName, {
+    quotaClientMode: "list-fast",
+    allowCachedQuotaFallback: true,
+  });
   const current = await options.store.getCurrentStatus();
   const currentAccounts = new Set(current.matched_accounts);
   const now = new Date();
@@ -658,7 +661,7 @@ export async function handleListCommand(options: {
     ] as const),
   );
   options.debugLog(
-    `list: target=${options.targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
+    `list: target=${options.targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
   );
   if (options.debug) {
     const ratioDiagnostics = computeWatchObservedRatioDiagnostics(watchHistory, now);

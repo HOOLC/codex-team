@@ -185,6 +185,46 @@ describe("quota client", () => {
     }
   });
 
+  test("list-fast mode skips retries and token refresh", async () => {
+    const snapshot = createAuthPayload("acct-fast-list", "chatgpt", "plus");
+    let usageAttempts = 0;
+    let tokenRefreshAttempts = 0;
+
+    const restoreFetch = installFetchMock(async (input) => {
+      const url = String(input);
+
+      if (url.endsWith("/backend-api/wham/usage")) {
+        usageAttempts += 1;
+        return textResponse("unauthorized", 401);
+      }
+
+      if (url.endsWith("/oauth/token")) {
+        tokenRefreshAttempts += 1;
+        return jsonResponse({
+          access_token: "refreshed-access-token",
+          id_token: snapshot.tokens?.id_token,
+          refresh_token: "refreshed-refresh-token",
+        });
+      }
+
+      return textResponse("not found", 404);
+    });
+
+    try {
+      await expect(
+        fetchQuotaSnapshot(snapshot, {
+          homeDir: "/tmp/codex-team-test-home",
+          mode: "list-fast",
+        }),
+      ).rejects.toThrow(/401/);
+
+      expect(usageAttempts).toBe(1);
+      expect(tokenRefreshAttempts).toBe(0);
+    } finally {
+      restoreFetch();
+    }
+  });
+
   test('treats "null" credits balances as missing instead of failing', async () => {
     const snapshot = createAuthPayload("acct-null-balance", "chatgpt", "plus");
     const restoreFetch = installFetchMock(async (input) => {
