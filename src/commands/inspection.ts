@@ -22,6 +22,7 @@ import {
 import { writeJson } from "../cli/output.js";
 import {
   computeWatchHistoryEta,
+  computeWatchObservedRatioDiagnostics,
   createWatchHistoryStore,
   type WatchHistoryEtaContext,
 } from "../watch/history.js";
@@ -639,11 +640,15 @@ export async function handleListCommand(options: {
   store: AccountStore;
   stdout: NodeJS.WriteStream;
   debugLog: DebugLogger;
+  debug: boolean;
   json: boolean;
   targetName?: string;
   verbose: boolean;
 }): Promise<number> {
-  const result = await options.store.refreshAllQuotas(options.targetName);
+  const result = await options.store.refreshAllQuotas(options.targetName, {
+    quotaClientMode: "list-fast",
+    allowCachedQuotaFallback: true,
+  });
   const current = await options.store.getCurrentStatus();
   const currentAccounts = new Set(current.matched_accounts);
   const now = new Date();
@@ -656,8 +661,25 @@ export async function handleListCommand(options: {
     ] as const),
   );
   options.debugLog(
-    `list: target=${options.targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
+    `list: target=${options.targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
   );
+  if (options.debug) {
+    const ratioDiagnostics = computeWatchObservedRatioDiagnostics(watchHistory, now);
+    if (ratioDiagnostics.length === 0) {
+      options.debugLog("list: observed_5h_1w_ratio window=24h insufficient_samples");
+    } else {
+      for (const diagnostic of ratioDiagnostics) {
+        options.debugLog(
+          `list: observed_5h_1w_ratio window=24h plan=${diagnostic.key} samples=${diagnostic.sample_count} observed=${diagnostic.observed_weighted_raw_ratio} expected=${diagnostic.expected_raw_ratio ?? "n/a"} mean=${diagnostic.observed_mean_raw_ratio} variance=${diagnostic.variance}`,
+        );
+        if (diagnostic.warning) {
+          options.debugLog(
+            `warning: list observed_5h_1w_ratio_mismatch window=24h plan=${diagnostic.key} observed=${diagnostic.observed_weighted_raw_ratio} expected=${diagnostic.expected_raw_ratio ?? "n/a"} relative_delta=${diagnostic.relative_delta ?? "n/a"} samples=${diagnostic.sample_count}`,
+          );
+        }
+      }
+    }
+  }
   if (options.json) {
     writeJson(options.stdout, {
       ...toCliQuotaRefreshResult(result),

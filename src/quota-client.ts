@@ -14,6 +14,10 @@ const USER_AGENT = "codexm/0.1";
 const USAGE_FETCH_ATTEMPTS = 3;
 const USAGE_FETCH_RETRY_DELAY_MS = 250;
 const USAGE_FETCH_TIMEOUT_MS = 15_000;
+const LIST_FAST_FETCH_ATTEMPTS = 1;
+const LIST_FAST_FETCH_TIMEOUT_MS = 3_000;
+
+export type QuotaClientMode = "default" | "list-fast";
 
 interface ExtractedChatGPTAuth {
   accessToken: string;
@@ -67,6 +71,7 @@ export interface QuotaClientOptions {
   homeDir?: string;
   fetchImpl?: typeof fetch;
   now?: Date;
+  mode?: QuotaClientMode;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -368,15 +373,21 @@ async function requestUsage(
   options: QuotaClientOptions,
 ): Promise<QuotaSnapshot> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const mode = options.mode ?? "default";
   const extracted = extractChatGPTAuth(snapshot);
   const urls = await resolveUsageUrls(options.homeDir);
+  const candidateUrls = mode === "list-fast" ? urls.slice(0, 1) : urls;
+  const usageFetchAttempts =
+    mode === "list-fast" ? LIST_FAST_FETCH_ATTEMPTS : USAGE_FETCH_ATTEMPTS;
+  const usageFetchTimeoutMs =
+    mode === "list-fast" ? LIST_FAST_FETCH_TIMEOUT_MS : USAGE_FETCH_TIMEOUT_MS;
   const now = (options.now ?? new Date()).toISOString();
   const errors: string[] = [];
 
-  for (const url of urls) {
-    for (let attempt = 1; attempt <= USAGE_FETCH_ATTEMPTS; attempt += 1) {
+  for (const url of candidateUrls) {
+    for (let attempt = 1; attempt <= usageFetchAttempts; attempt += 1) {
       const abortController = new AbortController();
-      const timeout = setTimeout(() => abortController.abort(), USAGE_FETCH_TIMEOUT_MS);
+      const timeout = setTimeout(() => abortController.abort(), usageFetchTimeoutMs);
       let response: Response;
 
       try {
@@ -393,11 +404,11 @@ async function requestUsage(
       } catch (error) {
         clearTimeout(timeout);
         const message = abortController.signal.aborted
-          ? `timed out after ${USAGE_FETCH_TIMEOUT_MS}ms`
+          ? `timed out after ${usageFetchTimeoutMs}ms`
           : normalizeFetchError(error);
         errors.push(formatUsageAttemptError(url, attempt, message));
 
-        if (!isLastAttempt(attempt)) {
+        if (attempt < usageFetchAttempts) {
           await delay(USAGE_FETCH_RETRY_DELAY_MS * attempt);
           continue;
         }
@@ -417,7 +428,7 @@ async function requestUsage(
           ),
         );
 
-        if (isTransientUsageStatus(response.status) && !isLastAttempt(attempt)) {
+        if (isTransientUsageStatus(response.status) && attempt < usageFetchAttempts) {
           await delay(USAGE_FETCH_RETRY_DELAY_MS * attempt);
           continue;
         }
@@ -527,6 +538,10 @@ export async function fetchQuotaSnapshot(
       authSnapshot: snapshot,
     };
   } catch (error) {
+    if (options.mode === "list-fast") {
+      throw error;
+    }
+
     const message = normalizeFetchError(error);
     if (!extracted.refreshToken || !shouldRetryWithTokenRefresh(message)) {
       throw error;

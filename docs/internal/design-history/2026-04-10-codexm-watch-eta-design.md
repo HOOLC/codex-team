@@ -147,27 +147,37 @@ eta = remaining_budget / global_rate_in_1w_units_per_hour
 也就是说：
 
 - `1W` 先按 plan 的周额度 profile 归一化
-- `5H` 先按 plan 的 `5H` 容量 profile 归一化，再换算成 `plus 1W` 单位
+- `5H` 先按同一 plan 的原始 `5H:1W` 比例折算到 `1W`，再换算成 `plus 1W` 单位
 
 实现上集中维护一张 plan profile 表：
 
-| plan | `5H` 容量（plus=1） | `1W` 容量（plus=1） |
+| plan | 原始 `5H:1W` 比例 | `1W` 容量（plus=1） |
 | --- | ---: | ---: |
-| `plus` | 1 | 1 |
-| `prolite` | 5 | 4.165 |
-| `pro` | 10 | 8.33 |
-| `team` | 1 | 1 |
-| `unknown` | 1 | 1 |
+| `plus` | `20/3` | `1` |
+| `prolite` | `50/9` | `25/6` |
+| `pro` | `50/9` | `25/3` |
+| `team` | `20/3` | `1` |
+| `unknown` | `20/3` | `1` |
 
 换算规则：
 
 ```text
 five_hour_equivalent_in_plus_weekly_units =
-  five_hour_percent * plan.five_hour_capacity_in_plus_units / 8
+  (five_hour_percent / plan.five_hour_to_one_week_raw_ratio) *
+  plan.one_week_capacity_in_plus_units
 
 one_week_equivalent_in_plus_weekly_units =
   one_week_percent * plan.one_week_capacity_in_plus_units
 ```
+
+这里不再假设“一周固定包含多少个 5H 窗口”。
+
+实现直接使用每个 plan 的经验原始比例：
+
+- `plus/team` 按 `3:20`
+- `pro/prolite` 按 `9:50`
+
+这样可以把“同一 plan 内的 `5H:1W` 关系”和“不同 plan 间的周额度容量比”分开表达，避免把两层语义混在单一窗口数假设里。
 
 全局速率定义为：
 
@@ -183,19 +193,34 @@ rate_per_hour = delta_used_percent_in_1w_units / delta_hours
 - 至少有一个窗口的 `used_percent` 和 `reset_at` 完整
 - 时间戳有效
 
-计算相邻样本增量时，分别得到：
+速率计算不再直接对每一对相邻样本分别求增量，而是先按“连续 burn 段”分段。
+
+一段连续样本需要同时满足：
+
+- 属于同一账号
+- `plan_type` 不变
+- `five_hour.used_percent` 不下降
+- `one_week.used_percent` 不下降
+
+`reset_at` 只作为辅助信号，不再要求严格字符串相等。
+
+- `reset_at` 在 `±1 分钟` 内波动，视为同一窗口的时间戳抖动
+- 如果 `used_percent` 回落，说明观察到了 reset，必须开始新的连续段
+- 如果账号或 `plan_type` 变化，也必须开始新的连续段
+
+对每个连续段，只看该段首尾两点，分别得到：
 
 - `delta_5h_eq_1w`
 - `delta_1w`
 
 其中：
 
-- `5H` 增量只有在前后两点 `five_hour.reset_at` 相同的前提下才有效
-- `1W` 增量只有在前后两点 `one_week.reset_at` 相同的前提下才有效
+- `5H` 增量来自该连续段首尾 `five_hour.used_percent` 的差值
+- `1W` 增量来自该连续段首尾 `one_week.used_percent` 的差值
 
-如果某个窗口的 `reset_at` 变化，说明该窗口已经重置；新旧窗口之间不能直接连算。
+之所以可以直接取首尾差值，是因为分段阶段已经保证这一段内没有观察到 reset。
 
-对于同一对样本，最终增量采用更保守的瓶颈语义：
+对于同一连续段，最终增量采用更保守的瓶颈语义：
 
 ```text
 delta_in_1w_units = max(delta_5h_eq_1w, delta_1w)
@@ -204,8 +229,10 @@ delta_in_1w_units = max(delta_5h_eq_1w, delta_1w)
 理由是：
 
 - 两个窗口都在反映同一份真实消耗
+- `1W` 更新粒度通常比 `5H` 更粗，逐对相邻样本会被离散跳变放大或低估
 - 观测数据存在量化误差、刷新时序差和不同窗口的离散化差异
-- 取更大的那个增量更接近“本次真实至少消耗了多少”
+- 先按连续段累计，再取更大的那个增量，更接近“这一整段真实至少消耗了多少”
+- `reset_at` 抖动不会再把同一段连续 burn 错切成许多碎片
 
 ### 6.3 回看窗口
 
@@ -221,18 +248,19 @@ delta_in_1w_units = max(delta_5h_eq_1w, delta_1w)
 
 ### 6.4 计算方式
 
-对回看区间内所有可连接的相邻样本段，计算：
+对回看区间内所有有效连续段，计算：
 
-- 总消耗增量（统一到 `1W` 等价单位）
-- 总经过时长
+- 每段的总消耗增量（统一到 `1W` 等价单位）
+- 每段的总经过时长
 
 然后按总量法得到全局速率：
 
 ```text
-global_rate_in_1w_units_per_hour = sum(delta_in_1w_units) / sum(delta_hours)
+global_rate_in_1w_units_per_hour =
+  sum(segment_delta_in_1w_units) / sum(segment_delta_hours)
 ```
 
-如果总经过时长为 `0`，或没有可用样本段，则该全局速率为空。
+如果总经过时长为 `0`，或没有可用连续段，则该全局速率为空。
 
 ### 6.5 低活跃与空闲
 
@@ -272,10 +300,10 @@ remaining_budget = min(remaining_5h_eq_1w, remaining_1w_eq)
 
 - 当前活跃账号观测到每小时消耗 `6` 个 `plus 1W` 等价单位
 - 某个 `pro` 备选账号当前还有 `80%` 的 `5H` 剩余
-- 它的 `5H` 等价剩余约为 `80 * 10 / 8 = 100`
-- 若它的 `1W` 剩余是 `50%`，则其周额度等价剩余约为 `50 * 8.33 = 416.5`
+- 它的 `5H` 等价剩余约为 `80 * 10 / (50/9) = 120`
+- 若它的 `1W` 剩余是 `50%`，则其周额度等价剩余约为 `50 * (25/3) ≈ 416.67`
 
-则瓶颈是 `100`，最终 ETA 约为 `16.7 小时`
+则瓶颈是 `120`，最终 ETA 约为 `20 小时`
 
 这符合产品语义：
 
@@ -316,7 +344,7 @@ remaining_budget = min(remaining_5h_eq_1w, remaining_1w_eq)
 
 建议新增单独模块，例如：
 
-- `src/watch-history.ts`
+- `src/watch/history.ts`
 
 职责：
 
@@ -344,13 +372,18 @@ CLI 层不直接处理历史文件格式，也不直接实现预测算法。
 
 本次 ETA 设计不替换现有：
 
-- `CURRENT SCORE`
-- `1H SCORE`
+- 当前实现中的 `SCORE`
+- 当前实现中的 `1H SCORE`
 
 二者可以同时存在：
 
 - `score` 继续服务自动切换与排序语义
 - `ETA` 负责服务用户的直观时间判断
+
+注：
+
+- 这份文档形成于设计阶段，最终实现中的模块路径为 `src/watch/history.ts`
+- list/verbose 表头后续已演进为 `SCORE` / `1H SCORE`
 
 ## 9. 失败处理与边界条件
 

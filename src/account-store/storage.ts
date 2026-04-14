@@ -7,7 +7,7 @@ import type { StorePaths } from "./types.js";
 export const DIRECTORY_MODE = 0o700;
 export const FILE_MODE = 0o600;
 export const SCHEMA_VERSION = 1;
-export const QUOTA_REFRESH_CONCURRENCY = 3;
+export const QUOTA_REFRESH_CONCURRENCY = 8;
 
 const ACCOUNT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 

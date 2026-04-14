@@ -9,7 +9,7 @@ import {
   convertFiveHourPercentToPlusWeeklyUnits,
   convertOneWeekPercentToPlusWeeklyUnits,
   normalizeDisplayedScore,
-  resolveFiveHourWindowsPerWeek,
+  resolveFiveHourToOneWeekRawRatio,
 } from "../plan-quota-profile.js";
 import type { WatchHistoryEtaContext } from "../watch/history.js";
 
@@ -43,7 +43,7 @@ export interface AutoSwitchCandidate {
   remain_5h_in_1w_units: number | null;
   remain_1w: number | null;
   remain_1w_in_plus_units: number | null;
-  five_hour_windows_per_week: number;
+  five_hour_to_one_week_ratio: number;
   five_hour_used: number | null;
   one_week_used: number | null;
   five_hour_reset_at: string | null;
@@ -61,11 +61,14 @@ export interface QuotaEtaSummary {
   remaining_1w: number | null;
 }
 
+type QuotaWindowKey = "five_hour" | "one_week";
+
 const AUTO_SWITCH_PROJECTION_HORIZON_SECONDS = 3_600;
 const AUTO_SWITCH_CURRENT_SCORE_TIEBREAK_DELTA = 5;
 const ANSI_RESET = "\u001b[0m";
 const ANSI_BOLD = "\u001b[1m";
 const ANSI_RED = "\u001b[31m";
+const ANSI_GREEN = "\u001b[32m";
 const ANSI_BRIGHT_YELLOW = "\u001b[93m";
 const ANSI_CYAN = "\u001b[36m";
 const ANSI_BLACK = "\u001b[30m";
@@ -89,6 +92,7 @@ function styleText(
   ...codes: Array<
     | typeof ANSI_BOLD
     | typeof ANSI_RED
+    | typeof ANSI_GREEN
     | typeof ANSI_BRIGHT_YELLOW
     | typeof ANSI_CYAN
     | typeof ANSI_BLACK
@@ -102,11 +106,17 @@ function colorizeRow(value: string, background: typeof ANSI_BG_RED): string {
   return styleText(value, ANSI_BLACK, background);
 }
 
-function colorize(value: string, color: typeof ANSI_RED | typeof ANSI_BRIGHT_YELLOW): string {
+function colorize(
+  value: string,
+  color: typeof ANSI_RED | typeof ANSI_GREEN | typeof ANSI_BRIGHT_YELLOW,
+): string {
   return styleText(value, color);
 }
 
-function colorizeWarning(value: string, color: typeof ANSI_RED | typeof ANSI_BRIGHT_YELLOW): string {
+function colorizeWarning(
+  value: string,
+  color: typeof ANSI_RED | typeof ANSI_GREEN | typeof ANSI_BRIGHT_YELLOW,
+): string {
   return styleText(value, ANSI_BOLD, color);
 }
 
@@ -114,31 +124,44 @@ function colorizeRecovery(value: string, bold = false): string {
   return bold ? styleText(value, ANSI_BOLD, ANSI_CYAN) : styleText(value, ANSI_CYAN);
 }
 
-function resolveLowRemainingColor(
-  remainingPercent: number | null,
-): typeof ANSI_RED | typeof ANSI_BRIGHT_YELLOW | null {
+function colorizeScore(value: string, remainingPercent: number | null): string {
   if (remainingPercent === null) {
-    return null;
-  }
-
-  if (remainingPercent <= 10) {
-    return ANSI_RED;
-  }
-
-  if (remainingPercent < 20) {
-    return ANSI_BRIGHT_YELLOW;
-  }
-
-  return null;
-}
-
-function colorizeLowRemaining(value: string, remainingPercent: number | null): string {
-  const color = resolveLowRemainingColor(remainingPercent);
-  if (!color) {
     return value;
   }
 
-  return colorizeWarning(value, color);
+  if (remainingPercent === 0) {
+    return colorizeWarning(value, ANSI_RED);
+  }
+
+  if (remainingPercent < 20) {
+    return colorizeWarning(value, ANSI_BRIGHT_YELLOW);
+  }
+
+  if (remainingPercent >= 100) {
+    return colorizeWarning(value, ANSI_GREEN);
+  }
+
+  if (remainingPercent >= 80) {
+    return colorize(value, ANSI_GREEN);
+  }
+
+  return value;
+}
+
+function colorizeUsagePercent(value: string, usedPercent: number | null): string {
+  if (usedPercent === null) {
+    return value;
+  }
+
+  if (usedPercent >= 100) {
+    return colorizeWarning(value, ANSI_RED);
+  }
+
+  if (usedPercent >= 80) {
+    return colorizeWarning(value, ANSI_BRIGHT_YELLOW);
+  }
+
+  return value;
 }
 
 function formatTable(
@@ -195,7 +218,7 @@ function formatUsagePercent(
   }
 
   const raw = `${window.used_percent}%`;
-  return colorizeLowRemaining(raw, computeRemainingPercent(window.used_percent));
+  return colorizeUsagePercent(raw, window.used_percent);
 }
 
 function formatResetCountdown(
@@ -220,6 +243,12 @@ function formatResetAt(
 
   const absolute = dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
   return `${absolute}${formatResetCountdown(window)}`;
+}
+
+function isWindowUnavailable(
+  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
+): boolean {
+  return typeof window?.used_percent === "number" && window.used_percent >= 100;
 }
 
 export function computeAvailability(account: AccountQuotaSummary): string | null {
@@ -254,10 +283,12 @@ export function toCliQuotaSummary(account: AccountQuotaSummary): CliQuotaSummary
 export function toCliQuotaRefreshResult(result: {
   successes: AccountQuotaSummary[];
   failures: Array<{ name: string; error: string }>;
+  warnings?: string[];
 }) {
   return {
     successes: result.successes.map(toCliQuotaSummary),
     failures: result.failures,
+    warnings: result.warnings ?? [],
   };
 }
 
@@ -397,7 +428,7 @@ function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchCandidat
     return null;
   }
 
-  const fiveHourWindowsPerWeek = resolveFiveHourWindowsPerWeek(account.plan_type);
+  const fiveHourToOneWeekRatio = resolveFiveHourToOneWeekRawRatio(account.plan_type);
   const remain5h = computeRemainingPercent(account.five_hour?.used_percent);
   const remain1w = computeRemainingPercent(account.one_week?.used_percent);
   if (remain5h === null && remain1w === null) {
@@ -440,7 +471,7 @@ function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchCandidat
     remain_5h_in_1w_units: remain5hEq1w,
     remain_1w: remain1w,
     remain_1w_in_plus_units: remain1wEq,
-    five_hour_windows_per_week: fiveHourWindowsPerWeek,
+    five_hour_to_one_week_ratio: fiveHourToOneWeekRatio,
     five_hour_used: account.five_hour?.used_percent ?? null,
     one_week_used: account.one_week?.used_percent ?? null,
     five_hour_reset_at: account.five_hour?.reset_at ?? null,
@@ -459,6 +490,150 @@ function compareNullableDateAscending(left: string | null, right: string | null)
     return -1;
   }
   return left.localeCompare(right);
+}
+
+function resolveBottleneckWindows(
+  fiveHourScore: number | null,
+  oneWeekScore: number | null,
+): QuotaWindowKey[] {
+  if (fiveHourScore !== null && oneWeekScore !== null) {
+    if (fiveHourScore < oneWeekScore) {
+      return ["five_hour"];
+    }
+    if (oneWeekScore < fiveHourScore) {
+      return ["one_week"];
+    }
+    return ["five_hour", "one_week"];
+  }
+
+  if (fiveHourScore !== null) {
+    return ["five_hour"];
+  }
+
+  if (oneWeekScore !== null) {
+    return ["one_week"];
+  }
+
+  return [];
+}
+
+function getCandidateResetAt(candidate: AutoSwitchCandidate, window: QuotaWindowKey): string | null {
+  return window === "five_hour" ? candidate.five_hour_reset_at : candidate.one_week_reset_at;
+}
+
+function getEarliestResetAt(
+  candidate: AutoSwitchCandidate,
+  windows: QuotaWindowKey[],
+): string | null {
+  return windows
+    .map((window) => getCandidateResetAt(candidate, window))
+    .filter((resetAt): resetAt is string => resetAt !== null)
+    .sort((left, right) => left.localeCompare(right))[0] ?? null;
+}
+
+function getLatestResetAt(
+  candidate: AutoSwitchCandidate,
+  windows: QuotaWindowKey[],
+): string | null {
+  return windows
+    .map((window) => getCandidateResetAt(candidate, window))
+    .filter((resetAt): resetAt is string => resetAt !== null)
+    .sort((left, right) => left.localeCompare(right))
+    .at(-1) ?? null;
+}
+
+function resolveExhaustedWindows(candidate: AutoSwitchCandidate): QuotaWindowKey[] {
+  const windows: QuotaWindowKey[] = [];
+
+  if (candidate.remain_5h === 0) {
+    windows.push("five_hour");
+  }
+
+  if (candidate.remain_1w === 0) {
+    windows.push("one_week");
+  }
+
+  return windows;
+}
+
+function getRecoveryResetAt(candidate: AutoSwitchCandidate): string | null {
+  return getLatestResetAt(candidate, resolveExhaustedWindows(candidate));
+}
+
+function getCurrentNextResetAt(candidate: AutoSwitchCandidate): string | null {
+  const recoveryResetAt = getRecoveryResetAt(candidate);
+  if (recoveryResetAt !== null) {
+    return recoveryResetAt;
+  }
+
+  return getEarliestResetAt(
+    candidate,
+    resolveBottleneckWindows(candidate.remain_5h_in_1w_units, candidate.remain_1w_in_plus_units),
+  );
+}
+
+function selectCurrentNextResetWindow(
+  account: AccountQuotaSummary,
+  candidate: AutoSwitchCandidate,
+): AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"] {
+  const nextResetAt = getCurrentNextResetAt(candidate);
+  if (!nextResetAt) {
+    return null;
+  }
+
+  const candidateWindows = [account.five_hour, account.one_week].filter(
+    (window): window is NonNullable<AccountQuotaSummary["five_hour"]> =>
+      window !== null && window.reset_at === nextResetAt,
+  );
+
+  return candidateWindows[0] ?? null;
+}
+
+function compareCandidateResets(
+  left: AutoSwitchCandidate,
+  right: AutoSwitchCandidate,
+  options: {
+    fiveHourScore: (candidate: AutoSwitchCandidate) => number | null;
+    oneWeekScore: (candidate: AutoSwitchCandidate) => number | null;
+  },
+): number {
+  const leftRecoveryResetAt = getRecoveryResetAt(left);
+  const rightRecoveryResetAt = getRecoveryResetAt(right);
+  const recoveryResetOrder = compareNullableDateAscending(leftRecoveryResetAt, rightRecoveryResetAt);
+  if (leftRecoveryResetAt !== null || rightRecoveryResetAt !== null) {
+    if (recoveryResetOrder !== 0) {
+      return recoveryResetOrder;
+    }
+  }
+
+  const leftBottleneckWindows = resolveBottleneckWindows(
+    options.fiveHourScore(left),
+    options.oneWeekScore(left),
+  );
+  const rightBottleneckWindows = resolveBottleneckWindows(
+    options.fiveHourScore(right),
+    options.oneWeekScore(right),
+  );
+
+  const primaryResetOrder = compareNullableDateAscending(
+    getEarliestResetAt(left, leftBottleneckWindows),
+    getEarliestResetAt(right, rightBottleneckWindows),
+  );
+  if (primaryResetOrder !== 0) {
+    return primaryResetOrder;
+  }
+
+  const leftSecondaryWindows = (["five_hour", "one_week"] as QuotaWindowKey[]).filter(
+    (window) => !leftBottleneckWindows.includes(window),
+  );
+  const rightSecondaryWindows = (["five_hour", "one_week"] as QuotaWindowKey[]).filter(
+    (window) => !rightBottleneckWindows.includes(window),
+  );
+
+  return compareNullableDateAscending(
+    getEarliestResetAt(left, leftSecondaryWindows),
+    getEarliestResetAt(right, rightSecondaryWindows),
+  );
 }
 
 export function rankAutoSwitchCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidate[] {
@@ -505,20 +680,12 @@ export function rankAutoSwitchCandidates(accounts: AccountQuotaSummary[]): AutoS
         return remain1wOrder;
       }
 
-      const fiveHourResetOrder = compareNullableDateAscending(
-        left.five_hour_reset_at,
-        right.five_hour_reset_at,
-      );
-      if (fiveHourResetOrder !== 0) {
-        return fiveHourResetOrder;
-      }
-
-      const oneWeekResetOrder = compareNullableDateAscending(
-        left.one_week_reset_at,
-        right.one_week_reset_at,
-      );
-      if (oneWeekResetOrder !== 0) {
-        return oneWeekResetOrder;
+      const resetOrder = compareCandidateResets(left, right, {
+        fiveHourScore: (candidate) => candidate.projected_5h_in_1w_units_1h,
+        oneWeekScore: (candidate) => candidate.projected_1w_in_plus_units_1h,
+      });
+      if (resetOrder !== 0) {
+        return resetOrder;
       }
 
       return left.name.localeCompare(right.name);
@@ -532,6 +699,20 @@ function rankListCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidat
     .sort((left, right) => {
       if (right.current_score !== left.current_score) {
         return right.current_score - left.current_score;
+      }
+
+      if (left.current_score === 0 && right.current_score === 0) {
+        const resetOrder = compareCandidateResets(left, right, {
+          fiveHourScore: (candidate) => candidate.remain_5h_in_1w_units,
+          oneWeekScore: (candidate) => candidate.remain_1w_in_plus_units,
+        });
+        if (resetOrder !== 0) {
+          return resetOrder;
+        }
+
+        if (right.score_1h !== left.score_1h) {
+          return right.score_1h - left.score_1h;
+        }
       }
 
       const remain5hOrder = compareNullableNumberDescending(
@@ -550,20 +731,12 @@ function rankListCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidat
         return remain1wOrder;
       }
 
-      const fiveHourResetOrder = compareNullableDateAscending(
-        left.five_hour_reset_at,
-        right.five_hour_reset_at,
-      );
-      if (fiveHourResetOrder !== 0) {
-        return fiveHourResetOrder;
-      }
-
-      const oneWeekResetOrder = compareNullableDateAscending(
-        left.one_week_reset_at,
-        right.one_week_reset_at,
-      );
-      if (oneWeekResetOrder !== 0) {
-        return oneWeekResetOrder;
+      const resetOrder = compareCandidateResets(left, right, {
+        fiveHourScore: (candidate) => candidate.remain_5h_in_1w_units,
+        oneWeekScore: (candidate) => candidate.remain_1w_in_plus_units,
+      });
+      if (resetOrder !== 0) {
+        return resetOrder;
       }
 
       return left.name.localeCompare(right.name);
@@ -576,6 +749,10 @@ function formatRemainingPercent(value: number | null): string {
 
 function formatRawScore(value: number | null): string {
   return value === null ? "-" : String(value);
+}
+
+function normalizePlusScore(value: number | null): number | null {
+  return normalizeDisplayedScore(value, "plus", { clamp: false });
 }
 
 function roundToTwo(value: number): number {
@@ -633,7 +810,7 @@ function formatEtaSummary(eta: QuotaEtaSummary | null): string {
     case "idle":
       return "idle";
     case "unavailable":
-      return "unavailable";
+      return "-";
     case "insufficient_history":
     default:
       return "-";
@@ -650,8 +827,8 @@ export function describeAutoSwitchSelection(
     dryRun
       ? `Best account: "${candidate.name}" (${maskAccountId(candidate.identity)}).`
       : `Auto-switched to "${candidate.name}" (${maskAccountId(candidate.identity)}).`,
-    `Current score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.current_score, candidate.plan_type))}`,
-    `1H score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.score_1h, candidate.plan_type))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -673,8 +850,8 @@ export function describeAutoSwitchSelection(
 export function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings: string[]): string {
   const lines = [
     `Current account "${candidate.name}" (${maskAccountId(candidate.identity)}) is already the best available account.`,
-    `Current score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.current_score, candidate.plan_type))}`,
-    `1H score: ${formatRemainingPercent(normalizeDisplayedScore(candidate.score_1h, candidate.plan_type))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -688,6 +865,88 @@ export function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings:
   }
 
   return lines.join("\n");
+}
+
+function formatPoolValue(value: number | null): string {
+  if (value === null) {
+    return "-";
+  }
+
+  return String(roundToTwo(value / 100));
+}
+
+function buildListSummary(accounts: AccountQuotaSummary[]): {
+  summaryLine: string;
+  poolLine: string;
+} {
+  const planCounts = new Map<string, number>();
+  let usableCount = 0;
+  let oneWeekBlockedCount = 0;
+  let fiveHourBlockedCount = 0;
+  let poolFiveHour = 0;
+  let poolOneWeek = 0;
+  let hasPoolFiveHour = false;
+  let hasPoolOneWeek = false;
+
+  for (const account of accounts) {
+    const plan = account.plan_type ?? "unknown";
+    planCounts.set(plan, (planCounts.get(plan) ?? 0) + 1);
+
+    const availability = computeAvailability(account);
+    if (availability === "available") {
+      usableCount += 1;
+    }
+
+    const oneWeekBlocked = isWindowUnavailable(account.one_week);
+    const fiveHourBlocked = isWindowUnavailable(account.five_hour);
+    if (oneWeekBlocked) {
+      oneWeekBlockedCount += 1;
+    } else if (fiveHourBlocked) {
+      fiveHourBlockedCount += 1;
+    }
+
+    const candidate = toAutoSwitchCandidate(account);
+    if (!candidate) {
+      continue;
+    }
+
+    if (candidate.remain_5h_in_1w_units !== null) {
+      poolFiveHour += candidate.remain_5h_in_1w_units;
+      hasPoolFiveHour = true;
+    }
+    if (candidate.remain_1w_in_plus_units !== null) {
+      poolOneWeek += candidate.remain_1w_in_plus_units;
+      hasPoolOneWeek = true;
+    }
+  }
+
+  const plansSegment = [...planCounts.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([plan, count]) => `${plan} x${count}`)
+    .join(", ");
+
+  const blockedSegment = `blocked: 1W ${oneWeekBlockedCount}, 5H ${fiveHourBlockedCount}`;
+
+  const summaryLine = `Accounts: ${usableCount}/${accounts.length} usable | ${blockedSegment}${
+    plansSegment ? ` | ${plansSegment}` : ""
+  }`;
+
+  const fiveHourPool = hasPoolFiveHour ? roundToTwo(poolFiveHour) : null;
+  const oneWeekPool = hasPoolOneWeek ? roundToTwo(poolOneWeek) : null;
+  const bottleneckPool =
+    fiveHourPool !== null && oneWeekPool !== null
+      ? roundToTwo(Math.min(fiveHourPool, oneWeekPool))
+      : fiveHourPool ?? oneWeekPool;
+
+  const poolLine =
+    `Total: bottleneck ${formatPoolValue(bottleneckPool)} | ` +
+    `5H->1W ${formatPoolValue(fiveHourPool)} | ` +
+    `1W ${formatPoolValue(oneWeekPool)} (plus 1W)`;
+
+  return {
+    summaryLine,
+    poolLine,
+  };
 }
 
 function describeQuotaAccounts(
@@ -742,23 +1001,21 @@ function describeQuotaAccounts(
   const rows = orderedAccounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
-    const availability = computeAvailability(account);
-    const currentScore = candidate ? normalizeDisplayedScore(candidate.current_score, candidate.plan_type) : null;
+    const currentScore = candidate ? normalizePlusScore(candidate.current_score) : null;
+    const nextResetAt = candidate
+      ? formatResetAt(selectCurrentNextResetWindow(account, candidate))
+      : "-";
     const row: Record<string, string> = {
       name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
       account_id: maskAccountId(account.identity),
       plan_type: account.plan_type ?? "-",
-      available:
-        availability === "unavailable"
-          ? colorize(availability, ANSI_RED)
-          : availability ?? "-",
       eta: formatEtaSummary(eta),
-      score: colorizeLowRemaining(formatRemainingPercent(currentScore), currentScore),
+      score: colorizeScore(formatRemainingPercent(currentScore), currentScore),
       five_hour: formatUsagePercent(account.five_hour),
+      next_reset: nextResetAt,
       five_hour_reset: formatResetAt(account.five_hour),
       one_week: formatUsagePercent(account.one_week),
       one_week_reset: formatResetAt(account.one_week),
-      refresh_status: account.status,
     };
 
     if (options.verbose) {
@@ -771,22 +1028,22 @@ function describeQuotaAccounts(
       row.projected_5h_in_1w_units_1h = candidate
         ? formatRawScore(candidate.projected_5h_in_1w_units_1h)
         : "-";
-      const score1h = candidate
-        ? normalizeDisplayedScore(candidate.score_1h, candidate.plan_type)
-        : null;
+      const score1h = candidate ? normalizePlusScore(candidate.score_1h) : null;
       row.score_1h = candidate
-        ? colorizeLowRemaining(formatRemainingPercent(score1h), score1h)
+        ? colorizeScore(formatRemainingPercent(score1h), score1h)
         : "-";
       row.projected_1w_1h = candidate
-        ? colorizeLowRemaining(
+        ? colorizeScore(
             formatRemainingPercent(candidate.projected_1w_1h),
             candidate.projected_1w_1h,
           )
         : "-";
-      row.five_hour_windows_per_week = candidate ? String(candidate.five_hour_windows_per_week) : "-";
+      row.five_hour_to_one_week_ratio = candidate
+        ? String(candidate.five_hour_to_one_week_ratio)
+        : "-";
     }
 
-    if (availability === "unavailable") {
+    if (isWindowUnavailable(account.one_week)) {
       for (const key of Object.keys(row)) {
         row[key] = stripAnsi(row[key]);
       }
@@ -799,15 +1056,12 @@ function describeQuotaAccounts(
   const columns = [
     { key: "name", label: "  NAME" },
     { key: "account_id", label: "IDENTITY" },
-    { key: "plan_type", label: "PLAN TYPE" },
-    { key: "available", label: "AVAILABLE" },
-    { key: "score", label: "CURRENT SCORE" },
+    { key: "plan_type", label: "PLAN" },
+    { key: "score", label: "SCORE" },
     { key: "eta", label: "ETA" },
     { key: "five_hour", label: "5H USED" },
-    { key: "five_hour_reset", label: "5H RESET AT" },
     { key: "one_week", label: "1W USED" },
-    { key: "one_week_reset", label: "1W RESET AT" },
-    { key: "refresh_status", label: "REFRESH STATUS" },
+    { key: "next_reset", label: "NEXT RESET" },
   ];
 
   if (options.verbose) {
@@ -819,15 +1073,26 @@ function describeQuotaAccounts(
       { key: "rate_1w_units", label: "RATE 1W UNITS" },
       { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W" },
       { key: "score_1h", label: "1H SCORE" },
-      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H RAW" },
+      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H" },
       { key: "projected_1w_1h", label: "1W 1H" },
-      { key: "five_hour_windows_per_week", label: "1W:5H" },
+      { key: "five_hour_to_one_week_ratio", label: "5H:1W" },
+    );
+    columns.push(
+      { key: "five_hour_reset", label: "5H RESET AT" },
+      { key: "one_week_reset", label: "1W RESET AT" },
     );
   }
 
   const table = formatTable(rows, columns);
+  const { summaryLine, poolLine } = buildListSummary(accounts);
 
-  const lines = [describeCurrentListStatus(currentStatus), "Refreshed quotas:", table];
+  const lines = [
+    describeCurrentListStatus(currentStatus),
+    summaryLine,
+    poolLine,
+    "Refreshed quotas:",
+    table,
+  ];
   for (const warning of warnings) {
     lines.push(`Warning: ${warning}`);
   }
@@ -839,6 +1104,7 @@ export function describeQuotaRefresh(
   result: {
     successes: AccountQuotaSummary[];
     failures: Array<{ name: string; error: string }>;
+    warnings?: string[];
   },
   currentStatus: CurrentListStatusLike,
   options: {
@@ -856,6 +1122,10 @@ export function describeQuotaRefresh(
 
   for (const failure of result.failures) {
     lines.push(`Failure: ${failure.name}: ${failure.error}`);
+  }
+
+  for (const warning of result.warnings ?? []) {
+    lines.push(`Warning: ${warning}`);
   }
 
   if (lines.length === 0) {

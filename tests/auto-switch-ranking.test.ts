@@ -50,26 +50,26 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([singleWindowAccount, twoWindowAccount])).toMatchObject([
       {
         name: "alpha",
-        current_score: 10,
-        score_1h: 10,
+        current_score: 12,
+        score_1h: 12,
         remain_5h: 80,
         remain_1w: null,
-        remain_5h_in_1w_units: 10,
+        remain_5h_in_1w_units: 12,
         projected_5h_1h: 80,
-        projected_5h_in_1w_units_1h: 10,
-        five_hour_windows_per_week: 8,
+        projected_5h_in_1w_units_1h: 12,
+        five_hour_to_one_week_ratio: 6.67,
       },
       {
         name: "beta",
-        current_score: 5,
-        score_1h: 5,
+        current_score: 6,
+        score_1h: 6,
         remain_5h: 40,
         remain_1w: 30,
-        remain_5h_in_1w_units: 5,
+        remain_5h_in_1w_units: 6,
         projected_5h_1h: 40,
-        projected_5h_in_1w_units_1h: 5,
+        projected_5h_in_1w_units_1h: 6,
         projected_1w_1h: 30,
-        five_hour_windows_per_week: 8,
+        five_hour_to_one_week_ratio: 6.67,
       },
     ]);
   });
@@ -124,23 +124,23 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([plusAccount, teamAccount])).toMatchObject([
       {
         name: "plus",
-        current_score: 10,
-        score_1h: 10,
+        current_score: 12,
+        score_1h: 12,
         remain_1w: 50,
-        remain_5h_in_1w_units: 10,
-        projected_5h_in_1w_units_1h: 10,
+        remain_5h_in_1w_units: 12,
+        projected_5h_in_1w_units_1h: 12,
         projected_1w_1h: 50,
-        five_hour_windows_per_week: 8,
+        five_hour_to_one_week_ratio: 6.67,
       },
       {
         name: "team",
-        current_score: 10,
-        score_1h: 10,
+        current_score: 12,
+        score_1h: 12,
         remain_1w: 50,
-        remain_5h_in_1w_units: 10,
-        projected_5h_in_1w_units_1h: 10,
+        remain_5h_in_1w_units: 12,
+        projected_5h_in_1w_units_1h: 12,
         projected_1w_1h: 50,
-        five_hour_windows_per_week: 8,
+        five_hour_to_one_week_ratio: 6.67,
       },
     ]);
   });
@@ -188,30 +188,30 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([plusAccount, proliteAccount, proAccount])).toMatchObject([
       {
         name: "pro",
-        current_score: 100,
-        score_1h: 100,
+        current_score: 120,
+        score_1h: 120,
         remain_5h: 80,
-        remain_5h_in_1w_units: 100,
+        remain_5h_in_1w_units: 120,
         remain_1w: 50,
-        five_hour_windows_per_week: 6.66,
+        five_hour_to_one_week_ratio: 5.56,
       },
       {
         name: "prolite",
-        current_score: 50,
-        score_1h: 50,
+        current_score: 60,
+        score_1h: 60,
         remain_5h: 80,
-        remain_5h_in_1w_units: 50,
+        remain_5h_in_1w_units: 60,
         remain_1w: 50,
-        five_hour_windows_per_week: 6.66,
+        five_hour_to_one_week_ratio: 5.56,
       },
       {
         name: "plus",
-        current_score: 10,
-        score_1h: 10,
+        current_score: 12,
+        score_1h: 12,
         remain_5h: 80,
-        remain_5h_in_1w_units: 10,
+        remain_5h_in_1w_units: 12,
         remain_1w: 50,
-        five_hour_windows_per_week: 8,
+        five_hour_to_one_week_ratio: 6.67,
       },
     ]);
   });
@@ -259,13 +259,13 @@ describe("auto switch ranking", () => {
       {
         name: "early-reset",
         remain_5h: 60,
-        current_score: 7.5,
+        current_score: 9,
         projected_5h_1h: 96.67,
       },
       {
         name: "late-reset",
         remain_5h: 65,
-        current_score: 8.13,
+        current_score: 9.75,
         projected_5h_1h: 65,
       },
     ]);
@@ -313,13 +313,76 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([nearResetButEmpty, modestButAvailable])).toMatchObject([
       {
         name: "modest-available",
-        current_score: 6.25,
-        score_1h: 6.25,
+        current_score: 7.5,
+        score_1h: 7.5,
       },
       {
         name: "near-reset-empty",
         current_score: 0,
-        score_1h: 11.46,
+        score_1h: 13.75,
+      },
+    ]);
+  });
+
+  test("prefers the earliest bottleneck reset instead of always checking 5h first", () => {
+    const weeklyBottleneckResetsSooner: AccountQuotaSummary = {
+      name: "weekly-bottleneck-sooner",
+      account_id: "acct-weekly-bottleneck-sooner",
+      user_id: null,
+      identity: "acct-weekly-bottleneck-sooner",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T06:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 90,
+        window_seconds: 604_800,
+        reset_at: "2026-04-08T02:00:00.000Z",
+      },
+    };
+
+    const fiveHourBottleneckResetsLater: AccountQuotaSummary = {
+      name: "five-hour-bottleneck-later",
+      account_id: "acct-five-hour-bottleneck-later",
+      user_id: null,
+      identity: "acct-five-hour-bottleneck-later",
+      plan_type: "plus",
+      credits_balance: 1,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T03:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 90,
+        window_seconds: 604_800,
+        reset_at: "2026-04-08T07:00:00.000Z",
+      },
+    };
+
+    expect(
+      rankAutoSwitchCandidates([weeklyBottleneckResetsSooner, fiveHourBottleneckResetsLater]),
+    ).toMatchObject([
+      {
+        name: "weekly-bottleneck-sooner",
+        current_score: 10,
+        score_1h: 10,
+      },
+      {
+        name: "five-hour-bottleneck-later",
+        current_score: 10,
+        score_1h: 10,
       },
     ]);
   });

@@ -4,12 +4,17 @@ import { dirname, join } from "node:path";
 import {
   convertFiveHourPercentToPlusWeeklyUnits,
   convertOneWeekPercentToPlusWeeklyUnits,
+  resolveFiveHourToOneWeekRawRatio,
 } from "../plan-quota-profile.js";
 
 const WATCH_HISTORY_FILE_NAME = "watch-quota-history.jsonl";
 const WATCH_HISTORY_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const WATCH_HISTORY_KEEPALIVE_MS = 60 * 1000;
 const WATCH_HISTORY_WINDOW_MS = 60 * 60 * 1000;
+const WATCH_HISTORY_RESET_AT_TOLERANCE_MS = 60 * 1000;
+const WATCH_HISTORY_RATIO_DIAGNOSTIC_WINDOW_MS = 24 * 60 * 60 * 1000;
+const WATCH_HISTORY_RATIO_WARNING_RELATIVE_DELTA = 0.2;
+const WATCH_HISTORY_RATIO_WARNING_MIN_SAMPLES = 3;
 
 export interface WatchHistoryWindowSnapshot {
   used_percent: number;
@@ -67,6 +72,18 @@ export interface WatchHistoryStore {
 
 export type WatchQuotaHistoryRecord = WatchHistoryRecord;
 export type WatchEtaContext = WatchHistoryEtaContext;
+
+export interface WatchHistoryObservedRatioDiagnostic {
+  dimension: "plan";
+  key: string;
+  sample_count: number;
+  observed_mean_raw_ratio: number;
+  observed_weighted_raw_ratio: number;
+  variance: number;
+  expected_raw_ratio: number | null;
+  relative_delta: number | null;
+  warning: boolean;
+}
 
 function roundToTwo(value: number): number {
   return Number(value.toFixed(2));
@@ -189,6 +206,11 @@ function isRecent(recordedAt: string, now: Date): boolean {
 function isInsideRateWindow(recordedAt: string, now: Date): boolean {
   const recordedAtMs = Date.parse(recordedAt);
   return now.getTime() - recordedAtMs <= WATCH_HISTORY_WINDOW_MS;
+}
+
+function isInsideObservedRatioWindow(recordedAt: string, now: Date): boolean {
+  const recordedAtMs = Date.parse(recordedAt);
+  return now.getTime() - recordedAtMs <= WATCH_HISTORY_RATIO_DIAGNOSTIC_WINDOW_MS;
 }
 
 function formatRecord(record: WatchHistoryRecord): string {
@@ -334,15 +356,7 @@ function normalizeTargetSnapshot(raw: unknown): WatchHistoryTargetSnapshot {
   };
 }
 
-function windowsMatch(left: WatchHistoryWindowSnapshot | null, right: WatchHistoryWindowSnapshot | null): boolean {
-  if (left === null || right === null) {
-    return false;
-  }
-
-  return left.reset_at !== null && left.reset_at === right.reset_at;
-}
-
-function deltaForWindow(
+function deltaForContinuousWindow(
   left: WatchHistoryWindowSnapshot | null,
   right: WatchHistoryWindowSnapshot | null,
 ): number | null {
@@ -350,20 +364,16 @@ function deltaForWindow(
     return null;
   }
 
-  if (!windowsMatch(left, right)) {
-    return null;
-  }
-
   return Math.max(0, right.used_percent - left.used_percent);
 }
 
-function scoreDeltaForPair(
+function scoreDeltaForSegment(
   left: WatchHistoryRecord,
   right: WatchHistoryRecord,
   planType: string | null,
 ): number | null {
-  const fiveHourDelta = deltaForWindow(left.five_hour, right.five_hour);
-  const oneWeekDelta = deltaForWindow(left.one_week, right.one_week);
+  const fiveHourDelta = deltaForContinuousWindow(left.five_hour, right.five_hour);
+  const oneWeekDelta = deltaForContinuousWindow(left.one_week, right.one_week);
 
   if (fiveHourDelta === null && oneWeekDelta === null) {
     return null;
@@ -382,25 +392,242 @@ function scoreDeltaForPair(
   return validDeltas.length === 0 ? null : Math.max(...validDeltas);
 }
 
-function computePairRate(
+function isSameWatchHistoryAccount(
   left: WatchHistoryRecord,
   right: WatchHistoryRecord,
-): number | null {
+): boolean {
+  if (left.identity !== null && right.identity !== null) {
+    return left.identity === right.identity;
+  }
+
+  if (left.account_id !== null && right.account_id !== null) {
+    return left.account_id === right.account_id;
+  }
+
+  return left.account_name === right.account_name;
+}
+
+function isNonDecreasingWindow(
+  left: WatchHistoryWindowSnapshot | null,
+  right: WatchHistoryWindowSnapshot | null,
+): boolean {
+  if (left === null || right === null) {
+    return true;
+  }
+
+  return right.used_percent >= left.used_percent;
+}
+
+function hasCompatibleResetAt(
+  left: WatchHistoryWindowSnapshot | null,
+  right: WatchHistoryWindowSnapshot | null,
+): boolean {
+  const leftResetAt = left?.reset_at ?? null;
+  const rightResetAt = right?.reset_at ?? null;
+
+  if (leftResetAt === null || rightResetAt === null) {
+    return true;
+  }
+
+  return (
+    Math.abs(Date.parse(rightResetAt) - Date.parse(leftResetAt)) <=
+    WATCH_HISTORY_RESET_AT_TOLERANCE_MS
+  );
+}
+
+function isContinuousWindow(
+  left: WatchHistoryWindowSnapshot | null,
+  right: WatchHistoryWindowSnapshot | null,
+): boolean {
+  return isNonDecreasingWindow(left, right) && hasCompatibleResetAt(left, right);
+}
+
+function isSameRateSegment(
+  left: WatchHistoryRecord,
+  right: WatchHistoryRecord,
+): boolean {
   if (Date.parse(right.recorded_at) <= Date.parse(left.recorded_at)) {
-    return null;
+    return false;
   }
 
-  const delta = scoreDeltaForPair(left, right, right.plan_type ?? left.plan_type);
-  if (delta === null) {
-    return null;
+  if (!isSameWatchHistoryAccount(left, right)) {
+    return false;
   }
 
-  const elapsedHours = (Date.parse(right.recorded_at) - Date.parse(left.recorded_at)) / 3_600_000;
-  if (elapsedHours <= 0) {
-    return null;
+  if (left.plan_type !== right.plan_type) {
+    return false;
   }
 
-  return roundToTwo(delta / elapsedHours);
+  return (
+    isContinuousWindow(left.five_hour, right.five_hour) &&
+    isContinuousWindow(left.one_week, right.one_week)
+  );
+}
+
+function computeSegmentDelta(
+  start: WatchHistoryRecord,
+  end: WatchHistoryRecord,
+): number | null {
+  return scoreDeltaForSegment(start, end, end.plan_type ?? start.plan_type);
+}
+
+interface WatchHistorySegment {
+  start: WatchHistoryRecord;
+  end: WatchHistoryRecord;
+  elapsedHours: number;
+}
+
+interface WatchHistorySegmentMetrics extends WatchHistorySegment {
+  delta_5h_raw: number | null;
+  delta_1w_raw: number | null;
+  delta_5h_eq_1w: number | null;
+  delta_1w_eq: number | null;
+  segment_delta_1w_units: number | null;
+}
+
+function collectContinuousSegments(records: WatchHistoryRecord[]): WatchHistorySegment[] {
+  if (records.length < 2) {
+    return [];
+  }
+
+  const segments: WatchHistorySegment[] = [];
+  let segmentStart = records[0] ?? null;
+  let segmentEnd = segmentStart;
+
+  const appendSegment = (start: WatchHistoryRecord | null, end: WatchHistoryRecord | null) => {
+    if (!start || !end || start === end) {
+      return;
+    }
+
+    const elapsedHours = (Date.parse(end.recorded_at) - Date.parse(start.recorded_at)) / 3_600_000;
+    if (elapsedHours <= 0) {
+      return;
+    }
+
+    segments.push({ start, end, elapsedHours });
+  };
+
+  for (let index = 1; index < records.length; index += 1) {
+    const right = records[index];
+    const left = segmentEnd;
+    if (!left || !right) {
+      continue;
+    }
+
+    const ageMs = Date.parse(right.recorded_at) - Date.parse(left.recorded_at);
+    if (
+      ageMs > 0 &&
+      ageMs <= WATCH_HISTORY_WINDOW_MS &&
+      isSameRateSegment(left, right)
+    ) {
+      segmentEnd = right;
+      continue;
+    }
+
+    appendSegment(segmentStart, segmentEnd);
+    segmentStart = right;
+    segmentEnd = right;
+  }
+
+  appendSegment(segmentStart, segmentEnd);
+  return segments;
+}
+
+function toSegmentMetrics(segment: WatchHistorySegment): WatchHistorySegmentMetrics {
+  const planType = segment.end.plan_type ?? segment.start.plan_type;
+  const delta5hRaw = deltaForContinuousWindow(segment.start.five_hour, segment.end.five_hour);
+  const delta1wRaw = deltaForContinuousWindow(segment.start.one_week, segment.end.one_week);
+  const delta5hEq1w =
+    delta5hRaw === null ? null : convertFiveHourPercentToWeeklyEquivalent(delta5hRaw, planType);
+  const delta1wEq =
+    delta1wRaw === null ? null : convertOneWeekPercentToPlusWeeklyUnits(delta1wRaw, planType);
+  const validDeltas = [delta5hEq1w, delta1wEq].filter(
+    (value): value is number => typeof value === "number",
+  );
+
+  return {
+    ...segment,
+    delta_5h_raw: delta5hRaw,
+    delta_1w_raw: delta1wRaw,
+    delta_5h_eq_1w: delta5hEq1w,
+    delta_1w_eq: delta1wEq,
+    segment_delta_1w_units: validDeltas.length === 0 ? null : Math.max(...validDeltas),
+  };
+}
+
+function buildObservedRatioDiagnostic(
+  dimension: "plan",
+  key: string,
+  metrics: WatchHistorySegmentMetrics[],
+): WatchHistoryObservedRatioDiagnostic {
+  const ratios = metrics.map((segment) => (segment.delta_5h_raw ?? 0) / (segment.delta_1w_raw ?? 1));
+  const observedMean = ratios.reduce((sum, value) => sum + value, 0) / ratios.length;
+  const variance =
+    ratios.reduce((sum, value) => sum + (value - observedMean) ** 2, 0) / ratios.length;
+  const total5h = metrics.reduce((sum, segment) => sum + (segment.delta_5h_raw ?? 0), 0);
+  const total1w = metrics.reduce((sum, segment) => sum + (segment.delta_1w_raw ?? 0), 0);
+  const expected = Number.isFinite(resolveFiveHourToOneWeekRawRatio(key))
+    ? resolveFiveHourToOneWeekRawRatio(key)
+    : null;
+  const weighted = total1w > 0 ? total5h / total1w : observedMean;
+  const relativeDelta = expected && expected > 0 ? (weighted - expected) / expected : null;
+
+  return {
+    dimension,
+    key,
+    sample_count: metrics.length,
+    observed_mean_raw_ratio: roundToTwo(observedMean),
+    observed_weighted_raw_ratio: roundToTwo(weighted),
+    variance: roundToTwo(variance),
+    expected_raw_ratio: expected === null ? null : roundToTwo(expected),
+    relative_delta: relativeDelta === null ? null : roundToTwo(relativeDelta),
+    warning:
+      relativeDelta !== null &&
+      metrics.length >= WATCH_HISTORY_RATIO_WARNING_MIN_SAMPLES &&
+      Math.abs(relativeDelta) >= WATCH_HISTORY_RATIO_WARNING_RELATIVE_DELTA,
+  };
+}
+
+export function computeWatchObservedRatioDiagnostics(
+  history: WatchHistoryRecord[],
+  now = new Date(),
+): WatchHistoryObservedRatioDiagnostic[] {
+  const recentHistory = history
+    .filter((record) => isInsideObservedRatioWindow(record.recorded_at, now))
+    .sort((left, right) => Date.parse(left.recorded_at) - Date.parse(right.recorded_at));
+
+  const metrics = collectContinuousSegments(recentHistory)
+    .map(toSegmentMetrics)
+    .filter(
+      (segment) =>
+        typeof segment.delta_5h_raw === "number" &&
+        typeof segment.delta_1w_raw === "number" &&
+        segment.delta_1w_raw > 0,
+    );
+
+  const groups = new Map<string, WatchHistorySegmentMetrics[]>();
+  const pushGroup = (dimension: "plan", key: string, segment: WatchHistorySegmentMetrics) => {
+    const groupKey = `${dimension}:${key}`;
+    const existing = groups.get(groupKey);
+    if (existing) {
+      existing.push(segment);
+      return;
+    }
+    groups.set(groupKey, [segment]);
+  };
+
+  for (const segment of metrics) {
+    if (segment.end.plan_type) {
+      pushGroup("plan", segment.end.plan_type, segment);
+    }
+  }
+
+  return [...groups.entries()]
+    .map(([groupKey, groupMetrics]) => {
+      const [dimension, key] = groupKey.split(":", 2) as ["plan", string];
+      return buildObservedRatioDiagnostic(dimension, key, groupMetrics);
+    })
+    .sort((left, right) => left.key.localeCompare(right.key));
 }
 
 function computeRemainingPercent(window: WatchHistoryWindowSnapshot | null): number | null {
@@ -615,42 +842,22 @@ function computeRateFromHistory(records: WatchHistoryRecord[]): number | null {
     return null;
   }
 
-  let totalDelta = 0;
-  let totalHours = 0;
-  let sawValidPair = false;
+  const segments = collectContinuousSegments(records).map(toSegmentMetrics);
+  const validSegments = segments.filter(
+    (segment) => typeof segment.segment_delta_1w_units === "number" && segment.elapsedHours > 0,
+  );
 
-  for (let index = 1; index < records.length; index += 1) {
-    const left = records[index - 1];
-    const right = records[index];
-    if (!left || !right) {
-      continue;
-    }
-
-    const ageMs = Date.parse(right.recorded_at) - Date.parse(left.recorded_at);
-    if (ageMs <= 0 || ageMs > WATCH_HISTORY_WINDOW_MS) {
-      continue;
-    }
-
-    const delta = scoreDeltaForPair(left, right, right.plan_type ?? left.plan_type);
-    if (delta === null) {
-      continue;
-    }
-
-    const elapsedHours = ageMs / 3_600_000;
-    if (elapsedHours <= 0) {
-      continue;
-    }
-
-    sawValidPair = true;
-    totalDelta += delta;
-    totalHours += elapsedHours;
-  }
-
-  if (!sawValidPair || totalHours <= 0) {
+  if (validSegments.length === 0) {
     return null;
   }
 
-  return roundToTwo(totalDelta / totalHours);
+  const totalDelta = validSegments.reduce(
+    (sum, segment) => sum + (segment.segment_delta_1w_units ?? 0),
+    0,
+  );
+  const totalHours = validSegments.reduce((sum, segment) => sum + segment.elapsedHours, 0);
+
+  return totalHours <= 0 ? null : roundToTwo(totalDelta / totalHours);
 }
 
 export function computeWatchHistoryEta(

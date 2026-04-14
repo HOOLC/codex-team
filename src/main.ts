@@ -198,6 +198,7 @@ export async function runCli(
           store,
           stdout: streams.stdout,
           debugLog,
+          debug,
           json,
           targetName: parsed.positionals[0],
           verbose: parsed.flags.has("--verbose"),

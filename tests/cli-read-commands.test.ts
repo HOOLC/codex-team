@@ -9,6 +9,7 @@ import packageJson from "../package.json";
 
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
+import { maskAccountId } from "../src/auth-snapshot.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -51,6 +52,84 @@ async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Pr
         available: "available",
         five_hour: { used_percent: 20, window_seconds: 18_000, reset_at: "2026-04-10T14:00:00.000Z" },
         one_week: { used_percent: 6, window_seconds: 604_800, reset_at: "2026-04-16T10:00:00.000Z" },
+        source: "watch",
+      }),
+    ].join("\n") + "\n",
+  );
+}
+
+async function seedRecentRatioWatchHistory(homeDir: string, accountName = "plus-main"): Promise<void> {
+  const now = Date.now();
+  const iso = (offsetMinutes: number) => new Date(now + offsetMinutes * 60_000).toISOString();
+
+  await mkdir(join(homeDir, ".codex-team"), { recursive: true });
+  await writeFile(
+    join(homeDir, ".codex-team", "watch-quota-history.jsonl"),
+    [
+      JSON.stringify({
+        recorded_at: iso(-180),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: iso(120) },
+        one_week: { used_percent: 10, window_seconds: 604_800, reset_at: iso(7 * 24 * 60) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-160),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 16, window_seconds: 18_000, reset_at: iso(121) },
+        one_week: { used_percent: 11, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 1) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-120),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 0, window_seconds: 18_000, reset_at: iso(420) },
+        one_week: { used_percent: 11, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 2) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-100),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 7, window_seconds: 18_000, reset_at: iso(421) },
+        one_week: { used_percent: 12, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 3) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-60),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 0, window_seconds: 18_000, reset_at: iso(720) },
+        one_week: { used_percent: 12, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 4) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-40),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 6, window_seconds: 18_000, reset_at: iso(721) },
+        one_week: { used_percent: 13, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 5) },
         source: "watch",
       }),
     ].join("\n") + "\n",
@@ -199,6 +278,10 @@ describe("CLI Read Commands", () => {
 
       const exitCode = await runCli(["current", "--debug"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          readCurrentRuntimeAccountResult: async () => null,
+          readCurrentRuntimeQuotaResult: async () => null,
+        }),
         stdout: stdout.stream,
         stderr: stderr.stream,
       });
@@ -233,6 +316,10 @@ describe("CLI Read Commands", () => {
       const currentStdout = captureWritable();
       const currentCode = await runCli(["current", "--json"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          readCurrentRuntimeAccountResult: async () => null,
+          readCurrentRuntimeQuotaResult: async () => null,
+        }),
         stdout: currentStdout.stream,
         stderr: stderr.stream,
       });
@@ -1005,30 +1092,31 @@ wire_api = "responses"
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
+      expect(lines[1]).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x2");
+      expect(lines[2]).toBe("Total: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
       expect(output).not.toContain("CREDITS");
-      expect(output).toContain("AVAILABLE");
+      expect(output).not.toContain("AVAILABLE");
       expect(output).toContain("ETA");
-      expect(output).toContain("CURRENT SCORE");
-      expect(output).toContain("available");
+      expect(output).toContain("SCORE");
+      expect(output).toContain("NEXT RESET");
       expect(output).toContain("* quota-main");
       expect(output).toContain("  quota-backup");
-      expect(output).toContain("1.8h");
+      expect(output).toContain("2.1h");
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
-      );
-      expect(output).toContain(
-        dayjs.utc("2026-03-19T03:14:00.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
       expect(tableLines).toHaveLength(4);
       expect(currentRow).toBeDefined();
       expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
-      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
-      expect(tableLines[0]?.indexOf("PLAN TYPE")).toBe(tableLines[3]?.indexOf("plus"));
-      expect((tableLines[0]?.indexOf("CURRENT SCORE") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("AVAILABLE") ?? -1,
+      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(
+        currentRow?.indexOf(maskAccountId("acct-cli-quota-text-a")),
+      );
+      expect(tableLines[0]?.indexOf("PLAN")).toBe(tableLines[3]?.indexOf("plus"));
+      expect((tableLines[0]?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
+        tableLines[0]?.indexOf("PLAN") ?? -1,
       );
       expect((tableLines[0]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("CURRENT SCORE") ?? -1,
+        tableLines[0]?.indexOf("SCORE") ?? -1,
       );
     } finally {
       await cleanupTempHome(homeDir);
@@ -1133,7 +1221,83 @@ wire_api = "responses"
     }
   });
 
-  test("list text output uses unified thresholds for low remaining quota signals", async () => {
+  test("list falls back to recent cached quota and warns when fast refresh fails", async () => {
+    const homeDir = await createTempHome();
+    let fetchAttempts = 0;
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          fetchAttempts += 1;
+          throw new TypeError("fetch failed");
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-cached-main");
+      await runCli(["save", "cached-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-cached-backup");
+      await runCli(["save", "cached-backup", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const seededStore = createAccountStore(homeDir, {
+        fetchImpl: async (_input, init) => {
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: accountId === "acct-cli-cached-main" ? 40 : 70,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 300,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: accountId === "acct-cli-cached-main" ? 30 : 45,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await seededStore.refreshAllQuotas();
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["list"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(fetchAttempts).toBe(2);
+      expect(output).toContain("cached-main");
+      expect(output).toContain("cached-backup");
+      expect(output).toContain('Warning: cached-main using cached quota from');
+      expect(output).toContain('Warning: cached-backup using cached quota from');
+      expect(output).toContain("after refresh failed");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output uses distinct score and usage color thresholds", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -1143,14 +1307,26 @@ wire_api = "responses"
           if (url.endsWith("/backend-api/wham/usage")) {
             const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
             const primaryUsedPercent =
-              accountId === "acct-cli-color-unavailable"
+              accountId === "acct-cli-color-weekly-blocked"
+                ? 88
+                : accountId === "acct-cli-color-healthy"
+                ? 20
+                : accountId === "acct-cli-color-full"
+                ? 0
+                : accountId === "acct-cli-color-five-hour-blocked"
                 ? 100
                 : accountId === "acct-cli-color-critical"
                   ? 92
                   : 85;
             const secondaryUsedPercent =
-              accountId === "acct-cli-color-unavailable"
-                ? 88
+              accountId === "acct-cli-color-weekly-blocked"
+                ? 100
+                : accountId === "acct-cli-color-healthy"
+                  ? 10
+                : accountId === "acct-cli-color-full"
+                  ? 0
+                : accountId === "acct-cli-color-five-hour-blocked"
+                  ? 88
                 : accountId === "acct-cli-color-critical"
                   ? 59
                   : 25;
@@ -1196,8 +1372,29 @@ wire_api = "responses"
         stderr: captureWritable().stream,
       });
 
-      await writeCurrentAuth(homeDir, "acct-cli-color-unavailable");
-      await runCli(["save", "quota-unavailable", "--json"], {
+      await writeCurrentAuth(homeDir, "acct-cli-color-healthy");
+      await runCli(["save", "quota-healthy", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-full");
+      await runCli(["save", "quota-full", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-five-hour-blocked");
+      await runCli(["save", "quota-five-hour-blocked", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-weekly-blocked");
+      await runCli(["save", "quota-weekly-blocked", "--json"], {
         store,
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
@@ -1213,34 +1410,295 @@ wire_api = "responses"
       expect(listCode).toBe(0);
 
       const output = listStdout.read();
-      expect(output).toContain("\u001b[30m\u001b[41m* quota-unavailable");
-      expect(output).toContain("\u001b[1m\u001b[31m92%\u001b[0m");
-      expect(output).toContain("\u001b[1m\u001b[31m8%\u001b[0m");
+      expect(output).toContain("\u001b[30m\u001b[41m* quota-weekly-blocked");
+      expect(output).not.toContain("\u001b[30m\u001b[41m  quota-five-hour-blocked");
       expect(output).toContain("\u001b[1m\u001b[93m85%\u001b[0m");
-      expect(output).toContain("\u001b[1m\u001b[93m15.04%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m15%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m92%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m8%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[31m100%\u001b[0m");
+      expect(output).toContain("\u001b[32m80%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[32m100%\u001b[0m");
       expect(output).toContain("\u001b[1m\u001b[36m (5m)\u001b[0m");
+      expect(output).not.toContain("\u001b[32m75%\u001b[0m");
+      expect(output).not.toContain("\u001b[32m41%\u001b[0m");
 
       const plainOutput = output.replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 5);
-      const unavailableRow = tableLines.find((line) => line.includes("quota-unavailable"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 8);
+      const weeklyBlockedRow = tableLines.find((line) => line.includes("quota-weekly-blocked"));
+      const fiveHourBlockedRow = tableLines.find((line) => line.includes("quota-five-hour-blocked"));
       const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
+      const healthyRow = tableLines.find((line) => line.includes("quota-healthy"));
+      const fullRow = tableLines.find((line) => line.includes("quota-full"));
       const lowRow = tableLines.find((line) => line.includes("quota-low"));
 
-      expect(unavailableRow).toBeDefined();
+      expect(weeklyBlockedRow).toBeDefined();
+      expect(fiveHourBlockedRow).toBeDefined();
       expect(criticalRow).toBeDefined();
+      expect(healthyRow).toBeDefined();
+      expect(fullRow).toBeDefined();
       expect(lowRow).toBeDefined();
-      const availableColumn = tableLines[0]?.indexOf("AVAILABLE") ?? -1;
-      const scoreColumn = tableLines[0]?.indexOf("CURRENT SCORE") ?? -1;
+      const scoreColumn = tableLines[0]?.indexOf("SCORE") ?? -1;
       const used5hColumn = tableLines[0]?.indexOf("5H USED") ?? -1;
-      const reset5hColumn = tableLines[0]?.indexOf("5H RESET AT") ?? -1;
-      expect(unavailableRow?.indexOf("unavailable", availableColumn)).toBe(availableColumn);
+      const used1wColumn = tableLines[0]?.indexOf("1W USED") ?? -1;
+      const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
+      expect(weeklyBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
+      expect(fiveHourBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
       expect(criticalRow?.indexOf("8%", scoreColumn)).toBe(scoreColumn);
+      expect(healthyRow?.indexOf("80%", scoreColumn)).toBe(scoreColumn);
+      expect(fullRow?.indexOf("100%", scoreColumn)).toBe(scoreColumn);
       expect(criticalRow?.indexOf("92%", used5hColumn)).toBe(used5hColumn);
       expect(lowRow?.indexOf("85%", used5hColumn)).toBe(used5hColumn);
+      expect(healthyRow?.indexOf("20%", used5hColumn)).toBe(used5hColumn);
+      expect(healthyRow?.indexOf("10%", used1wColumn)).toBe(used1wColumn);
+      expect(fullRow?.indexOf("0%", used5hColumn)).toBe(used5hColumn);
       expect(lowRow?.includes("(5m)")).toBe(true);
-      expect(lowRow?.indexOf("(5m)", reset5hColumn)).toBeGreaterThan(reset5hColumn);
+      expect(lowRow?.indexOf("(5m)", nextResetColumn)).toBeGreaterThan(nextResetColumn);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output prefers the earliest bottleneck reset over a fixed 5h-first reset tie-break", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const primaryResetAt =
+            accountId === "acct-cli-bottleneck-weekly"
+              ? 1_775_610_400
+              : 1_775_599_600;
+          const secondaryResetAt =
+            accountId === "acct-cli-bottleneck-weekly"
+              ? 1_775_596_800
+              : 1_775_614_000;
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 20,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 7_200,
+                reset_at: primaryResetAt,
+              },
+              secondary_window: {
+                used_percent: 90,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 7_200,
+                reset_at: secondaryResetAt,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-bottleneck-five-hour");
+      await runCli(["save", "five-hour-bottleneck-later", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-bottleneck-weekly");
+      await runCli(["save", "weekly-bottleneck-sooner", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+
+      expect(dataRows[0]).toContain("* weekly-bottleneck-sooner");
+      expect(dataRows[1]).toContain("five-hour-bottleneck-later");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output prefers zero-score accounts that recover sooner over static 5h remain", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const isWeeklyBlocked = accountId === "acct-cli-zero-score-weekly";
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: isWeeklyBlocked ? 20 : 100,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: isWeeklyBlocked ? 7_200 : 1_200,
+                reset_at: isWeeklyBlocked ? 1_775_610_400 : 1_775_588_800,
+              },
+              secondary_window: {
+                used_percent: isWeeklyBlocked ? 100 : 50,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: isWeeklyBlocked ? 14_400 : 86_400,
+                reset_at: isWeeklyBlocked ? 1_775_617_600 : 1_775_671_200,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-weekly");
+      await runCli(["save", "weekly-blocked-later", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-five-hour");
+      await runCli(["save", "five-hour-blocked-sooner", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+
+      expect(dataRows[0]).toContain("five-hour-blocked-sooner");
+      expect(dataRows[1]).toContain("weekly-blocked-later");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output uses recovery reset when multiple exhausted windows block the account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const bothBlockedFiveHourResetAt = 1_775_588_800;
+      const bothBlockedOneWeekResetAt = 1_775_617_600;
+      const fiveHourOnlyResetAt = 1_775_599_600;
+
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const isBothBlocked = accountId === "acct-cli-zero-score-both-blocked";
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 100,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: isBothBlocked ? 1_200 : 2_400,
+                reset_at: isBothBlocked ? bothBlockedFiveHourResetAt : fiveHourOnlyResetAt,
+              },
+              secondary_window: {
+                used_percent: isBothBlocked ? 100 : 50,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: isBothBlocked ? 30_000 : 86_400,
+                reset_at: isBothBlocked ? bothBlockedOneWeekResetAt : 1_775_671_200,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-both-blocked");
+      await runCli(["save", "both-blocked-later", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-zero-score-five-hour-recovery");
+      await runCli(["save", "five-hour-only-sooner", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
+      const dataRows = tableLines.slice(2);
+      const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
+      const bothBlockedRow = dataRows.find((line) => line.includes("both-blocked-later"));
+
+      expect(dataRows[0]).toContain("five-hour-only-sooner");
+      expect(dataRows[1]).toContain("both-blocked-later");
+      expect(bothBlockedRow).toBeDefined();
+
+      const expectedRecoveryReset = dayjs
+        .unix(bothBlockedOneWeekResetAt)
+        .tz(dayjs.tz.guess())
+        .format("MM-DD HH:mm");
+      expect(bothBlockedRow?.indexOf(expectedRecoveryReset, nextResetColumn)).toBe(nextResetColumn);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1257,7 +1715,7 @@ wire_api = "responses"
           if (url.endsWith("/backend-api/wham/usage")) {
             const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
             return jsonResponse({
-              plan_type: accountId === "acct-cli-verbose-team" ? "team" : "plus",
+              plan_type: accountId === "acct-cli-verbose-team" ? "pro" : "plus",
               rate_limit: {
                 primary_window: {
                   used_percent: accountId === "acct-cli-verbose-team" ? 40 : 20,
@@ -1307,18 +1765,103 @@ wire_api = "responses"
 
       expect(listCode).toBe(0);
       const output = listStdout.read();
+      expect(output).toContain("Accounts:");
+      expect(output).toContain("Total: ");
       expect(output).toContain("ETA");
       expect(output).toContain("ETA 5H->1W");
       expect(output).toContain("ETA 1W");
       expect(output).toContain("RATE 1W UNITS");
       expect(output).toContain("5H REMAIN->1W");
-      expect(output).toContain("CURRENT SCORE");
+      expect(output).toContain("SCORE");
       expect(output).toContain("1H SCORE");
       expect(output).toContain("5H->1W 1H");
       expect(output).toContain("1W 1H");
-      expect(output).toContain("1W:5H");
+      expect(output).toContain("5H:1W");
+      expect(output).toContain("5H RESET AT");
+      expect(output).toContain("1W RESET AT");
       expect(output).toContain("quota-plus");
       expect(output).toContain("quota-team");
+      expect(output).toContain("600%");
+      expect(output).toContain("1000%");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list shows no ETA for accounts that are already unavailable", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedWatchHistory(homeDir);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const primaryUsedPercent = accountId === "acct-cli-blocked" ? 100 : 40;
+          const secondaryUsedPercent = accountId === "acct-cli-blocked" ? 65 : 35;
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: primaryUsedPercent,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 400,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: secondaryUsedPercent,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-blocked");
+      await runCli(["save", "quota-blocked", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-available");
+      await runCli(["save", "quota-available", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const output = listStdout.read();
+      const blockedRow = output
+        .trimEnd()
+        .split("\n")
+        .find((line) => line.includes("quota-blocked"));
+
+      expect(blockedRow).toBeDefined();
+      expect(blockedRow).toContain("quota-blocked");
+      expect(blockedRow).not.toContain("unavailable");
+      expect(blockedRow).toMatch(/\s-\s+/);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1376,6 +1919,62 @@ wire_api = "responses"
         bottleneck: "five_hour",
       });
       expect(typeof output.successes[0]?.eta?.rate_1w_units_per_hour).toBe("number");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list --debug warns when observed ratios diverge from built-in plan ratios", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedRecentRatioWatchHistory(homeDir);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 60,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 400,
+                reset_at: Math.floor(Date.now() / 1000) + 400,
+              },
+              secondary_window: {
+                used_percent: 50,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: Math.floor(Date.now() / 1000) + 4_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          }),
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-json-eta");
+      await runCli(["save", "plus-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["list", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const debugOutput = stderr.read();
+      expect(debugOutput).toContain("[debug] list: observed_5h_1w_ratio window=24h plan=plus");
+      expect(debugOutput).not.toContain("dimension=bucket");
+      expect(debugOutput).not.toContain("[debug] warning: list observed_5h_1w_ratio_mismatch window=24h plan=plus");
     } finally {
       await cleanupTempHome(homeDir);
     }

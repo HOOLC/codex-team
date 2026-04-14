@@ -30,9 +30,8 @@ describe("CLI", () => {
       const stdout = captureWritable();
       const stderr = captureWritable();
 
-      // Abort after a short delay to prevent the CLI watcher from blocking
       const controller = new AbortController();
-      setTimeout(() => controller.abort(), 500);
+      controller.abort();
 
       const exitCode = await runCli(["watch"], {
         store,
@@ -45,6 +44,7 @@ describe("CLI", () => {
       });
 
       // CLI watch mode should report entering CLI mode
+      expect(exitCode).toBe(0);
       const stderrOutput = stderr.read();
       expect(stderrOutput).toContain("CLI watch mode");
     } finally {
@@ -82,7 +82,7 @@ describe("CLI", () => {
     try {
       const store = createAccountStore(homeDir);
       await writeCurrentAuth(homeDir, "acct-watch-history");
-      await store.saveCurrentAccount("plus-main");
+      const account = await store.saveCurrentAccount("plus-main");
 
       const stdout = captureWritable();
       const stderr = captureWritable();
@@ -143,6 +143,8 @@ describe("CLI", () => {
       const history = await readFile(historyPath, "utf8");
       expect(history).toContain("\"source\":\"watch\"");
       expect(history).toContain("\"account_name\":\"plus-main\"");
+      expect(history).toContain(`\"account_id\":\"${account.account_id}\"`);
+      expect(history).toContain(`\"identity\":\"${account.identity}\"`);
       expect(history).toContain("\"used_percent\":10");
       expect(history).toContain("\"used_percent\":20");
     } finally {
@@ -895,7 +897,7 @@ describe("CLI", () => {
       expect(stdout.read()).toMatch(
         /\[\d{2}:\d{2}:\d{2}\] auto-switch from="watch-a" to="watch-b"/,
       );
-      expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 600_000 }]);
+      expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 900_000 }]);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1900,16 +1902,16 @@ describe("CLI", () => {
         selected: {
           name: "beta",
           available: "available",
-          current_score: 6.25,
+          current_score: 7.5,
           remain_5h: 50,
           remain_1w: 20,
-          remain_5h_in_1w_units: 6.25,
-          five_hour_windows_per_week: 8,
+          remain_5h_in_1w_units: 7.5,
+          five_hour_to_one_week_ratio: 6.67,
         },
       });
-      expect(dryRunPayload.selected.score_1h).toBeCloseTo(11.63, 2);
+      expect(dryRunPayload.selected.score_1h).toBeCloseTo(13.96, 2);
       expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(93.06, 1);
-      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(11.63, 2);
+      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(13.96, 2);
       expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(20, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-gamma");
@@ -1937,8 +1939,8 @@ describe("CLI", () => {
         },
         selected: {
           name: "beta",
-          current_score: 6.25,
-          five_hour_windows_per_week: 8,
+          current_score: 7.5,
+          five_hour_to_one_week_ratio: 6.67,
         },
         quota: {
           available: "available",
@@ -1951,7 +1953,7 @@ describe("CLI", () => {
           },
         },
       });
-      expect(switchPayload.selected.score_1h).toBeCloseTo(11.63, 2);
+      expect(switchPayload.selected.score_1h).toBeCloseTo(13.96, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-beta");
     } finally {

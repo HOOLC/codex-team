@@ -503,7 +503,7 @@ preferred_auth_method = "apikey"
         "gamma",
       ]);
       expect(maxActiveRequests).toBeGreaterThan(1);
-      expect(maxActiveRequests).toBeLessThanOrEqual(3);
+      expect(maxActiveRequests).toBeLessThanOrEqual(8);
     } finally {
       await cleanupTempHome(homeDir);
     }

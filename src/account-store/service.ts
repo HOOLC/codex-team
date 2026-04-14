@@ -46,6 +46,7 @@ import type {
 import {
   extractChatGPTAuth,
   fetchQuotaSnapshot,
+  type QuotaClientMode,
 } from "../quota-client.js";
 export type {
   AccountQuotaSummary,
@@ -58,6 +59,18 @@ export type {
   SwitchAccountResult,
   UpdateAccountResult,
 } from "./types.js";
+
+const LIST_CACHED_QUOTA_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+interface RefreshQuotaOptions {
+  quotaClientMode?: QuotaClientMode;
+  allowCachedQuotaFallback?: boolean;
+  cachedQuotaMaxAgeMs?: number;
+}
+
+function isFiniteTimestamp(value: string | undefined): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
 
 export class AccountStore {
   readonly paths: StorePaths;
@@ -77,8 +90,10 @@ export class AccountStore {
 
   private async quotaSummaryForAccount(
     account: ManagedAccount,
+    quotaOverride?: QuotaSnapshot,
   ): Promise<AccountQuotaSummary> {
-    let planType = account.quota.plan_type ?? null;
+    const quota = quotaOverride ?? account.quota;
+    let planType = quota.plan_type ?? null;
 
     try {
       const snapshot = await readAuthSnapshotFile(account.authPath);
@@ -94,13 +109,39 @@ export class AccountStore {
       user_id: account.user_id ?? null,
       identity: account.identity,
       plan_type: planType,
-      credits_balance: account.quota.credits_balance ?? null,
-      status: account.quota.status,
-      fetched_at: account.quota.fetched_at ?? null,
-      error_message: account.quota.error_message ?? null,
-      unlimited: account.quota.unlimited === true,
-      five_hour: account.quota.five_hour ?? null,
-      one_week: account.quota.one_week ?? null,
+      credits_balance: quota.credits_balance ?? null,
+      status: quota.status,
+      fetched_at: quota.fetched_at ?? null,
+      error_message: quota.error_message ?? null,
+      unlimited: quota.unlimited === true,
+      five_hour: quota.five_hour ?? null,
+      one_week: quota.one_week ?? null,
+    };
+  }
+
+  private getCachedQuotaFallback(
+    account: ManagedAccount,
+    refreshError: Error,
+    now: Date,
+    maxAgeMs: number,
+  ): { quota: QuotaSnapshot; warning: string } | null {
+    const cachedQuota = account.quota;
+    const cachedFetchedAt = cachedQuota.fetched_at;
+    if (cachedQuota.status === "error" || !isFiniteTimestamp(cachedFetchedAt)) {
+      return null;
+    }
+    const cachedFetchedAtMs = Date.parse(cachedFetchedAt);
+    if (now.getTime() - cachedFetchedAtMs > maxAgeMs) {
+      return null;
+    }
+
+    return {
+      quota: {
+        ...cachedQuota,
+        status: "stale",
+        error_message: refreshError.message,
+      },
+      warning: `${account.name} using cached quota from ${cachedFetchedAt} after refresh failed: ${refreshError.message}`,
     };
   }
 
@@ -416,7 +457,10 @@ export class AccountStore {
     };
   }
 
-  async refreshQuotaForAccount(name: string): Promise<RefreshQuotaResult> {
+  async refreshQuotaForAccount(
+    name: string,
+    options: RefreshQuotaOptions = {},
+  ): Promise<RefreshQuotaResult> {
     ensureAccountName(name);
     await this.repository.ensureLayout();
 
@@ -430,6 +474,7 @@ export class AccountStore {
         homeDir: this.paths.homeDir,
         fetchImpl: this.fetchImpl,
         now,
+        mode: options.quotaClientMode,
       });
 
       if (JSON.stringify(result.authSnapshot) !== JSON.stringify(snapshot)) {
@@ -449,6 +494,24 @@ export class AccountStore {
         quota: meta.quota,
       };
     } catch (error) {
+      const refreshError =
+        error instanceof Error ? error : new Error(String(error));
+      if (options.allowCachedQuotaFallback) {
+        const fallback = this.getCachedQuotaFallback(
+          account,
+          refreshError,
+          now,
+          options.cachedQuotaMaxAgeMs ?? LIST_CACHED_QUOTA_MAX_AGE_MS,
+        );
+        if (fallback) {
+          return {
+            account,
+            quota: fallback.quota,
+            warning: fallback.warning,
+          };
+        }
+      }
+
       let planType = meta.quota.plan_type;
       try {
         const extracted = extractChatGPTAuth(snapshot);
@@ -463,14 +526,17 @@ export class AccountStore {
         status: "error",
         plan_type: planType,
         fetched_at: now.toISOString(),
-        error_message: (error as Error).message,
+        error_message: refreshError.message,
       };
       await this.repository.writeAccountMeta(name, meta);
-      throw new Error(`Failed to refresh quota for "${name}": ${(error as Error).message}`);
+      throw new Error(`Failed to refresh quota for "${name}": ${refreshError.message}`);
     }
   }
 
-  async refreshAllQuotas(targetName?: string): Promise<RefreshAllQuotasResult> {
+  async refreshAllQuotas(
+    targetName?: string,
+    options: RefreshQuotaOptions = {},
+  ): Promise<RefreshAllQuotasResult> {
     const { accounts } = await this.listAccounts();
     const targets = targetName
       ? accounts.filter((account) => account.name === targetName)
@@ -481,7 +547,7 @@ export class AccountStore {
     }
 
     const results = new Array<
-      | { success: AccountQuotaSummary }
+      | { success: AccountQuotaSummary; warning?: string }
       | { failure: { name: string; error: string } }
     >(targets.length);
     let nextIndex = 0;
@@ -499,9 +565,10 @@ export class AccountStore {
 
           const account = targets[index];
           try {
-            const refreshed = await this.refreshQuotaForAccount(account.name);
+            const refreshed = await this.refreshQuotaForAccount(account.name, options);
             results[index] = {
-              success: await this.quotaSummaryForAccount(refreshed.account),
+              success: await this.quotaSummaryForAccount(refreshed.account, refreshed.quota),
+              ...(refreshed.warning ? { warning: refreshed.warning } : {}),
             };
           } catch (error) {
             results[index] = {
@@ -517,6 +584,7 @@ export class AccountStore {
 
     const successes: AccountQuotaSummary[] = [];
     const failures: Array<{ name: string; error: string }> = [];
+    const warnings: string[] = [];
     for (const result of results) {
       if (!result) {
         continue;
@@ -524,6 +592,9 @@ export class AccountStore {
 
       if ("success" in result) {
         successes.push(result.success);
+        if (typeof result.warning === "string") {
+          warnings.push(result.warning);
+        }
       } else {
         failures.push(result.failure);
       }
@@ -532,6 +603,7 @@ export class AccountStore {
     return {
       successes,
       failures,
+      warnings,
     };
   }
 
