@@ -1,8 +1,15 @@
 # codex-team
 
-`codex-team` is a small CLI for managing multiple Codex ChatGPT login snapshots on one machine.
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-It stores named snapshots under `~/.codex-team/`, lets you switch the active `~/.codex/auth.json`, and can cache quota usage including 5-hour and weekly window status.
+`codex-team` provides the `codexm` CLI for managing multiple Codex ChatGPT login snapshots on one machine.
+
+Use it when you regularly switch between multiple Codex accounts and want a simpler way to:
+
+- save named account snapshots
+- switch the active `~/.codex/auth.json`
+- check quota usage across saved accounts
+- automatically switch and restart when the current account is exhausted
 
 ## Platform support
 
@@ -22,115 +29,104 @@ After install, use the `codexm` command.
 
 ## Quick start
 
-### macOS (with Codex Desktop)
+### macOS with Codex Desktop
 
 ```bash
-npm install -g codex-team
 codexm add plus1
 codexm add team1
 codexm launch --watch
 ```
 
-`codexm add` opens a login flow and stores each account as a named snapshot. `codexm launch --watch` starts Codex Desktop and keeps a background watcher running so quota exhaustion can switch to the best available saved account.
+This adds a couple of named snapshots, launches Codex Desktop, and keeps a watcher running in the background.
 
-### WSL / Linux (with Codex CLI)
+### Linux / WSL with Codex CLI
 
 ```bash
-npm install -g codex-team
 codexm add plus1
 codexm add team1
+codexm watch
+```
 
-# Use codexm run instead of running codex directly
+In another terminal, start Codex through the wrapper:
+
+```bash
 codexm run -- --model o3
 ```
 
-In another terminal, switch accounts and the running codex process auto-restarts:
+`codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI and restarts it when `~/.codex/auth.json` changes, so a long-running CLI session can follow account switches automatically.
 
-```bash
-codexm switch team1
-# → codex restarts with team1's auth automatically
+## Example output
+
+Redacted `codexm list` example:
+
+```text
+$ codexm list
+Current managed account: plus-main
+Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
+Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
+
+  NAME         IDENTITY   PLAN  SCORE  ETA   5H USED  1W USED  NEXT RESET
+* plus-main    acct...123 plus  72%    2.1h  58%      41%      04-14 18:30
+  team-backup  acct...987 team  64%    1.7h  61%      39%      04-14 19:10
+  plus-old     acct...456 plus  0%     -     43%      100%     04-16 09:00
 ```
 
-Or use watch mode for automatic quota-based switching:
+This is the main command to use when deciding which account to switch to next.
 
-```bash
-codexm watch       # monitors quota and auto-switches
-codexm run         # in another terminal, auto-restarts on switch
-```
+## Core commands
+
+### Manage accounts
+
+- `codexm add <name>`: add a new managed account snapshot
+- `codexm save <name>`: save the currently active auth as a named snapshot
+- `codexm rename <old> <new>`: rename a saved snapshot
+- `codexm remove <name> --yes`: remove a saved snapshot
+
+### Inspect quota and status
+
+- `codexm current [--refresh]`: show the current account and optionally refresh quota
+- `codexm list [--verbose]`: show saved accounts, quota usage, score, ETA, and reset times
+- `codexm list --json`: machine-readable output
+- `codexm list --debug`: include diagnostic details about quota normalization and observed ratios
+
+### Switch and launch
+
+- `codexm switch <name>`: switch to a saved account
+- `codexm switch --auto --dry-run`: preview the best auto-switch candidate
+- `codexm launch [name] [--auto] [--watch]`: launch Codex Desktop on macOS
+
+### Watch and auto-restart
+
+- `codexm watch`: watch quota changes and auto-switch on exhaustion
+- `codexm watch --detach`: run the watcher in the background
+- `codexm watch --status`: inspect detached watcher state
+- `codexm watch --stop`: stop the detached watcher
+- `codexm run [-- ...codexArgs]`: restart the `codex` CLI automatically after auth changes
+
+Use `codexm --help` for the full command reference.
+
+## When should I use each command?
+
+- `codexm list` is the best overview when choosing the next account.
+- `codexm watch` is the automation loop that reacts to quota exhaustion.
+- `codexm run` is useful in CLI workflows where the running `codex` process should follow account switches.
+- Use `--json` for scripting and `--debug` for diagnostics.
+
+For ChatGPT auth snapshots, `codex-team` can save and switch different users under the same ChatGPT account or workspace as separate managed entries when the local login tokens distinguish them.
 
 ## Shell completion
 
-Generate a shell completion script and install it with your shell's standard mechanism:
+Generate a completion script and install it with your shell's standard mechanism:
 
 ```bash
 mkdir -p ~/.zsh/completions
 codexm completion zsh > ~/.zsh/completions/_codexm
+
 mkdir -p ~/.local/share/bash-completion/completions
 codexm completion bash > ~/.local/share/bash-completion/completions/codexm
 ```
 
 The generated scripts dynamically complete saved account names by calling `codexm completion --accounts`.
-
-## Commands
-
-```bash
-codexm --version
-codexm completion <zsh|bash>
-codexm current [--refresh] [--json]
-codexm list [name] [--verbose] [--json]
-codexm add <name> [--device-auth|--with-api-key] [--force] [--json]
-codexm save <name> [--force] [--json]
-codexm update [--json]
-codexm switch <name> [--force] [--json]
-codexm switch --auto --dry-run [--force] [--json]
-codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]
-codexm watch [--no-auto-switch] [--detach] [--status] [--stop]
-codexm run [-- ...codexArgs]
-codexm remove <name> --yes [--json]
-codexm rename <old> <new> [--json]
-```
-
-Global flags: `--help`, `--version`, `--debug`
-
-Use `--json` for machine-readable output and `--debug` for stderr diagnostics.
-
-### Account management
-
-- `codexm add <name>` creates a new managed account without changing the active `~/.codex/auth.json`. By default it uses the built-in browser ChatGPT login flow; add `--device-auth` for device-code login on remote/headless machines. `--with-api-key` reads an API key from stdin, for example `printenv OPENAI_API_KEY | codexm add work-api --with-api-key`. On WSL, the browser opening chain is `wslview` → `powershell.exe Start-Process` → `xdg-open`.
-- `codexm current` shows the active account. Add `--refresh` to include current quota usage.
-- `codexm list` refreshes saved accounts before printing, shows which row is current with `*`, and summarizes availability, score, ETA, usage, and reset times. Add `--verbose` for more quota detail. In the default table, unavailable accounts use a red row background, low remaining quota values use bold yellow/red text, and reset times within one hour get a cyan `(Xm)` suffix.
-
-### Desktop mode (macOS)
-
-- `codexm launch` starts Codex Desktop with current auth, switches first when you pass a saved account name, or picks the best saved account with `codexm launch --auto`. Add `--watch` to keep a detached watcher running after launch. Run `codexm launch` from an external terminal if you need to restart Desktop.
-- `codexm switch`, `codexm switch --auto`, and auth-changing `codexm launch` only let one auth-changing operation run at a time. If another switch is already in progress, the CLI tells you and asks you to retry later.
-- `codexm switch --force` and `codexm switch --auto --force` try to apply the auth change to the running managed Desktop immediately. If that fails, codexm closes the managed Desktop so it does not keep running on the old account.
-- `codexm watch` (with Desktop) watches the managed Codex Desktop session, prints quota updates, and by default auto-switches when the active account is exhausted. Use `--no-auto-switch` for read-only watching. `--detach` runs it in the background; use `--status` and `--stop` to inspect or stop it.
-
-### CLI mode (WSL / Linux / any platform)
-
-- `codexm run [-- ...codexArgs]` wraps the `codex` CLI process and watches `~/.codex/auth.json` for changes. When the auth file changes (e.g., after `codexm switch`), it automatically kills the running codex process and restarts it with the new auth. This solves the problem where codex CLI caches auth in memory at startup and has no hot-reload mechanism. Pass codex arguments after `--`, for example `codexm run -- --model o3`.
-- `codexm watch` (without Desktop) enters CLI watch mode, polling quota via JSON-RPC (`codex-direct-client`) and auto-switching when exhaustion is detected. Processes started via `codexm run` are automatically tracked and restarted on account switch.
-
-Unknown commands and flags fail fast; when there is a close match, `codexm` suggests it.
-
-## Typical flow
-
-### macOS with Desktop
-
-1. Add target accounts with `codexm add <name>` or save the currently active Codex auth with `codexm save <name>`.
-2. Repeat for other accounts.
-3. Switch between saved accounts with `codexm switch <name>`, let the tool choose with `codexm switch --auto`, or start Desktop on the best candidate with `codexm launch --auto --watch`.
-4. Refresh and inspect quota usage with `codexm list`.
-
-### WSL / Linux with CLI
-
-1. Add target accounts with `codexm add <name>`.
-2. Start codex via the wrapper: `codexm run -- --model o3`.
-3. In another terminal, run `codexm watch` for automatic quota monitoring and switching.
-4. When watch detects quota exhaustion and switches accounts, the running `codexm run` session auto-restarts with the new auth — no manual Ctrl+C needed.
-
-For ChatGPT auth snapshots, `codex-team` can save and switch different users under the same ChatGPT account/workspace as separate managed entries when the local login tokens distinguish them.
 
 ## Development
 
