@@ -75,33 +75,35 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 
 ## 常用命令
 
+<!-- GENERATED:CORE_COMMANDS:START -->
 ### 账号管理
 
-- `codexm add <name>`：新增一个托管账号快照
-- `codexm save <name>`：把当前生效的 auth 保存成命名快照
-- `codexm rename <old> <new>`：重命名已保存快照
-- `codexm remove <name> --yes`：删除已保存快照
+- `codexm add <name>`: 新增一个托管账号快照
+- `codexm save <name>`: 把当前生效的 auth 保存成命名快照
+- `codexm rename <old> <new>`: 重命名已保存快照
+- `codexm remove <name> --yes`: 删除已保存快照
 
 ### 查看状态与 quota
 
-- `codexm current [--refresh]`：查看当前账号；可选刷新 quota
-- `codexm list [--verbose]`：查看所有保存账号、quota、score、ETA 和 reset 时间
-- `codexm list --json`：输出机器可读 JSON
-- `codexm list --debug`：输出 quota 归一化和观测比例相关诊断信息
+- `codexm current [--refresh]`: 查看当前账号；可选刷新 quota
+- `codexm list [--verbose]`: 查看所有保存账号、quota、score、ETA 和 reset 时间
+- `codexm list --json`: 输出机器可读 JSON
+- `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
 
 ### 切换与启动
 
-- `codexm switch <name>`：切换到指定保存账号
-- `codexm switch --auto --dry-run`：预览自动切号会选中的账号
-- `codexm launch [name] [--auto] [--watch]`：在 macOS 上启动 Codex Desktop
+- `codexm switch <name>`: 切换到指定保存账号
+- `codexm switch --auto --dry-run`: 预览自动切号会选中的账号
+- `codexm launch [name] [--auto] [--watch]`: 在 macOS 上启动 Codex Desktop
 
 ### Watch 与自动重启
 
-- `codexm watch`：监听 quota 变化，并在耗尽时自动切号
-- `codexm watch --detach`：后台运行 watcher
-- `codexm watch --status`：查看后台 watcher 状态
-- `codexm watch --stop`：停止后台 watcher
-- `codexm run [-- ...codexArgs]`：在 auth 变化后自动重启 `codex` CLI
+- `codexm watch`: 监听 quota 变化，并在耗尽时自动切号
+- `codexm watch --detach`: 后台运行 watcher
+- `codexm watch --status`: 查看后台 watcher 状态
+- `codexm watch --stop`: 停止后台 watcher
+- `codexm run [-- ...codexArgs]`: 在 auth 变化后自动重启 codex CLI
+<!-- GENERATED:CORE_COMMANDS:END -->
 
 完整命令参考请使用 `codexm --help`。
 
@@ -116,6 +118,7 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 
 ## Shell Completion
 
+<!-- GENERATED:SHELL_COMPLETION:START -->
 按 shell 的标准方式生成并安装补全脚本：
 
 ```bash
@@ -127,6 +130,7 @@ codexm completion bash > ~/.local/share/bash-completion/completions/codexm
 ```
 
 生成的脚本会通过 `codexm completion --accounts` 动态补全已保存账号名。
+<!-- GENERATED:SHELL_COMPLETION:END -->
 
 ## 开发
 

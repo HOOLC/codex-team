@@ -39,10 +39,13 @@
   "scripts": {
     "build": "rslib build",
     "dev": "rslib build --watch",
+    "docs:readme": "node ./scripts/sync-readme-command-sections.mjs",
     "prepack": "pnpm build",
     "test": "rstest run",
     "test:watch": "rstest watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify": "pnpm typecheck && pnpm test",
+    "verify:full": "pnpm verify && pnpm build"
   },
   "engines": {
     "node": ">=20"

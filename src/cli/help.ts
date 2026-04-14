@@ -1,91 +1,57 @@
 import type { AccountStore } from "../account-store/index.js";
-import { COMMAND_FLAGS, COMMAND_NAMES, GLOBAL_FLAGS } from "./args.js";
-
-const COMPLETION_ACCOUNT_COMMANDS = new Set(["launch", "list", "remove", "rename", "switch"] as const);
+import {
+  ACCOUNT_NAME_PATTERN,
+  COMMAND_FLAGS,
+  COMMAND_NAMES,
+  GLOBAL_FLAGS,
+  HELP_NOTES,
+  PROGRAM_NAME,
+  PROGRAM_SUMMARY,
+  getCommandSpec,
+  getFlagDescription,
+  isCompletionAccountCommand,
+  listGlobalFlags,
+  listHelpUsageLines,
+} from "./spec.js";
 
 function quoteBashWords(words: readonly string[]): string {
   return words.join(" ");
 }
 
 function describeCommandFlag(flag: string): string {
-  switch (flag) {
-    case "--accounts":
-      return `${flag}:print saved account names for shell completion`;
-    case "--auto":
-      return `${flag}:switch to the best available account`;
-    case "--debug":
-      return `${flag}:enable debug logging`;
-    case "--detach":
-      return `${flag}:run watch in the background`;
-    case "--device-auth":
-      return `${flag}:add account with device-code login`;
-    case "--no-auto-switch":
-      return `${flag}:watch without switching accounts automatically`;
-    case "--dry-run":
-      return `${flag}:show the selected account without switching`;
-    case "--force":
-      return `${flag}:skip confirmation and force the action`;
-    case "--help":
-      return `${flag}:show help`;
-    case "--json":
-      return `${flag}:print JSON output`;
-    case "--refresh":
-      return `${flag}:refresh quota data before printing`;
-    case "--status":
-      return `${flag}:show background watch status`;
-    case "--stop":
-      return `${flag}:stop the background watch`;
-    case "--watch":
-      return `${flag}:start a detached watch after launch`;
-    case "--with-api-key":
-      return `${flag}:add account by reading an API key from stdin`;
-    case "--version":
-      return `${flag}:print the installed version`;
-    case "--yes":
-      return `${flag}:skip removal confirmation`;
-    default:
-      return `${flag}:option`;
-  }
+  return `${flag}:${getFlagDescription(flag)}`;
+}
+
+export function buildHelpText(): string {
+  const usageLines = listHelpUsageLines()
+    .map((usage) => `  ${usage}`)
+    .join("\n");
+  const noteLines = HELP_NOTES
+    .map((note) => `  ${note}`)
+    .join("\n");
+
+  return `${PROGRAM_NAME} - ${PROGRAM_SUMMARY}
+
+Usage:
+  ${PROGRAM_NAME} --version
+  ${PROGRAM_NAME} --help
+${usageLines}
+
+Global flags: ${listGlobalFlags().join(", ")}
+
+Notes:
+${noteLines}
+
+Account names must match /${ACCOUNT_NAME_PATTERN}/.
+`;
 }
 
 export function printHelp(stream: NodeJS.WriteStream): void {
-  stream.write(`codexm - manage multiple Codex ChatGPT auth snapshots
-
-Usage:
-  codexm --version
-  codexm --help
-  codexm completion <zsh|bash>
-  codexm current [--refresh] [--json]
-  codexm doctor [--json]
-  codexm list [name] [--verbose] [--json]
-  codexm add <name> [--device-auth|--with-api-key] [--force] [--json]
-  codexm save <name> [--force] [--json]
-  codexm update [--json]
-  codexm switch <name> [--force] [--json]
-  codexm switch --auto [--dry-run] [--force] [--json]
-  codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]
-  codexm watch [--no-auto-switch] [--detach] [--status] [--stop]
-  codexm remove <name> [--yes] [--json]
-  codexm rename <old> <new> [--json]
-
-Global flags: --help, --version, --debug
-
-Notes:
-  codexm current shows live usage when a managed Codex Desktop session is available.
-  codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.
-  codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.
-  codexm list refreshes quota data, shows the current managed account, and marks current rows with "*"; use --verbose to expand score inputs.
-  Run codexm launch from an external terminal if you need to restart Codex Desktop.
-  Unknown commands and flags fail fast; close matches include a suggestion.
-
-Account names must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.
-`);
+  stream.write(buildHelpText());
 }
 
 export function buildCompletionZshScript(): string {
   const commands = COMMAND_NAMES.map((command) => `'${command}:${command} command'`).join("\n    ");
-  // `_describe` expects `name:description`; if we pass `--flag[description]`,
-  // zsh treats the whole string as the inserted completion candidate.
   const globalFlags = [...GLOBAL_FLAGS].map(describeCommandFlag).map((flag) => `'${flag}'`).join("\n    ");
 
   const commandCases = COMMAND_NAMES.map((command) => {
@@ -98,11 +64,12 @@ export function buildCompletionZshScript(): string {
       ;;`;
   }).join("\n");
 
-  const accountCommandPattern = [...COMPLETION_ACCOUNT_COMMANDS].join("|");
+  const accountCommandPattern = COMMAND_NAMES.filter((command) => isCompletionAccountCommand(command)).join("|");
+  const completionTargets = getCommandSpec("completion").completionTargets ?? [];
 
-  return `#compdef codexm
+  return `#compdef ${PROGRAM_NAME}
 
-_codexm() {
+_${PROGRAM_NAME}() {
   local -a commands global_flags command_flags accounts
   local command=\${words[2]}
 
@@ -121,9 +88,8 @@ _codexm() {
 
   if [[ \$command == completion ]]; then
     _describe -t completion-target 'completion target' \\
-      'zsh:zsh completion script' \\
-      'bash:bash completion script' \\
-      '--accounts:print saved account names for completion'
+${completionTargets.map((target) => `      '${target}:${target} completion script' \\`).join("\n")}
+      '--accounts:${getFlagDescription("--accounts")}'
     return 0
   fi
 
@@ -133,7 +99,7 @@ _codexm() {
       *) return 0 ;;
     esac
 
-    accounts=(\${(@f)\$(codexm completion --accounts 2>/dev/null)})
+    accounts=(\${(@f)\$(${PROGRAM_NAME} completion --accounts 2>/dev/null)})
     if (( \${#accounts[@]} > 0 )); then
       _describe -t accounts 'account' accounts
       return 0
@@ -151,7 +117,7 @@ ${commandCases}
   fi
 }
 
-_codexm "$@"
+_${PROGRAM_NAME} "$@"
 `;
 }
 
@@ -163,11 +129,13 @@ export function buildCompletionBashScript(): string {
     return `    ${command}) command_flags="${flags}" ;;`;
   }).join("\n");
 
-  const accountCommandCases = [...COMPLETION_ACCOUNT_COMMANDS]
+  const accountCommandCases = COMMAND_NAMES
+    .filter((command) => isCompletionAccountCommand(command))
     .map((command) => `    ${command})`)
     .join("|");
+  const completionTargets = (getCommandSpec("completion").completionTargets ?? []).join(" ");
 
-  return `_codexm() {
+  return `_${PROGRAM_NAME}() {
   local cur prev command command_flags global_flags commands accounts
   COMPREPLY=()
   cur="\${COMP_WORDS[COMP_CWORD]}"
@@ -182,14 +150,14 @@ export function buildCompletionBashScript(): string {
   fi
 
   if [[ "\${command}" == "completion" ]]; then
-    COMPREPLY=( $(compgen -W "zsh bash --accounts" -- "\${cur}") )
+    COMPREPLY=( $(compgen -W "${completionTargets} --accounts" -- "\${cur}") )
     return 0
   fi
 
   if [[ \${COMP_CWORD} -eq 2 && "\${cur}" != --* ]]; then
     case "\${command}" in
       ${accountCommandCases})
-        accounts="$(codexm completion --accounts 2>/dev/null)"
+        accounts="$(${PROGRAM_NAME} completion --accounts 2>/dev/null)"
         COMPREPLY=( $(compgen -W "\${accounts}" -- "\${cur}") )
         return 0
         ;;
@@ -206,7 +174,7 @@ ${commandCases}
   fi
 }
 
-complete -F _codexm codexm
+complete -F _${PROGRAM_NAME} ${PROGRAM_NAME}
 `;
 }
 

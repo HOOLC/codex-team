@@ -3,6 +3,7 @@ import { maskAccountId } from "../auth-snapshot.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CodexDesktopLauncher } from "../desktop/launcher.js";
 import { writeJson } from "../cli/output.js";
+import { getUsage } from "../cli/spec.js";
 import {
   confirmDesktopRelaunch,
   isOnlyManagedDesktopInstanceRunning,
@@ -61,7 +62,7 @@ export async function handleLaunchCommand(options: {
     (auto && name) ||
     (noAutoSwitch && !watch)
   ) {
-    throw new Error("Usage: codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
+    throw new Error(`Usage: ${getUsage("launch")}`);
   }
 
   if (await desktopLauncher.isRunningInsideDesktopShell()) {
@@ -298,7 +299,7 @@ export async function handleWatchCommand(options: {
   } = options;
 
   if (parsed.positionals.length > 0) {
-    throw new Error("Usage: codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    throw new Error(`Usage: ${getUsage("watch")}`);
   }
 
   const autoSwitch = !parsed.flags.has("--no-auto-switch");
@@ -308,7 +309,7 @@ export async function handleWatchCommand(options: {
   const modeCount = [detach, status, stop].filter(Boolean).length;
 
   if (modeCount > 1 || ((status || stop) && parsed.flags.has("--no-auto-switch"))) {
-    throw new Error("Usage: codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    throw new Error(`Usage: ${getUsage("watch")}`);
   }
 
   if (status) {

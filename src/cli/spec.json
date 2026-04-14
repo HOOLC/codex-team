@@ -1,0 +1,307 @@
+{
+  "programName": "codexm",
+  "summary": "manage multiple Codex ChatGPT auth snapshots",
+  "accountNamePattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+  "flags": [
+    { "flag": "--help", "description": "show help", "global": true },
+    { "flag": "--version", "description": "print the installed version", "global": true },
+    { "flag": "--debug", "description": "enable debug logging", "global": true },
+    { "flag": "--accounts", "description": "print saved account names for shell completion", "global": false },
+    { "flag": "--auto", "description": "switch to the best available account", "global": false },
+    { "flag": "--detach", "description": "run watch in the background", "global": false },
+    { "flag": "--device-auth", "description": "add account with device-code login", "global": false },
+    { "flag": "--dry-run", "description": "show the selected account without switching", "global": false },
+    { "flag": "--force", "description": "skip confirmation and force the action", "global": false },
+    { "flag": "--json", "description": "print JSON output", "global": false },
+    { "flag": "--no-auto-switch", "description": "watch without switching accounts automatically", "global": false },
+    { "flag": "--refresh", "description": "refresh quota data before printing", "global": false },
+    { "flag": "--status", "description": "show background watch status", "global": false },
+    { "flag": "--stop", "description": "stop the background watch", "global": false },
+    { "flag": "--watch", "description": "start a detached watch after launch", "global": false },
+    { "flag": "--with-api-key", "description": "add account by reading an API key from stdin", "global": false },
+    { "flag": "--yes", "description": "skip removal confirmation", "global": false }
+  ],
+  "completionAccountCommands": ["launch", "list", "remove", "rename", "switch"],
+  "notes": [
+    "codexm current shows live usage when a managed Codex Desktop session is available.",
+    "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
+    "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
+    "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --verbose to expand score inputs.",
+    "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
+    "Unknown commands and flags fail fast; close matches include a suggestion."
+  ],
+  "commands": [
+    {
+      "name": "current",
+      "flags": ["--json", "--refresh"],
+      "helpUsages": ["codexm current [--refresh] [--json]"],
+      "usageErrors": {
+        "default": "codexm current [--refresh] [--json]"
+      }
+    },
+    {
+      "name": "doctor",
+      "flags": ["--json"],
+      "helpUsages": ["codexm doctor [--json]"],
+      "usageErrors": {
+        "default": "codexm doctor [--json]"
+      }
+    },
+    {
+      "name": "list",
+      "flags": ["--json", "--verbose"],
+      "helpUsages": ["codexm list [name] [--verbose] [--json]"],
+      "usageErrors": {
+        "default": "codexm list [name] [--verbose] [--json]"
+      }
+    },
+    {
+      "name": "add",
+      "flags": ["--device-auth", "--with-api-key", "--force", "--json"],
+      "helpUsages": ["codexm add <name> [--device-auth|--with-api-key] [--force] [--json]"],
+      "usageErrors": {
+        "default": "codexm add <name> [--device-auth|--with-api-key] [--force] [--json]"
+      }
+    },
+    {
+      "name": "save",
+      "flags": ["--force", "--json"],
+      "helpUsages": ["codexm save <name> [--force] [--json]"],
+      "usageErrors": {
+        "default": "codexm save <name> [--force] [--json]"
+      }
+    },
+    {
+      "name": "update",
+      "flags": ["--json"],
+      "helpUsages": ["codexm update [--json]"],
+      "usageErrors": {
+        "default": "codexm update [--json]"
+      }
+    },
+    {
+      "name": "switch",
+      "flags": ["--auto", "--dry-run", "--force", "--json"],
+      "helpUsages": [
+        "codexm switch <name> [--force] [--json]",
+        "codexm switch --auto [--dry-run] [--force] [--json]"
+      ],
+      "usageErrors": {
+        "default": "codexm switch <name> [--force] [--json]",
+        "auto": "codexm switch --auto [--dry-run] [--force] [--json]"
+      }
+    },
+    {
+      "name": "launch",
+      "flags": ["--auto", "--watch", "--no-auto-switch", "--json"],
+      "helpUsages": ["codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]"],
+      "usageErrors": {
+        "default": "codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]"
+      }
+    },
+    {
+      "name": "watch",
+      "flags": ["--no-auto-switch", "--detach", "--status", "--stop"],
+      "helpUsages": ["codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"],
+      "usageErrors": {
+        "default": "codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"
+      }
+    },
+    {
+      "name": "remove",
+      "flags": ["--yes", "--json"],
+      "helpUsages": ["codexm remove <name> [--yes] [--json]"],
+      "usageErrors": {
+        "default": "codexm remove <name> [--yes] [--json]"
+      }
+    },
+    {
+      "name": "rename",
+      "flags": ["--json"],
+      "helpUsages": ["codexm rename <old> <new> [--json]"],
+      "usageErrors": {
+        "default": "codexm rename <old> <new> [--json]"
+      }
+    },
+    {
+      "name": "completion",
+      "flags": ["--accounts"],
+      "helpUsages": ["codexm completion <zsh|bash>"],
+      "usageErrors": {
+        "default": "codexm completion <zsh|bash>",
+        "accounts": "codexm completion --accounts"
+      },
+      "completionTargets": ["zsh", "bash"]
+    }
+  ],
+  "readme": {
+    "sections": [
+      {
+        "id": "manage-accounts",
+        "title": {
+          "en": "### Manage accounts",
+          "zh-CN": "### 账号管理"
+        },
+        "entries": [
+          {
+            "usage": "codexm add <name>",
+            "description": {
+              "en": "add a new managed account snapshot",
+              "zh-CN": "新增一个托管账号快照"
+            }
+          },
+          {
+            "usage": "codexm save <name>",
+            "description": {
+              "en": "save the currently active auth as a named snapshot",
+              "zh-CN": "把当前生效的 auth 保存成命名快照"
+            }
+          },
+          {
+            "usage": "codexm rename <old> <new>",
+            "description": {
+              "en": "rename a saved snapshot",
+              "zh-CN": "重命名已保存快照"
+            }
+          },
+          {
+            "usage": "codexm remove <name> --yes",
+            "description": {
+              "en": "remove a saved snapshot",
+              "zh-CN": "删除已保存快照"
+            }
+          }
+        ]
+      },
+      {
+        "id": "inspect",
+        "title": {
+          "en": "### Inspect quota and status",
+          "zh-CN": "### 查看状态与 quota"
+        },
+        "entries": [
+          {
+            "usage": "codexm current [--refresh]",
+            "description": {
+              "en": "show the current account and optionally refresh quota",
+              "zh-CN": "查看当前账号；可选刷新 quota"
+            }
+          },
+          {
+            "usage": "codexm list [--verbose]",
+            "description": {
+              "en": "show saved accounts, quota usage, score, ETA, and reset times",
+              "zh-CN": "查看所有保存账号、quota、score、ETA 和 reset 时间"
+            }
+          },
+          {
+            "usage": "codexm list --json",
+            "description": {
+              "en": "machine-readable output",
+              "zh-CN": "输出机器可读 JSON"
+            }
+          },
+          {
+            "usage": "codexm list --debug",
+            "description": {
+              "en": "include diagnostic details about quota normalization and observed ratios",
+              "zh-CN": "输出 quota 归一化和观测比例相关诊断信息"
+            }
+          }
+        ]
+      },
+      {
+        "id": "switch-launch",
+        "title": {
+          "en": "### Switch and launch",
+          "zh-CN": "### 切换与启动"
+        },
+        "entries": [
+          {
+            "usage": "codexm switch <name>",
+            "description": {
+              "en": "switch to a saved account",
+              "zh-CN": "切换到指定保存账号"
+            }
+          },
+          {
+            "usage": "codexm switch --auto --dry-run",
+            "description": {
+              "en": "preview the best auto-switch candidate",
+              "zh-CN": "预览自动切号会选中的账号"
+            }
+          },
+          {
+            "usage": "codexm launch [name] [--auto] [--watch]",
+            "description": {
+              "en": "launch Codex Desktop on macOS",
+              "zh-CN": "在 macOS 上启动 Codex Desktop"
+            }
+          }
+        ]
+      },
+      {
+        "id": "watch",
+        "title": {
+          "en": "### Watch and auto-restart",
+          "zh-CN": "### Watch 与自动重启"
+        },
+        "entries": [
+          {
+            "usage": "codexm watch",
+            "description": {
+              "en": "watch quota changes and auto-switch on exhaustion",
+              "zh-CN": "监听 quota 变化，并在耗尽时自动切号"
+            }
+          },
+          {
+            "usage": "codexm watch --detach",
+            "description": {
+              "en": "run the watcher in the background",
+              "zh-CN": "后台运行 watcher"
+            }
+          },
+          {
+            "usage": "codexm watch --status",
+            "description": {
+              "en": "inspect detached watcher state",
+              "zh-CN": "查看后台 watcher 状态"
+            }
+          },
+          {
+            "usage": "codexm watch --stop",
+            "description": {
+              "en": "stop the detached watcher",
+              "zh-CN": "停止后台 watcher"
+            }
+          },
+          {
+            "usage": "codexm run [-- ...codexArgs]",
+            "description": {
+              "en": "restart the codex CLI automatically after auth changes",
+              "zh-CN": "在 auth 变化后自动重启 codex CLI"
+            }
+          }
+        ]
+      }
+    ],
+    "shellCompletion": {
+      "intro": {
+        "en": "Generate a completion script and install it with your shell's standard mechanism:",
+        "zh-CN": "按 shell 的标准方式生成并安装补全脚本："
+      },
+      "codeBlockLanguage": "bash",
+      "commands": [
+        "mkdir -p ~/.zsh/completions",
+        "codexm completion zsh > ~/.zsh/completions/_codexm",
+        "",
+        "mkdir -p ~/.local/share/bash-completion/completions",
+        "codexm completion bash > ~/.local/share/bash-completion/completions/codexm"
+      ],
+      "outro": {
+        "en": "The generated scripts dynamically complete saved account names by calling `codexm completion --accounts`.",
+        "zh-CN": "生成的脚本会通过 `codexm completion --accounts` 动态补全已保存账号名。"
+      }
+    }
+  }
+}

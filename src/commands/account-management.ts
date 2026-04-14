@@ -3,6 +3,7 @@ import type { CodexLoginProvider } from "../codex-login.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import { toCliQuotaSummary } from "../cli/quota.js";
 import { writeJson } from "../cli/output.js";
+import { getUsage } from "../cli/spec.js";
 
 interface CommandStreams {
   stdin: NodeJS.ReadStream;
@@ -90,7 +91,7 @@ export async function handleAddCommand(options: {
   } = options;
 
   if (!name || positionals.length !== 1 || (deviceAuth && withApiKey)) {
-    throw new Error("Usage: codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
+    throw new Error(`Usage: ${getUsage("add")}`);
   }
 
   const snapshot = withApiKey
@@ -142,7 +143,7 @@ export async function handleSaveCommand(options: {
   const { name, json, force, store, stdout, debugLog } = options;
 
   if (!name) {
-    throw new Error("Usage: codexm save <name> [--force]");
+    throw new Error(`Usage: ${getUsage("save")}`);
   }
 
   const account = await store.saveCurrentAccount(name, force);
@@ -223,7 +224,7 @@ export async function handleRemoveCommand(options: {
   const { name, json, yes, store, streams, debugLog } = options;
 
   if (!name) {
-    throw new Error("Usage: codexm remove <name> [--yes]");
+    throw new Error(`Usage: ${getUsage("remove")}`);
   }
 
   const confirmed = yes || (await confirmRemoval(name, streams));
@@ -263,7 +264,7 @@ export async function handleRenameCommand(options: {
   const { oldName, newName, json, store, stdout, debugLog } = options;
 
   if (!oldName || !newName) {
-    throw new Error("Usage: codexm rename <old> <new>");
+    throw new Error(`Usage: ${getUsage("rename")}`);
   }
 
   const account = await store.renameAccount(oldName, newName);

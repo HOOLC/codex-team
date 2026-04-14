@@ -1,3 +1,11 @@
+import {
+  COMMAND_FLAGS,
+  COMMAND_NAMES,
+  GLOBAL_FLAGS,
+} from "./spec.js";
+
+export { COMMAND_FLAGS, COMMAND_NAMES, GLOBAL_FLAGS };
+
 export interface ParsedArgs {
   command: string | null;
   positionals: string[];
@@ -13,38 +21,6 @@ export class CliUsageError extends Error {
     this.suggestion = suggestion;
   }
 }
-
-export const COMMAND_NAMES = [
-  "current",
-  "doctor",
-  "list",
-  "add",
-  "save",
-  "update",
-  "switch",
-  "launch",
-  "watch",
-  "remove",
-  "rename",
-  "completion",
-] as const;
-
-export const GLOBAL_FLAGS = new Set(["--help", "--version", "--debug"]);
-
-export const COMMAND_FLAGS: Record<(typeof COMMAND_NAMES)[number], Set<string>> = {
-  current: new Set(["--json", "--refresh"]),
-  doctor: new Set(["--json"]),
-  list: new Set(["--json", "--verbose"]),
-  add: new Set(["--device-auth", "--with-api-key", "--force", "--json"]),
-  save: new Set(["--force", "--json"]),
-  update: new Set(["--json"]),
-  switch: new Set(["--auto", "--dry-run", "--force", "--json"]),
-  launch: new Set(["--auto", "--watch", "--no-auto-switch", "--json"]),
-  watch: new Set(["--no-auto-switch", "--detach", "--status", "--stop"]),
-  remove: new Set(["--yes", "--json"]),
-  rename: new Set(["--json"]),
-  completion: new Set(["--accounts"]),
-};
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Set<string>();

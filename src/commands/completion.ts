@@ -4,6 +4,7 @@ import {
   buildCompletionZshScript,
   listCompletionAccountNames,
 } from "../cli/help.js";
+import { getUsage } from "../cli/spec.js";
 
 export async function handleCompletionCommand(options: {
   store: AccountStore;
@@ -13,7 +14,7 @@ export async function handleCompletionCommand(options: {
 }): Promise<number> {
   if (options.flags.has("--accounts")) {
     if (options.positionals.length > 0) {
-      throw new Error("Usage: codexm completion --accounts");
+      throw new Error(`Usage: ${getUsage("completion", "accounts")}`);
     }
 
     const accountNames = await listCompletionAccountNames(options.store);
@@ -25,7 +26,7 @@ export async function handleCompletionCommand(options: {
 
   const shell = options.positionals[0] ?? null;
   if (options.positionals.length !== 1 || (shell !== "zsh" && shell !== "bash")) {
-    throw new Error("Usage: codexm completion <zsh|bash>");
+    throw new Error(`Usage: ${getUsage("completion")}`);
   }
 
   options.stdout.write(shell === "zsh" ? buildCompletionZshScript() : buildCompletionBashScript());

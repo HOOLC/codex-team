@@ -158,6 +158,48 @@ describe("CLI Account Commands", () => {
     );
   });
 
+  test("prints save usage that matches help output", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["save"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.read()).toBe("");
+    expect(stderr.read()).toContain("Error: Usage: codexm save <name> [--force] [--json]");
+  });
+
+  test("prints remove usage that matches help output", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["remove"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.read()).toBe("");
+    expect(stderr.read()).toContain("Error: Usage: codexm remove <name> [--yes] [--json]");
+  });
+
+  test("prints rename usage that matches help output", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["rename", "before"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.read()).toBe("");
+    expect(stderr.read()).toContain("Error: Usage: codexm rename <old> <new> [--json]");
+  });
+
   test("supports update and rejects unmanaged current auth", async () => {
     const homeDir = await createTempHome();
 

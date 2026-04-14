@@ -75,6 +75,7 @@ This is the main command to use when deciding which account to switch to next.
 
 ## Core commands
 
+<!-- GENERATED:CORE_COMMANDS:START -->
 ### Manage accounts
 
 - `codexm add <name>`: add a new managed account snapshot
@@ -101,7 +102,8 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm watch --detach`: run the watcher in the background
 - `codexm watch --status`: inspect detached watcher state
 - `codexm watch --stop`: stop the detached watcher
-- `codexm run [-- ...codexArgs]`: restart the `codex` CLI automatically after auth changes
+- `codexm run [-- ...codexArgs]`: restart the codex CLI automatically after auth changes
+<!-- GENERATED:CORE_COMMANDS:END -->
 
 Use `codexm --help` for the full command reference.
 
@@ -116,6 +118,7 @@ For ChatGPT auth snapshots, `codex-team` can save and switch different users und
 
 ## Shell completion
 
+<!-- GENERATED:SHELL_COMPLETION:START -->
 Generate a completion script and install it with your shell's standard mechanism:
 
 ```bash
@@ -127,6 +130,7 @@ codexm completion bash > ~/.local/share/bash-completion/completions/codexm
 ```
 
 The generated scripts dynamically complete saved account names by calling `codexm completion --accounts`.
+<!-- GENERATED:SHELL_COMPLETION:END -->
 
 ## Development
 

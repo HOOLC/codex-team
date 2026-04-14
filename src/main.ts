@@ -25,6 +25,7 @@ import {
 import {
   printHelp,
 } from "./cli/help.js";
+import { getUsage } from "./cli/spec.js";
 import {
   describeAutoSwitchNoop,
   describeAutoSwitchSelection,
@@ -247,12 +248,12 @@ export async function runCli(
         const name = parsed.positionals[0];
 
         if (dryRun && !auto) {
-          throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
+          throw new Error(`Usage: ${getUsage("switch", "auto")}`);
         }
 
         if (auto) {
           if (name) {
-            throw new Error("Usage: codexm switch --auto [--dry-run] [--force] [--json]");
+            throw new Error(`Usage: ${getUsage("switch", "auto")}`);
           }
 
           const autoSwitch = dryRun
@@ -375,7 +376,7 @@ export async function runCli(
         }
 
         if (!name) {
-          throw new Error("Usage: codexm switch <name> [--force]");
+          throw new Error(`Usage: ${getUsage("switch")}`);
         }
 
         debugLog(`switch: mode=manual target=${name} force=${force}`);
