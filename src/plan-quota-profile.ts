@@ -9,7 +9,7 @@ const PLUS_WEEKLY_FIVE_HOUR_WINDOWS = 8;
 
 const PLAN_QUOTA_PROFILES: Record<PlanQuotaTier, PlanQuotaProfile> = {
   plus: {
-    fiveHourCapacityInPlusUnits: 1,
+    fiveHourCapacityInPlusUnits: 1.28,
     oneWeekCapacityInPlusUnits: 1,
   },
   prolite: {
@@ -21,7 +21,7 @@ const PLAN_QUOTA_PROFILES: Record<PlanQuotaTier, PlanQuotaProfile> = {
     oneWeekCapacityInPlusUnits: 8.33,
   },
   team: {
-    fiveHourCapacityInPlusUnits: 1,
+    fiveHourCapacityInPlusUnits: 1.28,
     oneWeekCapacityInPlusUnits: 1,
   },
   unknown: {
@@ -81,18 +81,17 @@ export function convertOneWeekPercentToPlusWeeklyUnits(
 export function normalizeDisplayedScore(
   rawScore: number | null,
   planType: string | null,
+  options: { clamp?: boolean } = {},
 ): number | null {
   if (rawScore === null) {
     return null;
   }
 
-  return roundToTwo(
-    Math.min(
-      100,
-      (rawScore * PLUS_WEEKLY_FIVE_HOUR_WINDOWS) /
-        getPlanQuotaProfile(planType).fiveHourCapacityInPlusUnits,
-    ),
-  );
+  const normalized =
+    (rawScore * PLUS_WEEKLY_FIVE_HOUR_WINDOWS) /
+    getPlanQuotaProfile(planType).fiveHourCapacityInPlusUnits;
+
+  return roundToTwo(options.clamp === false ? normalized : Math.min(100, normalized));
 }
 
 export function resolveFiveHourWindowsPerWeek(planType: string | null): number {
