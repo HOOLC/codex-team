@@ -1093,7 +1093,7 @@ wire_api = "responses"
 
       expect(lines[0]).toBe("Current managed account: quota-main");
       expect(lines[1]).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x2");
-      expect(lines[2]).toBe("Total: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
+      expect(lines[2]).toBe("Available: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
       expect(output).not.toContain("CREDITS");
       expect(output).not.toContain("AVAILABLE");
       expect(output).toContain("ETA");
@@ -1766,7 +1766,7 @@ wire_api = "responses"
       expect(listCode).toBe(0);
       const output = listStdout.read();
       expect(output).toContain("Accounts:");
-      expect(output).toContain("Total: ");
+      expect(output).toContain("Available: ");
       expect(output).toContain("ETA");
       expect(output).toContain("ETA 5H->1W");
       expect(output).toContain("ETA 1W");
@@ -1862,6 +1862,99 @@ wire_api = "responses"
       expect(blockedRow).toContain("quota-blocked");
       expect(blockedRow).not.toContain("unavailable");
       expect(blockedRow).toMatch(/\s-\s+/);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list available summary excludes accounts blocked by a fully used window", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const planType = accountId === "acct-cli-available-team" ? "team" : "plus";
+          const primaryUsedPercent =
+            accountId === "acct-cli-available-plus"
+              ? 20
+              : accountId === "acct-cli-available-team"
+                ? 0
+                : 40;
+          const secondaryUsedPercent =
+            accountId === "acct-cli-available-plus"
+              ? 30
+              : accountId === "acct-cli-available-team"
+                ? 100
+                : 100;
+
+          return jsonResponse({
+            plan_type: planType,
+            rate_limit: {
+              primary_window: {
+                used_percent: primaryUsedPercent,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 1_200,
+                reset_at: 1_775_000_000,
+              },
+              secondary_window: {
+                used_percent: secondaryUsedPercent,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 86_400,
+                reset_at: 1_775_086_400,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-available-plus");
+      await runCli(["save", "available-plus", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-available-team");
+      await runCli(["save", "blocked-team", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-available-one-week");
+      await runCli(["save", "blocked-plus", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+
+      expect(lines[1]).toBe("Accounts: 1/3 usable | blocked: 1W 2, 5H 0 | plus x2, team x1");
+      expect(lines[2]).toBe("Available: bottleneck 0.12 | 5H->1W 0.12 | 1W 0.7 (plus 1W)");
+      expect(plainOutput).toContain("blocked-team");
+      expect(plainOutput).toContain("blocked-plus");
     } finally {
       await cleanupTempHome(homeDir);
     }

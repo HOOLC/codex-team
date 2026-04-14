@@ -51,7 +51,7 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
     }
 
     const candidate = toAutoSwitchCandidate(account);
-    if (!candidate) {
+    if (!candidate || availability !== "available") {
       continue;
     }
 
@@ -84,7 +84,7 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
       : fiveHourPool ?? oneWeekPool;
 
   const poolLine =
-    `Total: bottleneck ${formatPoolValue(bottleneckPool)} | ` +
+    `Available: bottleneck ${formatPoolValue(bottleneckPool)} | ` +
     `5H->1W ${formatPoolValue(fiveHourPool)} | ` +
     `1W ${formatPoolValue(oneWeekPool)} (plus 1W)`;
 
