@@ -9,7 +9,7 @@ import {
   convertFiveHourPercentToPlusWeeklyUnits,
   convertOneWeekPercentToPlusWeeklyUnits,
   normalizeDisplayedScore,
-  resolveFiveHourWindowsPerWeek,
+  resolveFiveHourToOneWeekRawRatio,
 } from "../plan-quota-profile.js";
 import type { WatchHistoryEtaContext } from "../watch/history.js";
 
@@ -43,7 +43,7 @@ export interface AutoSwitchCandidate {
   remain_5h_in_1w_units: number | null;
   remain_1w: number | null;
   remain_1w_in_plus_units: number | null;
-  five_hour_windows_per_week: number;
+  five_hour_to_one_week_ratio: number;
   five_hour_used: number | null;
   one_week_used: number | null;
   five_hour_reset_at: string | null;
@@ -426,7 +426,7 @@ function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchCandidat
     return null;
   }
 
-  const fiveHourWindowsPerWeek = resolveFiveHourWindowsPerWeek(account.plan_type);
+  const fiveHourToOneWeekRatio = resolveFiveHourToOneWeekRawRatio(account.plan_type);
   const remain5h = computeRemainingPercent(account.five_hour?.used_percent);
   const remain1w = computeRemainingPercent(account.one_week?.used_percent);
   if (remain5h === null && remain1w === null) {
@@ -469,7 +469,7 @@ function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchCandidat
     remain_5h_in_1w_units: remain5hEq1w,
     remain_1w: remain1w,
     remain_1w_in_plus_units: remain1wEq,
-    five_hour_windows_per_week: fiveHourWindowsPerWeek,
+    five_hour_to_one_week_ratio: fiveHourToOneWeekRatio,
     five_hour_used: account.five_hour?.used_percent ?? null,
     one_week_used: account.one_week?.used_percent ?? null,
     five_hour_reset_at: account.five_hour?.reset_at ?? null,
@@ -987,7 +987,9 @@ function describeQuotaAccounts(
             candidate.projected_1w_1h,
           )
         : "-";
-      row.five_hour_windows_per_week = candidate ? String(candidate.five_hour_windows_per_week) : "-";
+      row.five_hour_to_one_week_ratio = candidate
+        ? String(candidate.five_hour_to_one_week_ratio)
+        : "-";
     }
 
     if (isWindowUnavailable(account.one_week)) {
@@ -1022,7 +1024,7 @@ function describeQuotaAccounts(
       { key: "score_1h", label: "1H PLUS SCORE" },
       { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H" },
       { key: "projected_1w_1h", label: "1W 1H" },
-      { key: "five_hour_windows_per_week", label: "5H/WEEK" },
+      { key: "five_hour_to_one_week_ratio", label: "5H:1W" },
     );
     columns.push(
       { key: "five_hour_reset", label: "5H RESET AT" },

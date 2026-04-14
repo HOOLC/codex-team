@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import {
   convertFiveHourPercentToPlusWeeklyUnits,
   convertOneWeekPercentToPlusWeeklyUnits,
-  resolveFiveHourWindowsPerWeek,
+  resolveFiveHourToOneWeekRawRatio,
 } from "../plan-quota-profile.js";
 
 const WATCH_HISTORY_FILE_NAME = "watch-quota-history.jsonl";
@@ -566,8 +566,8 @@ function buildObservedRatioDiagnostic(
     ratios.reduce((sum, value) => sum + (value - observedMean) ** 2, 0) / ratios.length;
   const total5h = metrics.reduce((sum, segment) => sum + (segment.delta_5h_raw ?? 0), 0);
   const total1w = metrics.reduce((sum, segment) => sum + (segment.delta_1w_raw ?? 0), 0);
-  const expected = Number.isFinite(resolveFiveHourWindowsPerWeek(key))
-    ? resolveFiveHourWindowsPerWeek(key)
+  const expected = Number.isFinite(resolveFiveHourToOneWeekRawRatio(key))
+    ? resolveFiveHourToOneWeekRawRatio(key)
     : null;
   const weighted = total1w > 0 ? total5h / total1w : observedMean;
   const relativeDelta = expected && expected > 0 ? (weighted - expected) / expected : null;

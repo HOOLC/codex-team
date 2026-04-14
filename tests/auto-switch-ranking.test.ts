@@ -50,26 +50,26 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([singleWindowAccount, twoWindowAccount])).toMatchObject([
       {
         name: "alpha",
-        current_score: 12.8,
-        score_1h: 12.8,
+        current_score: 12,
+        score_1h: 12,
         remain_5h: 80,
         remain_1w: null,
-        remain_5h_in_1w_units: 12.8,
+        remain_5h_in_1w_units: 12,
         projected_5h_1h: 80,
-        projected_5h_in_1w_units_1h: 12.8,
-        five_hour_windows_per_week: 6.25,
+        projected_5h_in_1w_units_1h: 12,
+        five_hour_to_one_week_ratio: 6.67,
       },
       {
         name: "beta",
-        current_score: 6.4,
-        score_1h: 6.4,
+        current_score: 6,
+        score_1h: 6,
         remain_5h: 40,
         remain_1w: 30,
-        remain_5h_in_1w_units: 6.4,
+        remain_5h_in_1w_units: 6,
         projected_5h_1h: 40,
-        projected_5h_in_1w_units_1h: 6.4,
+        projected_5h_in_1w_units_1h: 6,
         projected_1w_1h: 30,
-        five_hour_windows_per_week: 6.25,
+        five_hour_to_one_week_ratio: 6.67,
       },
     ]);
   });
@@ -124,23 +124,23 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([plusAccount, teamAccount])).toMatchObject([
       {
         name: "plus",
-        current_score: 12.8,
-        score_1h: 12.8,
+        current_score: 12,
+        score_1h: 12,
         remain_1w: 50,
-        remain_5h_in_1w_units: 12.8,
-        projected_5h_in_1w_units_1h: 12.8,
+        remain_5h_in_1w_units: 12,
+        projected_5h_in_1w_units_1h: 12,
         projected_1w_1h: 50,
-        five_hour_windows_per_week: 6.25,
+        five_hour_to_one_week_ratio: 6.67,
       },
       {
         name: "team",
-        current_score: 12.8,
-        score_1h: 12.8,
+        current_score: 12,
+        score_1h: 12,
         remain_1w: 50,
-        remain_5h_in_1w_units: 12.8,
-        projected_5h_in_1w_units_1h: 12.8,
+        remain_5h_in_1w_units: 12,
+        projected_5h_in_1w_units_1h: 12,
         projected_1w_1h: 50,
-        five_hour_windows_per_week: 6.25,
+        five_hour_to_one_week_ratio: 6.67,
       },
     ]);
   });
@@ -188,30 +188,30 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([plusAccount, proliteAccount, proAccount])).toMatchObject([
       {
         name: "pro",
-        current_score: 100,
-        score_1h: 100,
+        current_score: 120,
+        score_1h: 120,
         remain_5h: 80,
-        remain_5h_in_1w_units: 100,
+        remain_5h_in_1w_units: 120,
         remain_1w: 50,
-        five_hour_windows_per_week: 6.66,
+        five_hour_to_one_week_ratio: 5.56,
       },
       {
         name: "prolite",
-        current_score: 50,
-        score_1h: 50,
+        current_score: 60,
+        score_1h: 60,
         remain_5h: 80,
-        remain_5h_in_1w_units: 50,
+        remain_5h_in_1w_units: 60,
         remain_1w: 50,
-        five_hour_windows_per_week: 6.66,
+        five_hour_to_one_week_ratio: 5.56,
       },
       {
         name: "plus",
-        current_score: 12.8,
-        score_1h: 12.8,
+        current_score: 12,
+        score_1h: 12,
         remain_5h: 80,
-        remain_5h_in_1w_units: 12.8,
+        remain_5h_in_1w_units: 12,
         remain_1w: 50,
-        five_hour_windows_per_week: 6.25,
+        five_hour_to_one_week_ratio: 6.67,
       },
     ]);
   });
@@ -259,13 +259,13 @@ describe("auto switch ranking", () => {
       {
         name: "early-reset",
         remain_5h: 60,
-        current_score: 9.6,
+        current_score: 9,
         projected_5h_1h: 96.67,
       },
       {
         name: "late-reset",
         remain_5h: 65,
-        current_score: 10.4,
+        current_score: 9.75,
         projected_5h_1h: 65,
       },
     ]);
@@ -313,13 +313,13 @@ describe("auto switch ranking", () => {
     expect(rankAutoSwitchCandidates([nearResetButEmpty, modestButAvailable])).toMatchObject([
       {
         name: "modest-available",
-        current_score: 8,
-        score_1h: 8,
+        current_score: 7.5,
+        score_1h: 7.5,
       },
       {
         name: "near-reset-empty",
         current_score: 0,
-        score_1h: 14.67,
+        score_1h: 13.75,
       },
     ]);
   });

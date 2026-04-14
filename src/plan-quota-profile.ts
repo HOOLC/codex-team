@@ -1,31 +1,32 @@
 export type PlanQuotaTier = "plus" | "prolite" | "pro" | "team" | "unknown";
 
 export interface PlanQuotaProfile {
-  fiveHourCapacityInPlusUnits: number;
+  fiveHourToOneWeekRawRatio: number;
   oneWeekCapacityInPlusUnits: number;
 }
 
-const PLUS_WEEKLY_FIVE_HOUR_WINDOWS = 8;
+const DIRECT_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO = 20 / 3;
+const PRO_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO = 50 / 9;
 
 const PLAN_QUOTA_PROFILES: Record<PlanQuotaTier, PlanQuotaProfile> = {
   plus: {
-    fiveHourCapacityInPlusUnits: 1.28,
+    fiveHourToOneWeekRawRatio: DIRECT_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
     oneWeekCapacityInPlusUnits: 1,
   },
   prolite: {
-    fiveHourCapacityInPlusUnits: 5,
-    oneWeekCapacityInPlusUnits: 4.165,
+    fiveHourToOneWeekRawRatio: PRO_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
+    oneWeekCapacityInPlusUnits: 25 / 6,
   },
   pro: {
-    fiveHourCapacityInPlusUnits: 10,
-    oneWeekCapacityInPlusUnits: 8.33,
+    fiveHourToOneWeekRawRatio: PRO_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
+    oneWeekCapacityInPlusUnits: 25 / 3,
   },
   team: {
-    fiveHourCapacityInPlusUnits: 1.28,
+    fiveHourToOneWeekRawRatio: DIRECT_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
     oneWeekCapacityInPlusUnits: 1,
   },
   unknown: {
-    fiveHourCapacityInPlusUnits: 1,
+    fiveHourToOneWeekRawRatio: DIRECT_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
     oneWeekCapacityInPlusUnits: 1,
   },
 };
@@ -61,9 +62,9 @@ export function convertFiveHourPercentToPlusWeeklyUnits(
     return null;
   }
 
+  const profile = getPlanQuotaProfile(planType);
   return roundToTwo(
-    (fiveHourPercent * getPlanQuotaProfile(planType).fiveHourCapacityInPlusUnits) /
-      PLUS_WEEKLY_FIVE_HOUR_WINDOWS,
+    (fiveHourPercent / profile.fiveHourToOneWeekRawRatio) * profile.oneWeekCapacityInPlusUnits,
   );
 }
 
@@ -87,17 +88,13 @@ export function normalizeDisplayedScore(
     return null;
   }
 
+  const profile = getPlanQuotaProfile(planType);
   const normalized =
-    (rawScore * PLUS_WEEKLY_FIVE_HOUR_WINDOWS) /
-    getPlanQuotaProfile(planType).fiveHourCapacityInPlusUnits;
+    (rawScore / profile.oneWeekCapacityInPlusUnits) * profile.fiveHourToOneWeekRawRatio;
 
   return roundToTwo(options.clamp === false ? normalized : Math.min(100, normalized));
 }
 
-export function resolveFiveHourWindowsPerWeek(planType: string | null): number {
-  const profile = getPlanQuotaProfile(planType);
-  return roundToTwo(
-    (PLUS_WEEKLY_FIVE_HOUR_WINDOWS * profile.oneWeekCapacityInPlusUnits) /
-      profile.fiveHourCapacityInPlusUnits,
-  );
+export function resolveFiveHourToOneWeekRawRatio(planType: string | null): number {
+  return roundToTwo(getPlanQuotaProfile(planType).fiveHourToOneWeekRawRatio);
 }

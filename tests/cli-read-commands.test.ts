@@ -1614,8 +1614,8 @@ wire_api = "responses"
       expect(output).toContain("1W RESET AT");
       expect(output).toContain("quota-plus");
       expect(output).toContain("quota-team");
-      expect(output).toContain("499.8%");
-      expect(output).toContain("833%");
+      expect(output).toContain("600%");
+      expect(output).toContain("1000%");
     } finally {
       await cleanupTempHome(homeDir);
     }
