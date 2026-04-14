@@ -2,14 +2,23 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-`codex-team` 提供 `codexm` 命令，用来在一台机器上管理多个 Codex ChatGPT 登录快照。
+用 `codexm` 在一台机器上管理多个 Codex 账号。
 
-如果你经常在多个 Codex 账号之间切换，它可以帮你更简单地：
+`codexm` 是一个面向 Codex Desktop 和 Codex CLI 多账号场景的命令行工具，适合想更快切号、查看 quota、以及在账号耗尽后继续跑长会话的人。
 
-- 保存多个命名账号快照
-- 切换当前生效的 `~/.codex/auth.json`
-- 查看多个账号的 quota 使用情况
+如果你有这些需求，它会更有用：
+
+- 保存多个命名 auth 快照
+- 切换当前生效的 `~/.codex/auth.json`，不用手动拷文件
+- 查看多个账号当前谁还有 quota
 - 在当前账号耗尽时自动切号并重启运行中的 Codex
+
+它重点解决的是这类问题：
+
+- 怎么在一台机器上管理多个 Codex 账号
+- 怎么快速切换 Codex 账号
+- 怎么在命令行里看 Codex quota
+- 怎么在 quota 用尽后自动切号
 
 ## 平台支持
 
@@ -26,6 +35,20 @@ npm install -g codex-team
 ```
 
 安装完成后，使用 `codexm` 命令。
+
+## 使用场景
+
+- 你有多个 Codex 账号，不想手动复制 `auth.json`
+- 你在长时间会话里经常遇到当前账号 quota 耗尽
+- 你在 macOS 上使用 Codex Desktop，希望有受管启动和切号流程
+- 你在 Linux 或 WSL 上使用 Codex CLI，希望运行中的 CLI 能跟随切号自动重启
+
+## 指南
+
+- [如何在一台机器上管理多个 Codex 账号](./docs/zh-CN/manage-multiple-codex-accounts.md)
+- [如何监控 Codex quota 并自动切号](./docs/zh-CN/monitor-codex-quota-and-auto-switch.md)
+- [如何把 codexm 用在 Codex Desktop](./docs/zh-CN/use-codexm-with-codex-desktop.md)
+- [如何把 codexm 用在 Codex CLI](./docs/zh-CN/use-codexm-with-codex-cli.md)
 
 ## 快速开始
 
@@ -54,6 +77,8 @@ codexm run -- --model o3
 ```
 
 `codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，在 `~/.codex/auth.json` 变化后自动重启，这样长时间运行的 CLI 会话就能自动跟随切号。
+
+如果你的核心问题是“下一个该切到哪个账号”，优先看 `codexm list`。
 
 ## 输出示例
 
@@ -115,6 +140,14 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 - 脚本场景使用 `--json`，排查问题使用 `--debug`
 
 对于 ChatGPT 登录快照，如果本地 token 能区分同一 ChatGPT 账号或 workspace 下的不同用户，`codex-team` 也可以把它们保存成不同的托管条目。
+
+## 更多文档
+
+- [English guides](./docs/manage-multiple-codex-accounts.md)
+- [如何在一台机器上管理多个 Codex 账号](./docs/zh-CN/manage-multiple-codex-accounts.md)
+- [如何监控 Codex quota 并自动切号](./docs/zh-CN/monitor-codex-quota-and-auto-switch.md)
+- [如何把 codexm 用在 Codex Desktop](./docs/zh-CN/use-codexm-with-codex-desktop.md)
+- [如何把 codexm 用在 Codex CLI](./docs/zh-CN/use-codexm-with-codex-cli.md)
 
 ## Shell Completion
 

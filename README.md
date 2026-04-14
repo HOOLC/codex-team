@@ -2,14 +2,23 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-`codex-team` provides the `codexm` CLI for managing multiple Codex ChatGPT login snapshots on one machine.
+Manage multiple Codex accounts on one machine with `codexm`.
 
-Use it when you regularly switch between multiple Codex accounts and want a simpler way to:
+`codexm` is a CLI for people who use multiple Codex accounts across Codex Desktop and Codex CLI and want a faster way to switch accounts, monitor quota usage, and keep long-running sessions moving.
 
-- save named account snapshots
-- switch the active `~/.codex/auth.json`
-- check quota usage across saved accounts
-- automatically switch and restart when the current account is exhausted
+Use it when you want to:
+
+- save named auth snapshots for multiple Codex accounts
+- switch the active `~/.codex/auth.json` without manual file juggling
+- see which account has usable quota right now
+- auto-switch and restart when the current account is exhausted
+
+This repository is especially useful if you have searched for things like:
+
+- how to manage multiple Codex accounts
+- how to switch Codex accounts on one machine
+- how to monitor Codex quota from the command line
+- how to auto-switch Codex accounts when quota is exhausted
 
 ## Platform support
 
@@ -26,6 +35,20 @@ npm install -g codex-team
 ```
 
 After install, use the `codexm` command.
+
+## Use cases
+
+- You use multiple Codex accounts and do not want to keep copying `auth.json` by hand.
+- Your current Codex account runs out of quota during a long session and you want to switch quickly.
+- You use Codex Desktop on macOS and want a managed launch flow.
+- You use Codex CLI on Linux or WSL and want the running CLI to follow account switches automatically.
+
+## Guides
+
+- [How to manage multiple Codex accounts](./docs/manage-multiple-codex-accounts.md)
+- [How to monitor Codex quota and auto-switch accounts](./docs/monitor-codex-quota-and-auto-switch.md)
+- [How to use codexm with Codex Desktop](./docs/use-codexm-with-codex-desktop.md)
+- [How to use codexm with Codex CLI](./docs/use-codexm-with-codex-cli.md)
 
 ## Quick start
 
@@ -54,6 +77,8 @@ codexm run -- --model o3
 ```
 
 `codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI and restarts it when `~/.codex/auth.json` changes, so a long-running CLI session can follow account switches automatically.
+
+If you mainly want to answer "which account should I use next?", start with `codexm list`.
 
 ## Example output
 
@@ -115,6 +140,14 @@ Use `codexm --help` for the full command reference.
 - Use `--json` for scripting and `--debug` for diagnostics.
 
 For ChatGPT auth snapshots, `codex-team` can save and switch different users under the same ChatGPT account or workspace as separate managed entries when the local login tokens distinguish them.
+
+## More docs
+
+- [中文文档索引](./docs/zh-CN/manage-multiple-codex-accounts.md)
+- [Manage multiple Codex accounts](./docs/manage-multiple-codex-accounts.md)
+- [Monitor Codex quota and auto-switch](./docs/monitor-codex-quota-and-auto-switch.md)
+- [Use codexm with Codex Desktop](./docs/use-codexm-with-codex-desktop.md)
+- [Use codexm with Codex CLI](./docs/use-codexm-with-codex-cli.md)
 
 ## Shell completion
 

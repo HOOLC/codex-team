@@ -1,7 +1,7 @@
 {
   "name": "codex-team",
   "version": "0.0.18",
-  "description": "Manage multiple Codex ChatGPT auth snapshots and quota usage from the command line.",
+  "description": "CLI for managing multiple Codex accounts, monitoring quota usage, and switching accounts on one machine.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/HOOLC/codex-team#readme",
@@ -14,10 +14,17 @@
   },
   "keywords": [
     "codex",
+    "codexm",
+    "codex cli",
+    "codex desktop",
     "chatgpt",
     "cli",
-    "account",
-    "quota"
+    "multiple accounts",
+    "account switching",
+    "auth snapshot",
+    "quota",
+    "quota monitoring",
+    "developer tools"
   ],
   "bin": {
     "codex-team": "dist/cli.js",
