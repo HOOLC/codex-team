@@ -53,7 +53,7 @@ codexm watch
 codexm run -- --model o3
 ```
 
-`codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，在 `~/.codex/auth.json` 变化后自动重启，这样长时间运行的 CLI 会话就能自动跟随切号。
+`codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
 
 ## 输出示例
 

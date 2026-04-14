@@ -58,6 +58,7 @@ import {
 } from "./switching.js";
 
 import {
+  type RunnerResult,
   runCodexWithAutoRestart,
 } from "./codex-cli-runner.js";
 import {
@@ -80,6 +81,7 @@ interface RunCliOptions extends Partial<CliStreams> {
   desktopLauncher?: CodexDesktopLauncher;
   authLogin?: CodexLoginProvider;
   watchProcessManager?: WatchProcessManager;
+  runCodexCli?: (options: Parameters<typeof runCodexWithAutoRestart>[0]) => Promise<RunnerResult>;
   interruptSignal?: AbortSignal;
   managedDesktopWaitStatusDelayMs?: number;
   managedDesktopWaitStatusIntervalMs?: number;
@@ -136,6 +138,7 @@ export async function runCli(
   const authLogin = options.authLogin ?? createCodexLoginProvider();
   const watchProcessManager =
     options.watchProcessManager ?? createWatchProcessManager(store.paths.codexTeamDir);
+  const runCodexCli = options.runCodexCli ?? runCodexWithAutoRestart;
   const interruptSignal = options.interruptSignal;
   const managedDesktopWaitStatusDelayMs =
     options.managedDesktopWaitStatusDelayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
@@ -417,7 +420,9 @@ export async function runCli(
         })();
         let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
         try {
-          await store.refreshQuotaForAccount(result.account.name);
+          await store.refreshQuotaForAccount(result.account.name, {
+            quotaClientMode: "list-fast",
+          });
           const quotaList = await store.listQuotaSummaries();
           const matched =
             quotaList.accounts.find((account) => account.name === result.account.name) ?? null;
@@ -492,9 +497,11 @@ export async function runCli(
       case "run": {
         // `codexm run [-- ...codexArgs]` wraps `codex` and auto-restarts
         // when the auth file changes (e.g. after `codexm switch`).
-        const separatorIdx = process.argv.indexOf("--");
-        const codexArgs =
-          separatorIdx >= 0 ? process.argv.slice(separatorIdx + 1) : [];
+        if (parsed.positionals.length > 0) {
+          throw new Error(`Usage: ${getUsage("run")}`);
+        }
+
+        const codexArgs = parsed.passthrough;
 
         const currentAccount = await readCurrentRunAccountMetadata(store);
 
@@ -514,7 +521,7 @@ export async function runCli(
 `,
         );
 
-        const result = await runCodexWithAutoRestart({
+        const result = await runCodexCli({
           codexArgs,
           accountId: currentAccount.accountId,
           email: currentAccount.email,

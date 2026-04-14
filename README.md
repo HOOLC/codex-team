@@ -53,7 +53,7 @@ In another terminal, start Codex through the wrapper:
 codexm run -- --model o3
 ```
 
-`codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI and restarts it when `~/.codex/auth.json` changes, so a long-running CLI session can follow account switches automatically.
+`codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI, survives repeated `~/.codex/auth.json` replacements, and auto-resumes the active interactive session after an account-triggered restart. If you end `codexm run` manually while a session is recoverable, it prints the resume command to use.
 
 ## Example output
 

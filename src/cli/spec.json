@@ -108,6 +108,14 @@
       }
     },
     {
+      "name": "run",
+      "flags": [],
+      "helpUsages": ["codexm run [-- ...codexArgs]"],
+      "usageErrors": {
+        "default": "codexm run [-- ...codexArgs]"
+      }
+    },
+    {
       "name": "remove",
       "flags": ["--yes", "--json"],
       "helpUsages": ["codexm remove <name> [--yes] [--json]"],

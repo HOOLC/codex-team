@@ -169,9 +169,48 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    expect(output).toContain("codexm run [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(stderr.read()).toBe("");
+  });
+
+  test("run accepts passthrough codex args and delegates to the runner", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-run");
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let runnerOptions: { codexArgs: string[]; accountId?: string | null } | null = null;
+
+      const exitCode = await runCli(["run", "--", "--model", "o3"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runCodexCli: async (options) => {
+          runnerOptions = {
+            codexArgs: options.codexArgs,
+            accountId: options.accountId,
+          };
+          return {
+            exitCode: 7,
+            restartCount: 0,
+          };
+        },
+      });
+
+      expect(exitCode).toBe(7);
+      expect(runnerOptions).toEqual({
+        codexArgs: ["--model", "o3"],
+        accountId: "acct-run",
+      });
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain("[codexm run] codex args: --model o3");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
   });
 
   test("prints a zsh completion script with dynamic account completion", async () => {
@@ -200,6 +239,7 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("current");
       expect(script).toContain("doctor");
       expect(script).toContain("watch");
+      expect(script).toContain("run");
       expect(script).toContain("completion");
       expect(script).toContain("--device-auth");
       expect(script).toContain("--no-auto-switch");
@@ -231,6 +271,7 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("_codexm()");
       expect(script).toContain("COMPREPLY=");
       expect(script).toContain("codexm completion --accounts");
+      expect(script).toContain("run");
       expect(script).toContain("--with-api-key");
       expect(script).toContain("--detach");
       expect(stderr.read()).toBe("");

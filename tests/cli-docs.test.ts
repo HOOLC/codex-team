@@ -8,6 +8,7 @@ import {
   buildReadmeCommandSections,
   replaceGeneratedReadmeSections,
 } from "../src/cli/readme.js";
+import { COMMAND_NAMES } from "../src/cli/spec.js";
 
 describe("CLI Docs", () => {
   test("package scripts expose verify shortcuts", () => {
@@ -31,5 +32,14 @@ describe("CLI Docs", () => {
     expect(readme).toContain(sections.coreCommands);
     expect(readme).toContain(sections.shellCompletion);
     expect(replaceGeneratedReadmeSections(readme, "zh-CN")).toBe(readme);
+  });
+
+  test("CLI spec stays in sync with the main command dispatcher", async () => {
+    const source = await readFile(join(process.cwd(), "src", "main.ts"), "utf8");
+    const dispatcherCommands = [...source.matchAll(/case "([^"]+)": \{/g)]
+      .map((match) => match[1]!)
+      .sort();
+
+    expect(dispatcherCommands).toEqual([...COMMAND_NAMES].sort());
   });
 });

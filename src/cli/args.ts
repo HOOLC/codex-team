@@ -10,6 +10,8 @@ export interface ParsedArgs {
   command: string | null;
   positionals: string[];
   flags: Set<string>;
+  passthrough: string[];
+  hasPassthroughSeparator: boolean;
 }
 
 export class CliUsageError extends Error {
@@ -25,8 +27,11 @@ export class CliUsageError extends Error {
 export function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Set<string>();
   const positionals: string[] = [];
+  const separatorIndex = argv.indexOf("--");
+  const args =
+    separatorIndex >= 0 ? argv.slice(0, separatorIndex) : argv;
 
-  for (const arg of argv) {
+  for (const arg of args) {
     if (arg.startsWith("--")) {
       flags.add(arg);
     } else {
@@ -38,6 +43,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     command: positionals[0] ?? null,
     positionals: positionals.slice(1),
     flags,
+    passthrough: separatorIndex >= 0 ? argv.slice(separatorIndex + 1) : [],
+    hasPassthroughSeparator: separatorIndex >= 0,
   };
 }
 
@@ -89,6 +96,11 @@ export function validateParsedArgs(parsed: ParsedArgs): void {
       `Unknown command "${parsed.command}".`,
       findClosestSuggestion(parsed.command, [...COMMAND_NAMES]),
     );
+  }
+
+  if (parsed.hasPassthroughSeparator && parsed.command !== "run") {
+    const commandContext = parsed.command ? ` for command "${parsed.command}"` : "";
+    throw new CliUsageError(`Unexpected argument separator "--"${commandContext}.`);
   }
 
   const allowedFlags = new Set<string>(GLOBAL_FLAGS);
