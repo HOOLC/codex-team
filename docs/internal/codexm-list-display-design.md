@@ -120,7 +120,7 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
    - `1H PLUS SCORE`
    - `5H->1W 1H`
    - `1W 1H`
-   - `5H/WEEK`
+   - `5H:1W`
 3. 双窗口恢复时间组
    - `5H RESET AT`
    - `1W RESET AT`
@@ -129,7 +129,7 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
 
 - verbose 仍允许出现双窗口 reset
 - 当前 verbose 视图统一使用 `PLUS SCORE` / `1H PLUS SCORE`
-- `1W:5H` 统一改名为 `5H/WEEK`
+- `1W:5H` 的旧推导列已移除，当前直接展示 `5H:1W`
 
 ## 5. 列设计
 

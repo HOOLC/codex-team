@@ -1902,16 +1902,16 @@ describe("CLI", () => {
         selected: {
           name: "beta",
           available: "available",
-          current_score: 8,
+          current_score: 7.5,
           remain_5h: 50,
           remain_1w: 20,
-          remain_5h_in_1w_units: 8,
-          five_hour_windows_per_week: 6.25,
+          remain_5h_in_1w_units: 7.5,
+          five_hour_to_one_week_ratio: 6.67,
         },
       });
-      expect(dryRunPayload.selected.score_1h).toBeCloseTo(14.89, 2);
+      expect(dryRunPayload.selected.score_1h).toBeCloseTo(13.96, 2);
       expect(dryRunPayload.selected.projected_5h_1h).toBeCloseTo(93.06, 1);
-      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(14.89, 2);
+      expect(dryRunPayload.selected.projected_5h_in_1w_units_1h).toBeCloseTo(13.96, 2);
       expect(dryRunPayload.selected.projected_1w_1h).toBeCloseTo(20, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-gamma");
@@ -1939,8 +1939,8 @@ describe("CLI", () => {
         },
         selected: {
           name: "beta",
-          current_score: 8,
-          five_hour_windows_per_week: 6.25,
+          current_score: 7.5,
+          five_hour_to_one_week_ratio: 6.67,
         },
         quota: {
           available: "available",
@@ -1953,7 +1953,7 @@ describe("CLI", () => {
           },
         },
       });
-      expect(switchPayload.selected.score_1h).toBeCloseTo(14.89, 2);
+      expect(switchPayload.selected.score_1h).toBeCloseTo(13.96, 2);
 
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-auto-beta");
     } finally {
