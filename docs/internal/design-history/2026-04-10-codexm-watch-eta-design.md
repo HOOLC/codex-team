@@ -147,27 +147,37 @@ eta = remaining_budget / global_rate_in_1w_units_per_hour
 也就是说：
 
 - `1W` 先按 plan 的周额度 profile 归一化
-- `5H` 先按 plan 的 `5H` 容量 profile 归一化，再换算成 `plus 1W` 单位
+- `5H` 先按同一 plan 的原始 `5H:1W` 比例折算到 `1W`，再换算成 `plus 1W` 单位
 
 实现上集中维护一张 plan profile 表：
 
-| plan | `5H` 容量（plus=1） | `1W` 容量（plus=1） |
+| plan | 原始 `5H:1W` 比例 | `1W` 容量（plus=1） |
 | --- | ---: | ---: |
-| `plus` | 1 | 1 |
-| `prolite` | 5 | 25/6 |
-| `pro` | 10 | 25/3 |
-| `team` | 1 | 1 |
-| `unknown` | 1 | 1 |
+| `plus` | `20/3` | `1` |
+| `prolite` | `50/9` | `25/6` |
+| `pro` | `50/9` | `25/3` |
+| `team` | `20/3` | `1` |
+| `unknown` | `20/3` | `1` |
 
 换算规则：
 
 ```text
 five_hour_equivalent_in_plus_weekly_units =
-  five_hour_percent * plan.five_hour_capacity_in_plus_units / 8
+  (five_hour_percent / plan.five_hour_to_one_week_raw_ratio) *
+  plan.one_week_capacity_in_plus_units
 
 one_week_equivalent_in_plus_weekly_units =
   one_week_percent * plan.one_week_capacity_in_plus_units
 ```
+
+这里不再假设“一周固定包含多少个 5H 窗口”。
+
+实现直接使用每个 plan 的经验原始比例：
+
+- `plus/team` 按 `3:20`
+- `pro/prolite` 按 `9:50`
+
+这样可以把“同一 plan 内的 `5H:1W` 关系”和“不同 plan 间的周额度容量比”分开表达，避免把两层语义混在单一窗口数假设里。
 
 全局速率定义为：
 
