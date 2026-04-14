@@ -362,8 +362,8 @@ CLI 层不直接处理历史文件格式，也不直接实现预测算法。
 
 本次 ETA 设计不替换现有：
 
-- 当前实现中的 `PLUS SCORE`
-- 当前实现中的 `1H PLUS SCORE`
+- 当前实现中的 `SCORE`
+- 当前实现中的 `1H SCORE`
 
 二者可以同时存在：
 
@@ -373,7 +373,7 @@ CLI 层不直接处理历史文件格式，也不直接实现预测算法。
 注：
 
 - 这份文档形成于设计阶段，最终实现中的模块路径为 `src/watch/history.ts`
-- list/verbose 表头后续已演进为 `PLUS SCORE` / `1H PLUS SCORE`
+- list/verbose 表头后续已演进为 `SCORE` / `1H SCORE`
 
 ## 9. 失败处理与边界条件
 

@@ -9,6 +9,7 @@ import packageJson from "../package.json";
 
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
+import { maskAccountId } from "../src/auth-snapshot.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -1091,12 +1092,12 @@ wire_api = "responses"
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
-      expect(lines[1]).toBe("Accounts: 2/2 usable | 0 blocked by 1W | 0 blocked by 5H | plus x2");
-      expect(lines[2]).toBe("Total: bottleneck 24 | 5H->1W 24 | 1W 100 (plus 1W units)");
+      expect(lines[1]).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x2");
+      expect(lines[2]).toBe("Total: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
       expect(output).not.toContain("CREDITS");
       expect(output).not.toContain("AVAILABLE");
       expect(output).toContain("ETA");
-      expect(output).toContain("PLUS SCORE");
+      expect(output).toContain("SCORE");
       expect(output).toContain("NEXT RESET");
       expect(output).toContain("* quota-main");
       expect(output).toContain("  quota-backup");
@@ -1107,13 +1108,15 @@ wire_api = "responses"
       expect(tableLines).toHaveLength(4);
       expect(currentRow).toBeDefined();
       expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
-      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
+      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(
+        currentRow?.indexOf(maskAccountId("acct-cli-quota-text-a")),
+      );
       expect(tableLines[0]?.indexOf("PLAN")).toBe(tableLines[3]?.indexOf("plus"));
-      expect((tableLines[0]?.indexOf("PLUS SCORE") ?? -1)).toBeGreaterThan(
+      expect((tableLines[0]?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
         tableLines[0]?.indexOf("PLAN") ?? -1,
       );
       expect((tableLines[0]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("PLUS SCORE") ?? -1,
+        tableLines[0]?.indexOf("SCORE") ?? -1,
       );
     } finally {
       await cleanupTempHome(homeDir);
@@ -1437,7 +1440,7 @@ wire_api = "responses"
       expect(healthyRow).toBeDefined();
       expect(fullRow).toBeDefined();
       expect(lowRow).toBeDefined();
-      const scoreColumn = tableLines[0]?.indexOf("PLUS SCORE") ?? -1;
+      const scoreColumn = tableLines[0]?.indexOf("SCORE") ?? -1;
       const used5hColumn = tableLines[0]?.indexOf("5H USED") ?? -1;
       const used1wColumn = tableLines[0]?.indexOf("1W USED") ?? -1;
       const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
@@ -1769,8 +1772,8 @@ wire_api = "responses"
       expect(output).toContain("ETA 1W");
       expect(output).toContain("RATE 1W UNITS");
       expect(output).toContain("5H REMAIN->1W");
-      expect(output).toContain("PLUS SCORE");
-      expect(output).toContain("1H PLUS SCORE");
+      expect(output).toContain("SCORE");
+      expect(output).toContain("1H SCORE");
       expect(output).toContain("5H->1W 1H");
       expect(output).toContain("1W 1H");
       expect(output).toContain("5H:1W");
@@ -1780,6 +1783,85 @@ wire_api = "responses"
       expect(output).toContain("quota-team");
       expect(output).toContain("600%");
       expect(output).toContain("1000%");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list shows no ETA for accounts that are already unavailable", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedWatchHistory(homeDir);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const primaryUsedPercent = accountId === "acct-cli-blocked" ? 100 : 40;
+          const secondaryUsedPercent = accountId === "acct-cli-blocked" ? 65 : 35;
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: primaryUsedPercent,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 400,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: secondaryUsedPercent,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-blocked");
+      await runCli(["save", "quota-blocked", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-available");
+      await runCli(["save", "quota-available", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const output = listStdout.read();
+      const blockedRow = output
+        .trimEnd()
+        .split("\n")
+        .find((line) => line.includes("quota-blocked"));
+
+      expect(blockedRow).toBeDefined();
+      expect(blockedRow).toContain("quota-blocked");
+      expect(blockedRow).not.toContain("unavailable");
+      expect(blockedRow).toMatch(/\s-\s+/);
     } finally {
       await cleanupTempHome(homeDir);
     }

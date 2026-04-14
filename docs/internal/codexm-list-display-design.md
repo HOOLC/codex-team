@@ -55,7 +55,7 @@ summary 区不应变成第二张表，也不应展开实现细节或推导过程
 | `NAME` | 账号名，同时承载当前账号标记 |
 | `IDENTITY` | 掩码后的稳定身份标识 |
 | `PLAN` | 账号 plan |
-| `PLUS SCORE` | 当前综合可用度百分比 |
+| `SCORE` | 当前综合可用度百分比 |
 | `ETA` | 预计变为不可用的剩余时间 |
 | `5H USED` | 当前 5 小时窗口使用率 |
 | `1W USED` | 当前 1 周窗口使用率 |
@@ -71,8 +71,8 @@ summary 区不应变成第二张表，也不应展开实现细节或推导过程
 
 设计原因：
 
-- `AVAILABLE` 与 `PLUS SCORE` 在默认视图里表达高度重叠
-- 默认视图当前统一使用 `PLUS SCORE`
+- `AVAILABLE` 与 `SCORE` 在默认视图里表达高度重叠
+- 默认视图当前统一使用 `SCORE`
 - `REFRESH STATUS` 在成功场景下大多恒为 `ok`，信息密度过低
 - reset 默认只保留一个对决策最重要的时间点
 
@@ -81,8 +81,8 @@ summary 区不应变成第二张表，也不应展开实现细节或推导过程
 默认 summary 建议使用两行：
 
 ```text
-Accounts: 5/7 usable | 1 blocked by 1W | 2 blocked by 5H | plus x3, pro x2, team x2
-Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
+Accounts: 5/7 usable | blocked: 1W 1, 5H 2 | plus x3, pro x2, team x2
+Total: bottleneck 0.39 | 5H->1W 0.39 | 1W 0.42 (plus 1W)
 ```
 
 其中：
@@ -116,8 +116,8 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
    - `RATE 1W UNITS`
    - `5H REMAIN->1W`
 2. Score 解释组
-   - `PLUS SCORE`
-   - `1H PLUS SCORE`
+   - `SCORE`
+   - `1H SCORE`
    - `5H->1W 1H`
    - `1W 1H`
    - `5H:1W`
@@ -128,7 +128,7 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
 其中：
 
 - verbose 仍允许出现双窗口 reset
-- 当前 verbose 视图统一使用 `PLUS SCORE` / `1H PLUS SCORE`
+- 当前 verbose 视图统一使用 `SCORE` / `1H SCORE`
 - `1W:5H` 的旧推导列已移除，当前直接展示 `5H:1W`
 
 ## 5. 列设计
@@ -164,11 +164,11 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
 设计原因：
 
 - 信息不变
-- 表头更短，与 `NAME`、`ETA`、`PLUS SCORE` 风格一致
+- 表头更短，与 `NAME`、`ETA`、`SCORE` 风格一致
 
-### 5.4 `PLUS SCORE`
+### 5.4 `SCORE`
 
-`PLUS SCORE` 直接展示当前综合 score 的百分比文本，例如：
+`SCORE` 直接展示当前综合 score 的百分比文本，例如：
 
 - `87.5%`
 - `18.0%`
@@ -179,7 +179,7 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
 设计原因：
 
 - 用户真正需要的是“当前还剩多少”
-- `AVAILABLE` 与 `PLUS SCORE` 分拆后存在默认视图语义重复
+- `AVAILABLE` 与 `SCORE` 分拆后存在默认视图语义重复
 - 百分比 + 颜色足以表达当前健康度
 
 ### 5.5 `ETA`
@@ -205,7 +205,7 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
 
 - 两个窗口代表不同约束
 - 用户仍然需要快速判断“是短窗紧张还是长窗紧张”
-- 它们与 `PLUS SCORE` 的角色不同：`PLUS SCORE` 是综合值，`5H USED / 1W USED` 是原因侧信号
+- 它们与 `SCORE` 的角色不同：`SCORE` 是综合值，`5H USED / 1W USED` 是原因侧信号
 
 ### 5.7 `NEXT RESET`
 
@@ -230,7 +230,7 @@ Total: bottleneck 38.5 | 5H->1W 38.5 | 1W 42.0 (plus 1W units)
 `Summary` 行使用固定信息顺序：
 
 ```text
-Accounts: <x>/<n> usable | <a> blocked by 1W | <b> blocked by 5H | plus x<c>, pro x<d>, team x<e>
+Accounts: <x>/<n> usable | blocked: 1W <a>, 5H <b> | plus x<c>, pro x<d>, team x<e>
 ```
 
 规则：
@@ -252,7 +252,7 @@ Accounts: <x>/<n> usable | <a> blocked by 1W | <b> blocked by 5H | plus x<c>, pr
 `Total` 行使用固定格式：
 
 ```text
-Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W units)
+Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W)
 ```
 
 其中：
@@ -275,7 +275,7 @@ Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W units)
 默认视图固定为：
 
 ```text
-NAME | IDENTITY | PLAN | PLUS SCORE | ETA | 5H USED | 1W USED | NEXT RESET
+NAME | IDENTITY | PLAN | SCORE | ETA | 5H USED | 1W USED | NEXT RESET
 ```
 
 表头命名要求：
@@ -288,7 +288,7 @@ NAME | IDENTITY | PLAN | PLUS SCORE | ETA | 5H USED | 1W USED | NEXT RESET
 
 格式规则如下：
 
-- `PLUS SCORE` 使用百分比文本，不附加额外状态单词
+- `SCORE` 使用百分比文本，不附加额外状态单词
 - `ETA` 使用紧凑时间格式
 - `USED` 使用百分比文本
 - `NEXT RESET` 使用绝对时间，必要时附加短倒计时
@@ -315,7 +315,7 @@ NAME | IDENTITY | PLAN | PLUS SCORE | ETA | 5H USED | 1W USED | NEXT RESET
 例如：
 
 ```text
-Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
+Total: bottleneck - | 5H->1W - | 1W 0.42 (plus 1W)
 ```
 
 不引入 `unknown pool`、`partial` 等额外文案。
@@ -329,7 +329,7 @@ Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
 
 当 quota 数据不足以支持完整展示时，默认表格使用统一占位规则：
 
-- 无法计算的 `PLUS SCORE`：`-`
+- 无法计算的 `SCORE`：`-`
 - 无法计算的 `ETA`：`-`
 - 缺失的 `USED` 值：`-`
 - 缺失的 `NEXT RESET`：`-`
@@ -357,21 +357,21 @@ Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
 
 ## 7. 标色设计
 
-### 7.1 `PLUS SCORE` 列颜色
+### 7.1 `SCORE` 列颜色
 
-`PLUS SCORE` 承担默认视图里的主风险颜色。
+`SCORE` 承担默认视图里的主风险颜色。
 
 建议规则：
 
 - `0%`：红色加粗
-- `0% < PLUS SCORE < 20%`：黄色加粗
-- `20% <= PLUS SCORE < 80%`：默认色
-- `80% <= PLUS SCORE < 100%`：绿色
+- `0% < SCORE < 20%`：黄色加粗
+- `20% <= SCORE < 80%`：默认色
+- `80% <= SCORE < 100%`：绿色
 - `100%`：绿色加粗
 
 设计原因：
 
-- `PLUS SCORE` 是默认视图里的综合健康指标
+- `SCORE` 是默认视图里的综合健康指标
 - 颜色应直接服务于“能否继续用、需不需要尽快切”
 - 健康账号需要有正向识别，但不能让中段分值过度抢眼
 
@@ -388,7 +388,7 @@ Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
 设计原因：
 
 - 这两列是原因信号，不是主判断信号
-- 若它们与 `PLUS SCORE` 使用同级强色，会造成视觉竞争
+- 若它们与 `SCORE` 使用同级强色，会造成视觉竞争
 
 ### 7.3 `NEXT RESET` 颜色
 
@@ -397,7 +397,7 @@ Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
 
 设计原因：
 
-- reset 是辅助恢复信息，不应盖过 `PLUS SCORE`
+- reset 是辅助恢复信息，不应盖过 `SCORE`
 
 ### 7.4 整行高亮
 
@@ -416,7 +416,7 @@ Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
 在不支持 ANSI 颜色、关闭颜色输出、或颜色不可读的终端环境里：
 
 - 表格结构和列顺序保持不变
-- `PLUS SCORE` 仍直接显示百分比文本
+- `SCORE` 仍直接显示百分比文本
 - 当前账号仍通过 `NAME` 前缀 `*` 标识
 - 高风险账号不额外引入新的文本标记替代颜色
 
@@ -430,12 +430,12 @@ Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
 默认视图里的风险层级固定为：
 
 1. `1W` 不可用：整行红底
-2. `PLUS SCORE = 0%`：`PLUS SCORE` 红色加粗
-3. `0% < PLUS SCORE < 20%`：`PLUS SCORE` 黄色加粗
+2. `SCORE = 0%`：`SCORE` 红色加粗
+3. `0% < SCORE < 20%`：`SCORE` 黄色加粗
 4. `USED >= 100%`：对应 `USED` 红色加粗
 5. `80% <= USED < 100%`：对应 `USED` 黄色加粗
-6. `80% <= PLUS SCORE < 100%`：`PLUS SCORE` 绿色
-7. `100%`：`PLUS SCORE` 绿色加粗
+6. `80% <= SCORE < 100%`：`SCORE` 绿色
+7. `100%`：`SCORE` 绿色加粗
 8. reset 即将到来：`NEXT RESET` 倒计时弱强调
 
 这些层级不应互相混淆。
@@ -452,7 +452,7 @@ Total: bottleneck - | 5H->1W - | 1W 42.0 (plus 1W units)
 
 默认视图里：
 
-- “当前是否可继续用”由 `PLUS SCORE` 的数值和颜色表达
+- “当前是否可继续用”由 `SCORE` 的数值和颜色表达
 - 不再重复输出单独的 `available` / `unavailable` 列
 
 ### 9.3 默认与 verbose 分层
@@ -476,7 +476,7 @@ verbose 视图负责回答“为什么这个分数是这样、两个窗口分别
 `Total` 行虽然显示为：
 
 ```text
-Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W units)
+Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W)
 ```
 
 但三者都必须使用同一标准化口径后再比较和求和。
@@ -504,12 +504,12 @@ Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W units)
 因此默认表固定为：
 
 ```text
-NAME | IDENTITY | PLAN | PLUS SCORE | ETA | 5H USED | 1W USED | NEXT RESET
+NAME | IDENTITY | PLAN | SCORE | ETA | 5H USED | 1W USED | NEXT RESET
 ```
 
 其中：
 
-- `PLUS SCORE` 是默认视图主判断列
+- `SCORE` 是默认视图主判断列
 - `NAME` 前缀 `*` 表示当前账号
 - 整行红底只用于 `1W` 不可用
 - 其他异常信息放表后，不进入默认列

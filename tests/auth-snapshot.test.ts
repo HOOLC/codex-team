@@ -3,6 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   createSnapshotMeta,
   getSnapshotIdentity,
+  maskAccountId,
   parseAuthSnapshot,
   parseSnapshotMeta,
 } from "../src/auth-snapshot.js";
@@ -139,5 +140,9 @@ describe("auth snapshot parsing", () => {
         }),
       ),
     ).toThrow(/Unsupported auth_mode/);
+  });
+
+  test("masks long account identities with a shorter prefix and suffix", () => {
+    expect(maskAccountId("acct-primary:user-primary")).toBe("acct...ary");
   });
 });
