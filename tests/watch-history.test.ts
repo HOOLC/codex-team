@@ -4,6 +4,7 @@ import {
   appendWatchQuotaHistory,
   computeWatchEtaContext,
   computeWatchHistoryEta,
+  computeWatchObservedRatioDiagnostics,
   createWatchHistoryStore,
 } from "../src/watch/history.js";
 import type {
@@ -96,11 +97,11 @@ describe("watch history eta", () => {
 
     expect(result).toMatchObject({
       status: "ok",
-      rate_1w_units_per_hour: 3.75,
+      rate_1w_units_per_hour: 4.8,
       remaining_5h: 40,
       remaining_1w: 50,
-      remaining_5h_eq_1w: 5,
-      bottleneck_remaining: 5,
+      remaining_5h_eq_1w: 6.4,
+      bottleneck_remaining: 6.4,
       bottleneck_window: "5h_eq_1w",
       etaHours: 1.33,
     });
@@ -200,7 +201,7 @@ describe("watch history eta", () => {
     expect(result).toMatchObject({
       status: "ok",
       rate_1w_units_per_hour: 20,
-      remaining_5h_eq_1w: 11.25,
+      remaining_5h_eq_1w: 14.4,
       remaining_1w: 8,
       bottleneck_remaining: 8,
       bottleneck_window: "1w",
@@ -287,8 +288,8 @@ describe("watch history eta", () => {
 
     expect(result).toMatchObject({
       status: "ok",
-      rate_1w_units_per_hour: 1,
-      remaining_5h_eq_1w: 5,
+      rate_1w_units_per_hour: 1.28,
+      remaining_5h_eq_1w: 6.4,
       etaHours: 5,
     });
   });
@@ -314,8 +315,8 @@ describe("watch history eta", () => {
     expect(result).toMatchObject({
       status: "ok",
       rate_1w_units_per_hour: 2,
-      remaining_5h_eq_1w: 5,
-      etaHours: 2.5,
+      remaining_5h_eq_1w: 6.4,
+      etaHours: 3.2,
     });
   });
 
@@ -340,8 +341,8 @@ describe("watch history eta", () => {
     expect(result).toMatchObject({
       status: "ok",
       rate_1w_units_per_hour: 2,
-      remaining_5h_eq_1w: 5,
-      etaHours: 2.5,
+      remaining_5h_eq_1w: 6.4,
+      etaHours: 3.2,
     });
   });
 
@@ -362,6 +363,75 @@ describe("watch history eta", () => {
     expect(result).toMatchObject({
       status: "idle",
       rate_1w_units_per_hour: 0,
+    });
+  });
+
+  test("computes observed ratio diagnostics by bucket and plan", () => {
+    const history = [
+      makeRecord("2026-04-13T09:00:00.000Z", {
+        account_name: "plus-main",
+        identity: "acct-plus:user-plus",
+        five_hour: makeWindow(10, "2026-04-13T12:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-20T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-13T09:20:00.000Z", {
+        account_name: "plus-main",
+        identity: "acct-plus:user-plus",
+        five_hour: makeWindow(16, "2026-04-13T12:00:30.000Z"),
+        one_week: makeWindow(11, "2026-04-20T00:00:30.000Z"),
+      }),
+      makeRecord("2026-04-13T10:00:00.000Z", {
+        account_name: "plus-main",
+        identity: "acct-plus:user-plus",
+        five_hour: makeWindow(0, "2026-04-13T17:00:00.000Z"),
+        one_week: makeWindow(11, "2026-04-20T00:01:00.000Z"),
+      }),
+      makeRecord("2026-04-13T10:20:00.000Z", {
+        account_name: "plus-main",
+        identity: "acct-plus:user-plus",
+        five_hour: makeWindow(7, "2026-04-13T17:00:30.000Z"),
+        one_week: makeWindow(12, "2026-04-20T00:01:30.000Z"),
+      }),
+      makeRecord("2026-04-13T11:00:00.000Z", {
+        account_name: "plus-main",
+        identity: "acct-plus:user-plus",
+        five_hour: makeWindow(0, "2026-04-13T22:00:00.000Z"),
+        one_week: makeWindow(12, "2026-04-20T00:02:00.000Z"),
+      }),
+      makeRecord("2026-04-13T11:20:00.000Z", {
+        account_name: "plus-main",
+        identity: "acct-plus:user-plus",
+        five_hour: makeWindow(6, "2026-04-13T22:00:45.000Z"),
+        one_week: makeWindow(13, "2026-04-20T00:02:30.000Z"),
+      }),
+    ];
+
+    const diagnostics = computeWatchObservedRatioDiagnostics(
+      history,
+      new Date("2026-04-13T12:00:00.000Z"),
+    );
+
+    expect(diagnostics).toContainEqual({
+      dimension: "bucket",
+      key: "plus",
+      sample_count: 3,
+      observed_mean_raw_ratio: 6.33,
+      observed_weighted_raw_ratio: 6.33,
+      variance: 0.22,
+      expected_raw_ratio: 6.25,
+      relative_delta: 0.01,
+      warning: false,
+    });
+    expect(diagnostics).toContainEqual({
+      dimension: "plan",
+      key: "plus",
+      sample_count: 3,
+      observed_mean_raw_ratio: 6.33,
+      observed_weighted_raw_ratio: 6.33,
+      variance: 0.22,
+      expected_raw_ratio: 6.25,
+      relative_delta: 0.01,
+      warning: false,
     });
   });
 
@@ -398,7 +468,7 @@ describe("watch history eta", () => {
 
       expect(result).toMatchObject({
         status: "ok",
-        rateIn1wUnitsPerHour: 3.75,
+        rateIn1wUnitsPerHour: 4.8,
         bottleneck: "five_hour",
       });
     } finally {

@@ -57,6 +57,84 @@ async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Pr
   );
 }
 
+async function seedRecentRatioWatchHistory(homeDir: string, accountName = "plus-main"): Promise<void> {
+  const now = Date.now();
+  const iso = (offsetMinutes: number) => new Date(now + offsetMinutes * 60_000).toISOString();
+
+  await mkdir(join(homeDir, ".codex-team"), { recursive: true });
+  await writeFile(
+    join(homeDir, ".codex-team", "watch-quota-history.jsonl"),
+    [
+      JSON.stringify({
+        recorded_at: iso(-180),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: iso(120) },
+        one_week: { used_percent: 10, window_seconds: 604_800, reset_at: iso(7 * 24 * 60) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-160),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 16, window_seconds: 18_000, reset_at: iso(121) },
+        one_week: { used_percent: 11, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 1) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-120),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 0, window_seconds: 18_000, reset_at: iso(420) },
+        one_week: { used_percent: 11, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 2) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-100),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 7, window_seconds: 18_000, reset_at: iso(421) },
+        one_week: { used_percent: 12, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 3) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-60),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 0, window_seconds: 18_000, reset_at: iso(720) },
+        one_week: { used_percent: 12, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 4) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-40),
+        account_name: accountName,
+        account_id: "acct-ratio",
+        identity: "acct-ratio:user-ratio",
+        plan_type: "plus",
+        available: "available",
+        five_hour: { used_percent: 6, window_seconds: 18_000, reset_at: iso(721) },
+        one_week: { used_percent: 13, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 5) },
+        source: "watch",
+      }),
+    ].join("\n") + "\n",
+  );
+}
+
 describe("CLI Read Commands", () => {
   test("prints version from --version", async () => {
     const stdout = captureWritable();
@@ -199,6 +277,10 @@ describe("CLI Read Commands", () => {
 
       const exitCode = await runCli(["current", "--debug"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          readCurrentRuntimeAccountResult: async () => null,
+          readCurrentRuntimeQuotaResult: async () => null,
+        }),
         stdout: stdout.stream,
         stderr: stderr.stream,
       });
@@ -233,6 +315,10 @@ describe("CLI Read Commands", () => {
       const currentStdout = captureWritable();
       const currentCode = await runCli(["current", "--json"], {
         store,
+        desktopLauncher: createDesktopLauncherStub({
+          readCurrentRuntimeAccountResult: async () => null,
+          readCurrentRuntimeQuotaResult: async () => null,
+        }),
         stdout: currentStdout.stream,
         stderr: stderr.stream,
       });
@@ -1005,30 +1091,29 @@ wire_api = "responses"
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
+      expect(lines[1]).toBe("Accounts: 2/2 usable | 0 blocked by 1W | 0 blocked by 5H | plus x2");
+      expect(lines[2]).toBe("Total: bottleneck 24 | 5H->1W 24 | 1W 100 (plus 1W units)");
       expect(output).not.toContain("CREDITS");
-      expect(output).toContain("AVAILABLE");
+      expect(output).not.toContain("AVAILABLE");
       expect(output).toContain("ETA");
-      expect(output).toContain("CURRENT SCORE");
-      expect(output).toContain("available");
+      expect(output).toContain("PLUS SCORE");
+      expect(output).toContain("NEXT RESET");
       expect(output).toContain("* quota-main");
       expect(output).toContain("  quota-backup");
-      expect(output).toContain("1.8h");
+      expect(output).toContain("2.1h");
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
-      );
-      expect(output).toContain(
-        dayjs.utc("2026-03-19T03:14:00.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
       expect(tableLines).toHaveLength(4);
       expect(currentRow).toBeDefined();
       expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
       expect(tableLines[0]?.indexOf("IDENTITY")).toBe(currentRow?.indexOf("acct-c"));
-      expect(tableLines[0]?.indexOf("PLAN TYPE")).toBe(tableLines[3]?.indexOf("plus"));
-      expect((tableLines[0]?.indexOf("CURRENT SCORE") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("AVAILABLE") ?? -1,
+      expect(tableLines[0]?.indexOf("PLAN")).toBe(tableLines[3]?.indexOf("plus"));
+      expect((tableLines[0]?.indexOf("PLUS SCORE") ?? -1)).toBeGreaterThan(
+        tableLines[0]?.indexOf("PLAN") ?? -1,
       );
       expect((tableLines[0]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("CURRENT SCORE") ?? -1,
+        tableLines[0]?.indexOf("PLUS SCORE") ?? -1,
       );
     } finally {
       await cleanupTempHome(homeDir);
@@ -1133,7 +1218,7 @@ wire_api = "responses"
     }
   });
 
-  test("list text output uses unified thresholds for low remaining quota signals", async () => {
+  test("list text output uses distinct score and usage color thresholds", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -1143,14 +1228,26 @@ wire_api = "responses"
           if (url.endsWith("/backend-api/wham/usage")) {
             const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
             const primaryUsedPercent =
-              accountId === "acct-cli-color-unavailable"
+              accountId === "acct-cli-color-weekly-blocked"
+                ? 88
+                : accountId === "acct-cli-color-healthy"
+                ? 20
+                : accountId === "acct-cli-color-full"
+                ? 0
+                : accountId === "acct-cli-color-five-hour-blocked"
                 ? 100
                 : accountId === "acct-cli-color-critical"
                   ? 92
                   : 85;
             const secondaryUsedPercent =
-              accountId === "acct-cli-color-unavailable"
-                ? 88
+              accountId === "acct-cli-color-weekly-blocked"
+                ? 100
+                : accountId === "acct-cli-color-healthy"
+                  ? 10
+                : accountId === "acct-cli-color-full"
+                  ? 0
+                : accountId === "acct-cli-color-five-hour-blocked"
+                  ? 88
                 : accountId === "acct-cli-color-critical"
                   ? 59
                   : 25;
@@ -1196,8 +1293,29 @@ wire_api = "responses"
         stderr: captureWritable().stream,
       });
 
-      await writeCurrentAuth(homeDir, "acct-cli-color-unavailable");
-      await runCli(["save", "quota-unavailable", "--json"], {
+      await writeCurrentAuth(homeDir, "acct-cli-color-healthy");
+      await runCli(["save", "quota-healthy", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-full");
+      await runCli(["save", "quota-full", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-five-hour-blocked");
+      await runCli(["save", "quota-five-hour-blocked", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-color-weekly-blocked");
+      await runCli(["save", "quota-weekly-blocked", "--json"], {
         store,
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
@@ -1213,34 +1331,52 @@ wire_api = "responses"
       expect(listCode).toBe(0);
 
       const output = listStdout.read();
-      expect(output).toContain("\u001b[30m\u001b[41m* quota-unavailable");
-      expect(output).toContain("\u001b[1m\u001b[31m92%\u001b[0m");
-      expect(output).toContain("\u001b[1m\u001b[31m8%\u001b[0m");
+      expect(output).toContain("\u001b[30m\u001b[41m* quota-weekly-blocked");
+      expect(output).not.toContain("\u001b[30m\u001b[41m  quota-five-hour-blocked");
       expect(output).toContain("\u001b[1m\u001b[93m85%\u001b[0m");
-      expect(output).toContain("\u001b[1m\u001b[93m15.04%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m15%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m92%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[93m8%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[31m100%\u001b[0m");
+      expect(output).toContain("\u001b[32m80%\u001b[0m");
+      expect(output).toContain("\u001b[1m\u001b[32m100%\u001b[0m");
       expect(output).toContain("\u001b[1m\u001b[36m (5m)\u001b[0m");
+      expect(output).not.toContain("\u001b[32m75%\u001b[0m");
+      expect(output).not.toContain("\u001b[32m41%\u001b[0m");
 
       const plainOutput = output.replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 5);
-      const unavailableRow = tableLines.find((line) => line.includes("quota-unavailable"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 8);
+      const weeklyBlockedRow = tableLines.find((line) => line.includes("quota-weekly-blocked"));
+      const fiveHourBlockedRow = tableLines.find((line) => line.includes("quota-five-hour-blocked"));
       const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
+      const healthyRow = tableLines.find((line) => line.includes("quota-healthy"));
+      const fullRow = tableLines.find((line) => line.includes("quota-full"));
       const lowRow = tableLines.find((line) => line.includes("quota-low"));
 
-      expect(unavailableRow).toBeDefined();
+      expect(weeklyBlockedRow).toBeDefined();
+      expect(fiveHourBlockedRow).toBeDefined();
       expect(criticalRow).toBeDefined();
+      expect(healthyRow).toBeDefined();
+      expect(fullRow).toBeDefined();
       expect(lowRow).toBeDefined();
-      const availableColumn = tableLines[0]?.indexOf("AVAILABLE") ?? -1;
-      const scoreColumn = tableLines[0]?.indexOf("CURRENT SCORE") ?? -1;
+      const scoreColumn = tableLines[0]?.indexOf("PLUS SCORE") ?? -1;
       const used5hColumn = tableLines[0]?.indexOf("5H USED") ?? -1;
-      const reset5hColumn = tableLines[0]?.indexOf("5H RESET AT") ?? -1;
-      expect(unavailableRow?.indexOf("unavailable", availableColumn)).toBe(availableColumn);
+      const used1wColumn = tableLines[0]?.indexOf("1W USED") ?? -1;
+      const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
+      expect(weeklyBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
+      expect(fiveHourBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
       expect(criticalRow?.indexOf("8%", scoreColumn)).toBe(scoreColumn);
+      expect(healthyRow?.indexOf("80%", scoreColumn)).toBe(scoreColumn);
+      expect(fullRow?.indexOf("100%", scoreColumn)).toBe(scoreColumn);
       expect(criticalRow?.indexOf("92%", used5hColumn)).toBe(used5hColumn);
       expect(lowRow?.indexOf("85%", used5hColumn)).toBe(used5hColumn);
+      expect(healthyRow?.indexOf("20%", used5hColumn)).toBe(used5hColumn);
+      expect(healthyRow?.indexOf("10%", used1wColumn)).toBe(used1wColumn);
+      expect(fullRow?.indexOf("0%", used5hColumn)).toBe(used5hColumn);
       expect(lowRow?.includes("(5m)")).toBe(true);
-      expect(lowRow?.indexOf("(5m)", reset5hColumn)).toBeGreaterThan(reset5hColumn);
+      expect(lowRow?.indexOf("(5m)", nextResetColumn)).toBeGreaterThan(nextResetColumn);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1412,7 +1548,7 @@ wire_api = "responses"
           if (url.endsWith("/backend-api/wham/usage")) {
             const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
             return jsonResponse({
-              plan_type: accountId === "acct-cli-verbose-team" ? "team" : "plus",
+              plan_type: accountId === "acct-cli-verbose-team" ? "pro" : "plus",
               rate_limit: {
                 primary_window: {
                   used_percent: accountId === "acct-cli-verbose-team" ? 40 : 20,
@@ -1462,18 +1598,24 @@ wire_api = "responses"
 
       expect(listCode).toBe(0);
       const output = listStdout.read();
+      expect(output).toContain("Accounts:");
+      expect(output).toContain("Total: ");
       expect(output).toContain("ETA");
       expect(output).toContain("ETA 5H->1W");
       expect(output).toContain("ETA 1W");
       expect(output).toContain("RATE 1W UNITS");
       expect(output).toContain("5H REMAIN->1W");
-      expect(output).toContain("CURRENT SCORE");
-      expect(output).toContain("1H SCORE");
+      expect(output).toContain("PLUS SCORE");
+      expect(output).toContain("1H PLUS SCORE");
       expect(output).toContain("5H->1W 1H");
       expect(output).toContain("1W 1H");
-      expect(output).toContain("1W:5H");
+      expect(output).toContain("5H:1W");
+      expect(output).toContain("5H RESET AT");
+      expect(output).toContain("1W RESET AT");
       expect(output).toContain("quota-plus");
       expect(output).toContain("quota-team");
+      expect(output).toContain("499.8%");
+      expect(output).toContain("833%");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1531,6 +1673,62 @@ wire_api = "responses"
         bottleneck: "five_hour",
       });
       expect(typeof output.successes[0]?.eta?.rate_1w_units_per_hour).toBe("number");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list --debug warns when observed ratios diverge from built-in plan ratios", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedRecentRatioWatchHistory(homeDir);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 60,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 400,
+                reset_at: Math.floor(Date.now() / 1000) + 400,
+              },
+              secondary_window: {
+                used_percent: 50,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: Math.floor(Date.now() / 1000) + 4_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          }),
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-json-eta");
+      await runCli(["save", "plus-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["list", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const debugOutput = stderr.read();
+      expect(debugOutput).toContain("[debug] list: observed_5h_1w_ratio window=24h plan=plus");
+      expect(debugOutput).not.toContain("dimension=bucket");
+      expect(debugOutput).not.toContain("[debug] warning: list observed_5h_1w_ratio_mismatch window=24h plan=plus");
     } finally {
       await cleanupTempHome(homeDir);
     }
