@@ -1,6 +1,6 @@
 {
   "name": "codex-team",
-  "version": "0.0.19",
+  "version": "0.0.20",
   "description": "Manage multiple Codex ChatGPT auth snapshots and quota usage from the command line.",
   "license": "MIT",
   "type": "module",
