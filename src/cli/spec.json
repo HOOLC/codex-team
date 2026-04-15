@@ -5,21 +5,22 @@
   "flags": [
     { "flag": "--help", "description": "show help", "global": true },
     { "flag": "--version", "description": "print the installed version", "global": true },
-    { "flag": "--debug", "description": "enable debug logging", "global": true },
+    { "flag": "--debug", "description": "enable debug logging", "global": true, "aliases": ["-d"] },
     { "flag": "--accounts", "description": "print saved account names for shell completion", "global": false },
-    { "flag": "--auto", "description": "switch to the best available account", "global": false },
+    { "flag": "--auto", "description": "switch to the best available account", "global": false, "aliases": ["-a"] },
     { "flag": "--detach", "description": "run watch in the background", "global": false },
     { "flag": "--device-auth", "description": "add account with device-code login", "global": false },
-    { "flag": "--dry-run", "description": "show the selected account without switching", "global": false },
-    { "flag": "--force", "description": "skip confirmation and force the action", "global": false },
-    { "flag": "--json", "description": "print JSON output", "global": false },
+    { "flag": "--dry-run", "description": "show the selected account without switching", "global": false, "aliases": ["-n"] },
+    { "flag": "--force", "description": "skip confirmation and force the action", "global": false, "aliases": ["-f"] },
+    { "flag": "--json", "description": "print JSON output", "global": false, "aliases": ["-j"] },
     { "flag": "--no-auto-switch", "description": "watch without switching accounts automatically", "global": false },
     { "flag": "--refresh", "description": "refresh quota data before printing", "global": false },
     { "flag": "--status", "description": "show background watch status", "global": false },
     { "flag": "--stop", "description": "stop the background watch", "global": false },
+    { "flag": "--verbose", "description": "show expanded score inputs and diagnostics", "global": false, "aliases": ["-v"] },
     { "flag": "--watch", "description": "start a detached watch after launch", "global": false },
     { "flag": "--with-api-key", "description": "add account by reading an API key from stdin", "global": false },
-    { "flag": "--yes", "description": "skip removal confirmation", "global": false }
+    { "flag": "--yes", "description": "skip removal confirmation", "global": false, "aliases": ["-y"] }
   ],
   "completionAccountCommands": ["launch", "list", "remove", "rename", "switch"],
   "notes": [
@@ -49,6 +50,7 @@
     },
     {
       "name": "list",
+      "aliases": ["ls"],
       "flags": ["--json", "--verbose"],
       "helpUsages": ["codexm list [name] [--verbose] [--json]"],
       "usageErrors": {

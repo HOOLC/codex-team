@@ -200,6 +200,38 @@ describe("CLI Account Commands", () => {
     expect(stderr.read()).toContain("Error: Usage: codexm rename <old> <new> [--json]");
   });
 
+  test("accepts the common short aliases for remove confirmation and json output", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-remove-short");
+      await runCli(["save", "remove-short", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["remove", "remove-short", "-y", "-j"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        ok: true,
+        action: "remove",
+        account: "remove-short",
+      });
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("supports update and rejects unmanaged current auth", async () => {
     const homeDir = await createTempHome();
 

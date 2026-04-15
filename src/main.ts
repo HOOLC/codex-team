@@ -500,7 +500,6 @@ export async function runCli(
         if (parsed.positionals.length > 0) {
           throw new Error(`Usage: ${getUsage("run")}`);
         }
-
         const codexArgs = parsed.passthrough;
 
         const currentAccount = await readCurrentRunAccountMetadata(store);

@@ -2,6 +2,8 @@ import {
   COMMAND_FLAGS,
   COMMAND_NAMES,
   GLOBAL_FLAGS,
+  resolveCommandName,
+  resolveFlagName,
 } from "./spec.js";
 
 export { COMMAND_FLAGS, COMMAND_NAMES, GLOBAL_FLAGS };
@@ -30,17 +32,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const separatorIndex = argv.indexOf("--");
   const args =
     separatorIndex >= 0 ? argv.slice(0, separatorIndex) : argv;
-
   for (const arg of args) {
-    if (arg.startsWith("--")) {
-      flags.add(arg);
+    if (arg.startsWith("-")) {
+      flags.add(resolveFlagName(arg));
     } else {
       positionals.push(arg);
     }
   }
 
+  const normalizedCommand = positionals[0] ? resolveCommandName(positionals[0]) : null;
+
   return {
-    command: positionals[0] ?? null,
+    command: normalizedCommand,
     positionals: positionals.slice(1),
     flags,
     passthrough: separatorIndex >= 0 ? argv.slice(separatorIndex + 1) : [],

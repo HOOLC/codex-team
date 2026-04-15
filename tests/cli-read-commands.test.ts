@@ -10,6 +10,7 @@ import packageJson from "../package.json";
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
 import { maskAccountId } from "../src/auth-snapshot.js";
+import { parseArgs, validateParsedArgs } from "../src/cli/args.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -172,6 +173,10 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm run [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
+    expect(output).toContain("Command aliases: ls=list");
+    expect(output).toContain(
+      "Flag aliases: -a=--auto, -d=--debug, -f=--force, -j=--json, -n=--dry-run, -v=--verbose, -y=--yes",
+    );
     expect(stderr.read()).toBe("");
   });
 
@@ -238,12 +243,15 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("add");
       expect(script).toContain("current");
       expect(script).toContain("doctor");
+      expect(script).toContain("ls");
       expect(script).toContain("watch");
       expect(script).toContain("run");
       expect(script).toContain("completion");
       expect(script).toContain("--device-auth");
       expect(script).toContain("--no-auto-switch");
+      expect(script).toContain("'--verbose:show expanded score inputs and diagnostics'");
       expect(script).toContain("'--debug:enable debug logging'");
+      expect(script).toContain("'-j:print JSON output'");
       expect(script).not.toContain("'--debug[enable debug logging]'");
       expect(script).toContain("codexm completion --accounts");
       expect(stderr.read()).toBe("");
@@ -271,9 +279,13 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("_codexm()");
       expect(script).toContain("COMPREPLY=");
       expect(script).toContain("codexm completion --accounts");
+      expect(script).toContain("ls");
+      expect(script).toContain("-j");
+      expect(script).toContain("-v");
       expect(script).toContain("run");
       expect(script).toContain("--with-api-key");
       expect(script).toContain("--detach");
+      expect(script).toContain("run");
       expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
@@ -334,6 +346,25 @@ describe("CLI Read Commands", () => {
     } finally {
       await cleanupTempHome(homeDir);
     }
+  });
+
+  test("parses codexm run passthrough args after -- without validating them as codexm flags", () => {
+    const parsed = parseArgs(["run", "--", "--model", "o3"]);
+
+    expect(parsed.command).toBe("run");
+    expect(parsed.positionals).toEqual([]);
+    expect(parsed.flags.size).toBe(0);
+    expect(parsed.passthrough).toEqual(["--model", "o3"]);
+    expect(() => validateParsedArgs(parsed)).not.toThrow();
+  });
+
+  test("normalizes common command and flag aliases before validation", () => {
+    const parsed = parseArgs(["ls", "-j", "-v"]);
+
+    expect(parsed.command).toBe("list");
+    expect(parsed.positionals).toEqual([]);
+    expect(parsed.flags).toEqual(new Set(["--json", "--verbose"]));
+    expect(() => validateParsedArgs(parsed)).not.toThrow();
   });
 
   test("supports save and current in json mode", async () => {

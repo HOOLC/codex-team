@@ -2,6 +2,7 @@ import type { AccountStore } from "../account-store/index.js";
 import {
   ACCOUNT_NAME_PATTERN,
   COMMAND_FLAGS,
+  COMMAND_SPECS,
   COMMAND_NAMES,
   GLOBAL_FLAGS,
   HELP_NOTES,
@@ -10,6 +11,8 @@ import {
   getCommandSpec,
   getFlagDescription,
   isCompletionAccountCommand,
+  listCommandAliases,
+  listFlagAliases,
   listGlobalFlags,
   listHelpUsageLines,
 } from "./spec.js";
@@ -22,10 +25,34 @@ function describeCommandFlag(flag: string): string {
   return `${flag}:${getFlagDescription(flag)}`;
 }
 
+function listGlobalFlagsWithAliases(): string[] {
+  return [
+    ...GLOBAL_FLAGS,
+    ...listFlagAliases()
+      .filter(({ flag }) => GLOBAL_FLAGS.has(flag))
+      .map(({ alias }) => alias),
+  ];
+}
+
+function listCommandFlagsWithAliases(commandName: string): string[] {
+  return [
+    ...COMMAND_FLAGS[commandName as keyof typeof COMMAND_FLAGS],
+    ...listFlagAliases()
+      .filter(({ flag }) => COMMAND_FLAGS[commandName as keyof typeof COMMAND_FLAGS].has(flag))
+      .map(({ alias }) => alias),
+  ];
+}
+
 export function buildHelpText(): string {
   const usageLines = listHelpUsageLines()
     .map((usage) => `  ${usage}`)
     .join("\n");
+  const commandAliases = listCommandAliases()
+    .map(({ alias, command }) => `${alias}=${command}`)
+    .join(", ");
+  const flagAliases = listFlagAliases()
+    .map(({ alias, flag }) => `${alias}=${flag}`)
+    .join(", ");
   const noteLines = HELP_NOTES
     .map((note) => `  ${note}`)
     .join("\n");
@@ -38,6 +65,8 @@ Usage:
 ${usageLines}
 
 Global flags: ${listGlobalFlags().join(", ")}
+Command aliases: ${commandAliases}
+Flag aliases: ${flagAliases}
 
 Notes:
 ${noteLines}
@@ -51,20 +80,30 @@ export function printHelp(stream: NodeJS.WriteStream): void {
 }
 
 export function buildCompletionZshScript(): string {
-  const commands = COMMAND_NAMES.map((command) => `'${command}:${command} command'`).join("\n    ");
-  const globalFlags = [...GLOBAL_FLAGS].map(describeCommandFlag).map((flag) => `'${flag}'`).join("\n    ");
+  const commands = COMMAND_SPECS.flatMap((command) => [
+    `'${command.name}:${command.name} command'`,
+    ...(command.aliases ?? []).map((alias) => `'${alias}:${command.name} command alias'`),
+  ]).join("\n    ");
+  const globalFlags = listGlobalFlagsWithAliases()
+    .map(describeCommandFlag)
+    .map((flag) => `'${flag}'`)
+    .join("\n    ");
 
-  const commandCases = COMMAND_NAMES.map((command) => {
-    const flags = [...COMMAND_FLAGS[command]]
+  const commandCases = COMMAND_SPECS.map((command) => {
+    const flags = listCommandFlagsWithAliases(command.name)
       .map(describeCommandFlag)
       .map((flag) => `'${flag}'`)
       .join(" ");
-    return `    ${command})
+    const commandTokens = [command.name, ...(command.aliases ?? [])].join("|");
+    return `    ${commandTokens})
       command_flags=(${flags})
       ;;`;
   }).join("\n");
 
-  const accountCommandPattern = COMMAND_NAMES.filter((command) => isCompletionAccountCommand(command)).join("|");
+  const accountCommandPattern = COMMAND_SPECS
+    .filter((command) => isCompletionAccountCommand(command.name))
+    .flatMap((command) => [command.name, ...(command.aliases ?? [])])
+    .join("|");
   const completionTargets = getCommandSpec("completion").completionTargets ?? [];
 
   return `#compdef ${PROGRAM_NAME}
@@ -93,7 +132,7 @@ ${completionTargets.map((target) => `      '${target}:${target} completion scrip
     return 0
   fi
 
-  if (( CURRENT == 3 )) && [[ \${words[CURRENT]} != --* ]]; then
+  if (( CURRENT == 3 )) && [[ \${words[CURRENT]} != -* ]]; then
     case \$command in
       ${accountCommandPattern}) ;;
       *) return 0 ;;
@@ -111,7 +150,7 @@ ${completionTargets.map((target) => `      '${target}:${target} completion scrip
 ${commandCases}
   esac
 
-  if [[ \${words[CURRENT]} == --* ]]; then
+  if [[ \${words[CURRENT]} == -* ]]; then
     _describe -t flags 'global flag' global_flags
     _describe -t flags 'command flag' command_flags
   fi
@@ -122,15 +161,17 @@ _${PROGRAM_NAME} "$@"
 }
 
 export function buildCompletionBashScript(): string {
-  const commands = COMMAND_NAMES.join(" ");
-  const globalFlags = [...GLOBAL_FLAGS].join(" ");
-  const commandCases = COMMAND_NAMES.map((command) => {
-    const flags = [...COMMAND_FLAGS[command]].join(" ");
-    return `    ${command}) command_flags="${flags}" ;;`;
+  const commands = COMMAND_SPECS.flatMap((command) => [command.name, ...(command.aliases ?? [])]).join(" ");
+  const globalFlags = listGlobalFlagsWithAliases().join(" ");
+  const commandCases = COMMAND_SPECS.map((command) => {
+    const flags = listCommandFlagsWithAliases(command.name).join(" ");
+    const commandTokens = [command.name, ...(command.aliases ?? [])].join("|");
+    return `    ${commandTokens}) command_flags="${flags}" ;;`;
   }).join("\n");
 
-  const accountCommandCases = COMMAND_NAMES
-    .filter((command) => isCompletionAccountCommand(command))
+  const accountCommandCases = COMMAND_SPECS
+    .filter((command) => isCompletionAccountCommand(command.name))
+    .flatMap((command) => [command.name, ...(command.aliases ?? [])])
     .map((command) => `    ${command})`)
     .join("|");
   const completionTargets = (getCommandSpec("completion").completionTargets ?? []).join(" ");
@@ -141,7 +182,7 @@ export function buildCompletionBashScript(): string {
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
   command="\${COMP_WORDS[1]}"
-  global_flags="${quoteBashWords([...GLOBAL_FLAGS])}"
+  global_flags="${quoteBashWords(listGlobalFlagsWithAliases())}"
   commands="${commands}"
 
   if [[ \${COMP_CWORD} -eq 1 ]]; then
@@ -154,7 +195,7 @@ export function buildCompletionBashScript(): string {
     return 0
   fi
 
-  if [[ \${COMP_CWORD} -eq 2 && "\${cur}" != --* ]]; then
+  if [[ \${COMP_CWORD} -eq 2 && "\${cur}" != -* ]]; then
     case "\${command}" in
       ${accountCommandCases})
         accounts="$(${PROGRAM_NAME} completion --accounts 2>/dev/null)"
@@ -169,7 +210,7 @@ export function buildCompletionBashScript(): string {
 ${commandCases}
   esac
 
-  if [[ "\${cur}" == --* ]]; then
+  if [[ "\${cur}" == -* ]]; then
     COMPREPLY=( $(compgen -W "\${global_flags} \${command_flags}" -- "\${cur}") )
   fi
 }
