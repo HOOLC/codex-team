@@ -137,6 +137,19 @@ async function seedRecentRatioWatchHistory(homeDir: string, accountName = "plus-
   );
 }
 
+function labelCenter(line: string, label: string, fromIndex = 0): number {
+  const start = line.indexOf(label, fromIndex);
+  expect(start).toBeGreaterThanOrEqual(0);
+  return start + (label.length - 1) / 2;
+}
+
+function labelEnd(line: string, label: string, fromIndex = 0): number {
+  const start = line.indexOf(label, fromIndex);
+  const resolvedStart = start >= 0 ? start : line.lastIndexOf(label);
+  expect(resolvedStart).toBeGreaterThanOrEqual(0);
+  return resolvedStart + label.length - 1;
+}
+
 describe("CLI Read Commands", () => {
   test("prints version from --version", async () => {
     const stdout = captureWritable();
@@ -1160,7 +1173,11 @@ wire_api = "responses"
       const output = listStdout.read();
       const lines = output.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
+      const headerTopIndex =
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+          ? tableStartIndex - 1
+          : tableStartIndex;
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 5);
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
@@ -1177,18 +1194,28 @@ wire_api = "responses"
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
-      expect(tableLines).toHaveLength(4);
+      expect(tableLines).toHaveLength(5);
       expect(currentRow).toBeDefined();
-      expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
-      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(
-        currentRow?.indexOf(maskAccountId("acct-cli-quota-text-a")),
+      expect(tableLines[1]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
+      expect(tableLines[0]).toContain("USED");
+      expect(tableLines[1]).toContain("5H");
+      expect(tableLines[1]).toContain("1W");
+      const usedCenter = labelCenter(tableLines[0] ?? "", "USED");
+      const fiveHourCenter = labelCenter(tableLines[1] ?? "", "5H");
+      const oneWeekCenter = labelCenter(tableLines[1] ?? "", "1W", (tableLines[1]?.indexOf("5H") ?? 0) + 1);
+      expect(Math.abs(usedCenter - (fiveHourCenter + oneWeekCenter) / 2)).toBeLessThanOrEqual(1);
+
+      const identityColumn = tableLines[1]?.indexOf("IDENTITY") ?? -1;
+      const identityCell = currentRow?.slice(identityColumn, identityColumn + "IDENTITY".length).trim();
+      expect(identityCell).toMatch(/^[^\s.]{3}\.\.[^\s.]{3}$/);
+      expect(currentRow).toContain("15%");
+      expect(currentRow).toContain("45%");
+      expect(tableLines[1]?.indexOf("PLAN")).toBe(tableLines[4]?.indexOf("plus"));
+      expect((tableLines[1]?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
+        tableLines[1]?.indexOf("PLAN") ?? -1,
       );
-      expect(tableLines[0]?.indexOf("PLAN")).toBe(tableLines[3]?.indexOf("plus"));
-      expect((tableLines[0]?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("PLAN") ?? -1,
-      );
-      expect((tableLines[0]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("SCORE") ?? -1,
+      expect((tableLines[1]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
+        tableLines[1]?.indexOf("SCORE") ?? -1,
       );
     } finally {
       await cleanupTempHome(homeDir);
@@ -1498,7 +1525,11 @@ wire_api = "responses"
       const plainOutput = output.replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 8);
+      const headerTopIndex =
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+          ? tableStartIndex - 1
+          : tableStartIndex;
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 9);
       const weeklyBlockedRow = tableLines.find((line) => line.includes("quota-weekly-blocked"));
       const fiveHourBlockedRow = tableLines.find((line) => line.includes("quota-five-hour-blocked"));
       const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
@@ -1512,20 +1543,32 @@ wire_api = "responses"
       expect(healthyRow).toBeDefined();
       expect(fullRow).toBeDefined();
       expect(lowRow).toBeDefined();
-      const scoreColumn = tableLines[0]?.indexOf("SCORE") ?? -1;
-      const used5hColumn = tableLines[0]?.indexOf("5H USED") ?? -1;
-      const used1wColumn = tableLines[0]?.indexOf("1W USED") ?? -1;
-      const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
-      expect(weeklyBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
-      expect(fiveHourBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
-      expect(criticalRow?.indexOf("8%", scoreColumn)).toBe(scoreColumn);
-      expect(healthyRow?.indexOf("80%", scoreColumn)).toBe(scoreColumn);
-      expect(fullRow?.indexOf("100%", scoreColumn)).toBe(scoreColumn);
-      expect(criticalRow?.indexOf("92%", used5hColumn)).toBe(used5hColumn);
-      expect(lowRow?.indexOf("85%", used5hColumn)).toBe(used5hColumn);
-      expect(healthyRow?.indexOf("20%", used5hColumn)).toBe(used5hColumn);
-      expect(healthyRow?.indexOf("10%", used1wColumn)).toBe(used1wColumn);
-      expect(fullRow?.indexOf("0%", used5hColumn)).toBe(used5hColumn);
+      const scoreColumn = tableLines[1]?.indexOf("SCORE") ?? -1;
+      const used5hColumn = tableLines[1]?.indexOf("5H") ?? -1;
+      const used1wColumn = tableLines[1]?.indexOf("1W") ?? -1;
+      const nextResetColumn = tableLines[1]?.indexOf("NEXT RESET") ?? -1;
+      const scoreEnds = [
+        labelEnd(weeklyBlockedRow ?? "", "0%", scoreColumn),
+        labelEnd(fiveHourBlockedRow ?? "", "0%", scoreColumn),
+        labelEnd(criticalRow ?? "", "8%", scoreColumn),
+        labelEnd(healthyRow ?? "", "80%", scoreColumn),
+        labelEnd(fullRow ?? "", "100%", scoreColumn),
+      ];
+      expect(new Set(scoreEnds).size).toBe(1);
+
+      const used5hEnds = [
+        labelEnd(criticalRow ?? "", "92%", used5hColumn),
+        labelEnd(lowRow ?? "", "85%", used5hColumn),
+        labelEnd(healthyRow ?? "", "20%", used5hColumn),
+        labelEnd(fullRow ?? "", "0%", used5hColumn),
+      ];
+      expect(new Set(used5hEnds).size).toBe(1);
+
+      const used1wEnds = [
+        labelEnd(healthyRow ?? "", "10%", used1wColumn),
+        labelEnd(weeklyBlockedRow ?? "", "100%", used1wColumn),
+      ];
+      expect(new Set(used1wEnds).size).toBe(1);
       expect(lowRow?.includes("(5m)")).toBe(true);
       expect(lowRow?.indexOf("(5m)", nextResetColumn)).toBeGreaterThan(nextResetColumn);
     } finally {

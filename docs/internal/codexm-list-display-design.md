@@ -150,7 +150,7 @@ Total: bottleneck 0.39 | 5H->1W 0.39 | 1W 0.42 (plus 1W)
 
 ### 5.2 `IDENTITY`
 
-`IDENTITY` 保留掩码后的稳定标识，不做合并或弱化。
+`IDENTITY` 保留掩码后的稳定标识，不做合并或弱化；默认表格展示使用固定 `3-2-3` 形式，即 `abc..def`。
 
 设计原因：
 
@@ -197,9 +197,9 @@ Total: bottleneck 0.39 | 5H->1W 0.39 | 1W 0.42 (plus 1W)
 - 默认视图只需要告诉用户“还能撑多久”
 - 推导细节属于 verbose 信息
 
-### 5.6 `5H USED` 和 `1W USED`
+### 5.6 `5H` 和 `1W` 使用率列
 
-这两列继续保留，不合并为单列。
+这两列继续保留，不合并为单列；默认表头使用共享上层标题 `USED`，下层再区分 `5H` 和 `1W`。`USED` 需要在两列跨越范围内居中，`5H` / `1W` 本身也应在各自列宽内居中。
 
 设计原因：
 
@@ -283,7 +283,7 @@ Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W)
 默认视图固定为：
 
 ```text
-NAME | IDENTITY | PLAN | SCORE | ETA | 5H USED | 1W USED | NEXT RESET
+NAME | IDENTITY | PLAN | SCORE | ETA | USED(5H, 1W) | NEXT RESET
 ```
 
 表头命名要求：
@@ -301,6 +301,8 @@ NAME | IDENTITY | PLAN | SCORE | ETA | 5H USED | 1W USED | NEXT RESET
 - `USED` 使用百分比文本
 - `NEXT RESET` 使用绝对时间，必要时附加短倒计时
 - 当前账号仅通过 `NAME` 列前缀 `*` 表达
+- `NAME` / `IDENTITY` / `PLAN` / `NEXT RESET` 左对齐
+- `SCORE` / `ETA` / `USED` 右对齐
 
 不使用以下格式：
 
@@ -512,7 +514,7 @@ Total: bottleneck <x> | 5H->1W <y> | 1W <z> (plus 1W)
 因此默认表固定为：
 
 ```text
-NAME | IDENTITY | PLAN | SCORE | ETA | 5H USED | 1W USED | NEXT RESET
+NAME | IDENTITY | PLAN | SCORE | ETA | USED(5H, 1W) | NEXT RESET
 ```
 
 其中：

@@ -39,6 +39,18 @@ function padVisibleEnd(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
+function padVisibleStart(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  return `${" ".repeat(padding)}${value}`;
+}
+
+function padVisibleCenter(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  const left = Math.floor(padding / 2);
+  const right = padding - left;
+  return `${" ".repeat(left)}${value}${" ".repeat(right)}`;
+}
+
 function styleText(
   value: string,
   ...codes: Array<
@@ -116,9 +128,33 @@ function colorizeUsagePercent(value: string, usedPercent: number | null): string
   return value;
 }
 
+interface TableColumn {
+  key: string;
+  label: string;
+  groupLabel?: string;
+  align?: "left" | "right" | "center";
+  headerAlign?: "left" | "right" | "center";
+}
+
+function padAligned(
+  value: string,
+  width: number,
+  align: "left" | "right" | "center" = "left",
+): string {
+  if (align === "right") {
+    return padVisibleStart(value, width);
+  }
+
+  if (align === "center") {
+    return padVisibleCenter(value, width);
+  }
+
+  return padVisibleEnd(value, width);
+}
+
 function formatTable(
   rows: Array<Record<string, string>>,
-  columns: Array<{ key: string; label: string }>,
+  columns: TableColumn[],
 ): string {
   if (rows.length === 0) {
     return "";
@@ -128,9 +164,15 @@ function formatTable(
     Math.max(visibleWidth(label), ...rows.map((row) => visibleWidth(row[key]))),
   );
 
-  const renderRow = (row: Record<string, string>) => {
+  const renderRow = (row: Record<string, string>, kind: "header" | "body") => {
     const rendered = columns
-      .map(({ key }, index) => padVisibleEnd(row[key], widths[index]))
+      .map(({ key, align, headerAlign }, index) =>
+        padAligned(
+          row[key],
+          widths[index] ?? 0,
+          kind === "header" ? (headerAlign ?? align ?? "left") : (align ?? "left"),
+        ),
+      )
       .join("  ")
       .trimEnd();
 
@@ -139,10 +181,72 @@ function formatTable(
 
   const header = renderRow(
     Object.fromEntries(columns.map(({ key, label }) => [key, label])),
+    "header",
   );
   const separator = widths.map((width) => "-".repeat(width)).join("  ");
+  const groupHeader = renderGroupedHeader(columns, widths);
 
-  return [header, separator, ...rows.map(renderRow)].join("\n");
+  return [
+    ...(groupHeader ? [groupHeader] : []),
+    header,
+    separator,
+    ...rows.map((row) => renderRow(row, "body")),
+  ].join("\n");
+}
+
+function renderGroupedHeader(
+  columns: TableColumn[],
+  widths: number[],
+): string | null {
+  const groups = new Map<string, { start: number; end: number }>();
+  const starts: number[] = [];
+  let cursor = 0;
+
+  for (let index = 0; index < columns.length; index += 1) {
+    starts.push(cursor);
+    const groupLabel = columns[index]?.groupLabel;
+    if (groupLabel) {
+      const existing = groups.get(groupLabel);
+      const start = starts[index] ?? 0;
+      const end = start + (widths[index] ?? 0);
+      if (existing) {
+        existing.end = end;
+      } else {
+        groups.set(groupLabel, { start, end });
+      }
+    }
+    cursor += (widths[index] ?? 0) + 2;
+  }
+
+  if (groups.size === 0) {
+    return null;
+  }
+
+  const row = Array.from({ length: Math.max(0, cursor - 2) }, () => " ");
+  for (const [label, span] of groups.entries()) {
+    const spanWidth = span.end - span.start;
+    const offset = span.start + Math.max(0, Math.floor((spanWidth - label.length) / 2));
+    for (let index = 0; index < label.length; index += 1) {
+      row[offset + index] = label[index] ?? " ";
+    }
+  }
+
+  return row.join("").trimEnd();
+}
+
+function compactTableIdentity(value: string, width: number): string {
+  if (visibleWidth(value) <= width) {
+    return value;
+  }
+
+  if (width <= 4) {
+    return value.slice(0, width);
+  }
+
+  const marker = "..";
+  const suffixWidth = Math.min(3, Math.max(1, Math.floor((width - marker.length) / 2)));
+  const prefixWidth = Math.max(1, width - marker.length - suffixWidth);
+  return `${value.slice(0, prefixWidth)}${marker}${value.slice(-suffixWidth)}`;
 }
 
 function describeCurrentListStatus(status: CurrentListStatusLike): string {
@@ -384,7 +488,7 @@ function describeQuotaAccounts(
       : "-";
     const row: Record<string, string> = {
       name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
-      account_id: maskAccountId(account.identity),
+      account_id: compactTableIdentity(maskAccountId(account.identity), "IDENTITY".length),
       plan_type: account.plan_type ?? "-",
       eta: formatEtaSummary(eta),
       score: colorizeScore(formatRemainingPercent(currentScore), currentScore),
@@ -430,14 +534,14 @@ function describeQuotaAccounts(
     return row;
   });
 
-  const columns = [
+  const columns: TableColumn[] = [
     { key: "name", label: "  NAME" },
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN" },
-    { key: "score", label: "SCORE" },
-    { key: "eta", label: "ETA" },
-    { key: "five_hour", label: "5H USED" },
-    { key: "one_week", label: "1W USED" },
+    { key: "score", label: "SCORE", align: "right", headerAlign: "right" },
+    { key: "eta", label: "ETA", align: "right", headerAlign: "right" },
+    { key: "five_hour", label: "5H", groupLabel: "USED", align: "right", headerAlign: "center" },
+    { key: "one_week", label: "1W", groupLabel: "USED", align: "right", headerAlign: "center" },
     { key: "next_reset", label: "NEXT RESET" },
   ];
 
@@ -445,14 +549,14 @@ function describeQuotaAccounts(
     columns.splice(
       5,
       0,
-      { key: "eta_5h_eq_1w", label: "ETA 5H->1W" },
-      { key: "eta_1w", label: "ETA 1W" },
-      { key: "rate_1w_units", label: "RATE 1W UNITS" },
-      { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W" },
-      { key: "score_1h", label: "1H SCORE" },
-      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H" },
-      { key: "projected_1w_1h", label: "1W 1H" },
-      { key: "five_hour_to_one_week_ratio", label: "5H:1W" },
+      { key: "eta_5h_eq_1w", label: "ETA 5H->1W", align: "right", headerAlign: "right" },
+      { key: "eta_1w", label: "ETA 1W", align: "right", headerAlign: "right" },
+      { key: "rate_1w_units", label: "RATE 1W UNITS", align: "right", headerAlign: "right" },
+      { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W", align: "right", headerAlign: "right" },
+      { key: "score_1h", label: "1H SCORE", align: "right", headerAlign: "right" },
+      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H", align: "right", headerAlign: "right" },
+      { key: "projected_1w_1h", label: "1W 1H", align: "right", headerAlign: "right" },
+      { key: "five_hour_to_one_week_ratio", label: "5H:1W", align: "right", headerAlign: "right" },
     );
     columns.push(
       { key: "five_hour_reset", label: "5H RESET AT" },

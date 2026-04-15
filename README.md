@@ -65,10 +65,11 @@ Current managed account: plus-main
 Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
 Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 
-  NAME         IDENTITY   PLAN  SCORE  ETA   5H USED  1W USED  NEXT RESET
-* plus-main    acct...123 plus  72%    2.1h  58%      41%      04-14 18:30
-  team-backup  acct...987 team  64%    1.7h  61%      39%      04-14 19:10
-  plus-old     acct...456 plus  0%     -     43%      100%     04-16 09:00
+  NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
+  -----------  --------  ----  -----  -----   5H   1W   ----------
+* plus-main    ac1..123  plus    72%   2.1h   58%  41%  04-14 18:30
+  team-backup  ac9..987  team    64%   1.7h   61%  39%  04-14 19:10
+  plus-old     ac4..456  plus     0%      -   43% 100%  04-16 09:00
 ```
 
 This is the main command to use when deciding which account to switch to next.
