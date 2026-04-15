@@ -4,7 +4,7 @@ import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
 
 import { getSnapshotIdentity, maskAccountId, parseAuthSnapshot } from "../auth-snapshot.js";
-import type { AccountStore } from "../account-store/index.js";
+import { ensureAccountName, type AccountStore } from "../account-store/index.js";
 import type {
   CodexDesktopLauncher,
   RuntimeAccountSnapshot,
@@ -645,6 +645,10 @@ export async function handleListCommand(options: {
   targetName?: string;
   verbose: boolean;
 }): Promise<number> {
+  if (options.targetName) {
+    ensureAccountName(options.targetName);
+  }
+
   const result = await options.store.refreshAllQuotas(options.targetName, {
     quotaClientMode: "list-fast",
     allowCachedQuotaFallback: true,

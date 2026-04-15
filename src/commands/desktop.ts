@@ -1,4 +1,4 @@
-import type { AccountStore } from "../account-store/index.js";
+import { ensureAccountName, type AccountStore } from "../account-store/index.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CodexDesktopLauncher } from "../desktop/launcher.js";
@@ -63,6 +63,9 @@ export async function handleLaunchCommand(options: {
     (noAutoSwitch && !watch)
   ) {
     throw new Error(`Usage: ${getUsage("launch")}`);
+  }
+  if (name) {
+    ensureAccountName(name);
   }
 
   if (await desktopLauncher.isRunningInsideDesktopShell()) {

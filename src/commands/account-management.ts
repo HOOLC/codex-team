@@ -1,4 +1,4 @@
-import type { AccountStore } from "../account-store/index.js";
+import { ensureAccountName, type AccountStore } from "../account-store/index.js";
 import type { CodexLoginProvider } from "../codex-login.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import { toCliQuotaSummary } from "../cli/quota.js";
@@ -93,6 +93,7 @@ export async function handleAddCommand(options: {
   if (!name || positionals.length !== 1 || (deviceAuth && withApiKey)) {
     throw new Error(`Usage: ${getUsage("add")}`);
   }
+  ensureAccountName(name);
 
   const snapshot = withApiKey
     ? {
@@ -145,6 +146,7 @@ export async function handleSaveCommand(options: {
   if (!name) {
     throw new Error(`Usage: ${getUsage("save")}`);
   }
+  ensureAccountName(name);
 
   const account = await store.saveCurrentAccount(name, force);
   debugLog?.(
@@ -226,6 +228,7 @@ export async function handleRemoveCommand(options: {
   if (!name) {
     throw new Error(`Usage: ${getUsage("remove")}`);
   }
+  ensureAccountName(name);
 
   const confirmed = yes || (await confirmRemoval(name, streams));
   debugLog?.(`remove: target=${name} confirmed=${confirmed}`);
@@ -266,6 +269,8 @@ export async function handleRenameCommand(options: {
   if (!oldName || !newName) {
     throw new Error(`Usage: ${getUsage("rename")}`);
   }
+  ensureAccountName(oldName);
+  ensureAccountName(newName);
 
   const account = await store.renameAccount(oldName, newName);
   debugLog?.(

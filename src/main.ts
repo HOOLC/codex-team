@@ -6,6 +6,7 @@ import { getSnapshotAccountId, getSnapshotEmail, maskAccountId, parseAuthSnapsho
 import {
   AccountStore,
   createAccountStore,
+  ensureAccountName,
 } from "./account-store/index.js";
 import { type CodexDesktopLauncher } from "./desktop/launcher.js";
 import {
@@ -381,6 +382,7 @@ export async function runCli(
         if (!name) {
           throw new Error(`Usage: ${getUsage("switch")}`);
         }
+        ensureAccountName(name);
 
         debugLog(`switch: mode=manual target=${name} force=${force}`);
         const switchCommand = `switch ${name}`;

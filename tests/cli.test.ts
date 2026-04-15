@@ -2238,6 +2238,41 @@ describe("CLI", () => {
     }
   });
 
+  test("validates manual switch account name before acquiring the shared lock", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const lockPath = join(store.paths.codexTeamDir, "locks", "switch.lock");
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify(
+          {
+            pid: process.pid,
+            command: "switch other",
+            started_at: "2026-04-08T15:20:00.000Z",
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const stderr = captureWritable();
+      const exitCode = await runCli(["switch", "bad/name"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain("Account name must match");
+      expect(stderr.read()).not.toContain("Another codexm switch or launch operation is already in progress.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("switch --auto refuses to run while another switch or launch operation holds the shared lock", async () => {
     const homeDir = await createTempHome();
 

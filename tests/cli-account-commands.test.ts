@@ -158,6 +158,36 @@ describe("CLI Account Commands", () => {
     );
   });
 
+  test("validates add account name before starting login", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let loginCalls = 0;
+
+      const exitCode = await runCli(["add", "bad/name"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        authLogin: {
+          login: async () => {
+            loginCalls += 1;
+            return createAuthPayload("acct-unreachable");
+          },
+        },
+      });
+
+      expect(exitCode).toBe(1);
+      expect(loginCalls).toBe(0);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain("Account name must match");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("prints save usage that matches help output", async () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
@@ -184,6 +214,21 @@ describe("CLI Account Commands", () => {
     expect(exitCode).toBe(1);
     expect(stdout.read()).toBe("");
     expect(stderr.read()).toContain("Error: Usage: codexm remove <name> [--yes] [--json]");
+  });
+
+  test("validates remove account name before confirmation", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["remove", "bad/name"], {
+      stdin: Readable.from([]) as unknown as NodeJS.ReadStream,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.read()).toBe("");
+    expect(stderr.read()).toContain("Account name must match");
   });
 
   test("prints rename usage that matches help output", async () => {

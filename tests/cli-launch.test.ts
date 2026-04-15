@@ -106,6 +106,36 @@ describe("CLI Launch", () => {
     }
   });
 
+  test("validates launch account name before desktop checks", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let insideDesktopChecks = 0;
+
+      const exitCode = await runCli(["launch", "bad/name"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isRunningInsideDesktopShell: async () => {
+            insideDesktopChecks += 1;
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(insideDesktopChecks).toBe(0);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain("Account name must match");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("switches account before launch when account is provided", async () => {
     const homeDir = await createTempHome();
 
