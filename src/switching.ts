@@ -46,6 +46,10 @@ export interface SwitchLockOwner {
   started_at: string;
 }
 
+type SwitchLockOwnerReadResult =
+  | { status: "ok"; owner: SwitchLockOwner }
+  | { status: "missing" | "invalid"; owner: null };
+
 const SWITCH_LOCKS_DIR_NAME = "locks";
 const SWITCH_LOCK_DIR_NAME = "switch.lock";
 const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS = 1_000;
@@ -381,7 +385,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function readSwitchLockOwner(store: AccountStore): Promise<SwitchLockOwner | null> {
+async function readSwitchLockOwner(store: AccountStore): Promise<SwitchLockOwnerReadResult> {
   try {
     const raw = await readFile(getSwitchLockOwnerPath(store), "utf8");
     const parsed = JSON.parse(raw) as Partial<SwitchLockOwner>;
@@ -391,19 +395,33 @@ async function readSwitchLockOwner(store: AccountStore): Promise<SwitchLockOwner
       typeof parsed.started_at === "string"
     ) {
       return {
-        pid: parsed.pid,
-        command: parsed.command,
-        started_at: parsed.started_at,
+        status: "ok",
+        owner: {
+          pid: parsed.pid,
+          command: parsed.command,
+          started_at: parsed.started_at,
+        },
       };
     }
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code !== "ENOENT") {
-      return null;
+    if (nodeError.code === "ENOENT") {
+      return {
+        status: "missing",
+        owner: null,
+      };
     }
+
+    return {
+      status: "invalid",
+      owner: null,
+    };
   }
 
-  return null;
+  return {
+    status: "invalid",
+    owner: null,
+  };
 }
 
 export async function tryAcquireSwitchLock(
@@ -434,17 +452,18 @@ export async function tryAcquireSwitchLock(
   let created = await tryCreateLock();
   if (!created) {
     const existingOwner = await readSwitchLockOwner(store);
-    if (!existingOwner || !isProcessAlive(existingOwner.pid)) {
+    if (existingOwner.status === "ok" && !isProcessAlive(existingOwner.owner.pid)) {
       await rm(lockPath, { recursive: true, force: true });
       created = await tryCreateLock();
     }
   }
 
   if (!created) {
+    const existingOwner = await readSwitchLockOwner(store);
     return {
       acquired: false,
       lockPath,
-      owner: await readSwitchLockOwner(store),
+      owner: existingOwner.owner,
     };
   }
 
@@ -477,6 +496,8 @@ export function describeBusySwitchLock(lockPath: string, owner: SwitchLockOwner 
   let message = `Another codexm switch or launch operation is already in progress. Lock: ${lockPath}`;
   if (owner) {
     message += ` (pid ${owner.pid}, command ${JSON.stringify(owner.command)}, started ${owner.started_at})`;
+  } else {
+    message += " (owner metadata unavailable; if no switch or launch is running, remove the stale lock and retry)";
   }
   return message;
 }
