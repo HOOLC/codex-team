@@ -37,6 +37,7 @@ Detailed design notes live in `docs/internal/`.
 ## Verification
 
 - For user-visible CLI behavior changes, run `pnpm typecheck` and `pnpm test`.
+- Do not add unit tests whose only purpose is to assert static configuration, constant mappings, package script strings, generated README/spec synchronization, or copied implementation snippets. Prefer behavior-level tests or build/generation checks.
 
 ## References
 
