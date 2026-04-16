@@ -38,6 +38,9 @@ Detailed design notes live in `docs/internal/`.
 
 - For user-visible CLI behavior changes, run `pnpm typecheck` and `pnpm test`.
 - Do not add unit tests whose only purpose is to assert static configuration, constant mappings, package script strings, generated README/spec synchronization, or copied implementation snippets. Prefer behavior-level tests or build/generation checks.
+- Automated tests and real self-tests must run against cloned temporary runtime state. Never point them at the operator's real `~/.codex` auth/config/store, live Codex TUI sessions, or live Codex Desktop processes.
+- Prefer copying only the runtime artifacts needed for the scenario into a temp `HOME` or temp workdir, then use env overrides to exercise the real CLI against that clone.
+- Verification must cover resource and lifecycle hygiene, not just happy-path assertions. Explicitly watch for idle busy-loops and CPU/memory/IO spikes; check graceful quit and forced-interrupt paths; and confirm timers, workers, child processes, fs watchers, sockets, lockfiles, temp files, raw-mode/alt-screen state, and cloned runtime directories are released after success, failure, or cancellation.
 
 ## References
 

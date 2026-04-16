@@ -551,11 +551,11 @@ export async function runCodexWithAutoRestart(
     return resumePlan.fallbackArgs ? [...resumePlan.fallbackArgs] : null;
   }
 
-  function handleChildExit(
+  async function handleChildExit(
     child: ChildProcess,
     code: number | null,
     signal: NodeJS.Signals | null,
-  ): void {
+  ): Promise<void> {
     lastExitCode = code ?? 1;
 
     const expectedExit = expectedExitChildren.has(child);
@@ -579,6 +579,13 @@ export async function runCodexWithAutoRestart(
     }
 
     debugLog(`run: codex exited naturally with code=${lastExitCode}`);
+    if (resumePlan.resumable && !currentSessionId) {
+      try {
+        await refreshCurrentSessionId(false);
+      } catch (error) {
+        debugLog(`run: final session discovery failed after natural exit: ${(error as Error).message}`);
+      }
+    }
     if (lastResumeCommandForDisplay) {
       stderr.write(
         `[codexm run] Resume with: ${lastResumeCommandForDisplay}\n`,
@@ -593,7 +600,7 @@ export async function runCodexWithAutoRestart(
     const exitPromise = new Promise<void>((resolve) => {
       child.once("exit", (code, signal) => {
         resolve();
-        handleChildExit(child, code, signal ?? null);
+        void handleChildExit(child, code, signal ?? null);
       });
     });
 
