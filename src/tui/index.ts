@@ -21,6 +21,11 @@ const WIDE_LAYOUT_MIN_WIDTH = 104;
 const STACKED_LAYOUT_MIN_WIDTH = 72;
 const DEFAULT_AUTO_REFRESH_INTERVAL_MS = 75_000;
 const PANE_GAP = " | ";
+const EXIT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+type SignalSource = {
+  on(event: NodeJS.Signals, listener: () => void): unknown;
+  off(event: NodeJS.Signals, listener: () => void): unknown;
+};
 
 type LayoutMode = "wide" | "stacked" | "list";
 type ExitAction = "quit" | "open-codex";
@@ -80,6 +85,7 @@ export interface RenderAccountDashboardScreenOptions {
 export interface RunAccountDashboardTuiOptions {
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
+  signalSource?: SignalSource;
   initialQuery?: string;
   autoRefreshIntervalMs?: number | null;
   loadSnapshot: () => Promise<AccountDashboardSnapshot>;
@@ -810,6 +816,7 @@ export async function runAccountDashboardTui(
 ): Promise<AccountDashboardExitResult> {
   const stdin = options.stdin ?? process.stdin;
   const stdout = options.stdout ?? process.stdout;
+  const signalSource = options.signalSource ?? process;
   const autoRefreshIntervalMs = options.autoRefreshIntervalMs ?? DEFAULT_AUTO_REFRESH_INTERVAL_MS;
   let snapshot = createPlaceholderSnapshot();
   let state = createInitialAccountDashboardState(options.initialQuery ?? "");
@@ -824,9 +831,13 @@ export async function runAccountDashboardTui(
   let refreshPreferredName: string | null = null;
   let autoRefreshTimer: NodeJS.Timeout | null = null;
   let activeOperation: { controller: AbortController; label: string } | null = null;
+  let forceExitRequested = false;
   const previousRawMode = stdin.isRaw === true;
 
   let resolveExit: ((result: AccountDashboardExitResult) => void) | null = null;
+  const exitPromise = new Promise<AccountDashboardExitResult>((resolve) => {
+    resolveExit = resolve;
+  });
 
   const render = () => {
     if (cleanedUp) {
@@ -856,6 +867,9 @@ export async function runAccountDashboardTui(
     }
     stdin.off("data", onData);
     stdout.off?.("resize", onResize);
+    for (const { signal, handler } of signalHandlers) {
+      signalSource.off(signal, handler);
+    }
     stdin.setRawMode?.(previousRawMode);
     stdin.pause();
     stdout.write(`${ANSI.showCursor}${ANSI.altOff}`);
@@ -872,6 +886,20 @@ export async function runAccountDashboardTui(
       action,
     });
   };
+
+  const handleProcessSignal = (_signal: NodeJS.Signals) => {
+    forceExitRequested = true;
+    activeOperation?.controller.abort();
+    finish("quit");
+  };
+
+  const signalHandlers = EXIT_SIGNALS.map((signal) => {
+    const handler = () => {
+      handleProcessSignal(signal);
+    };
+    signalSource.on(signal, handler);
+    return { signal, handler };
+  });
 
   const requestRefresh = (preferredName: string | null = null) => {
     refreshQueued = true;
@@ -1294,12 +1322,12 @@ export async function runAccountDashboardTui(
 
   let exitResult: AccountDashboardExitResult;
   try {
-    exitResult = await new Promise<AccountDashboardExitResult>((resolve) => {
-      resolveExit = resolve;
-    });
+    exitResult = await exitPromise;
   } finally {
     cleanup();
-    await settlePendingWork();
+    if (!forceExitRequested) {
+      await settlePendingWork();
+    }
   }
 
   return exitResult;

@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+
 import { describe, expect, test } from "@rstest/core";
 
 import {
@@ -400,6 +402,123 @@ describe("Account Dashboard TUI", () => {
       action: "quit",
     });
     expect(settled).toBe(true);
+  });
+
+  test("restores the terminal and exits on SIGTERM", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const signalSource = new EventEmitter();
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      signalSource,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+    });
+
+    await flushLoop();
+    signalSource.emit("SIGTERM");
+
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+    expect(stdin.isRaw).toBe(false);
+    expect(stdin.pauseCalls).toBeGreaterThan(0);
+    expect(stdout.read()).toContain("\u001B[?25h");
+    expect(stdout.read()).toContain("\u001B[?1049l");
+  });
+
+  test("aborts an active switch operation on SIGINT", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const signalSource = new EventEmitter();
+    let aborted = false;
+    const pendingSwitch: { resolve: (() => void) | null } = { resolve: null };
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      signalSource,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async (_name, switchOptions) => {
+        await new Promise<void>((resolve, reject) => {
+          pendingSwitch.resolve = resolve;
+          switchOptions.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new Error("aborted"));
+          }, { once: true });
+        });
+        return {
+          statusMessage: "unreachable",
+          warningMessages: [],
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("j");
+    await flushLoop();
+    stdin.emitInput("\r");
+    await flushLoop();
+    signalSource.emit("SIGINT");
+    if (!pendingSwitch.resolve) {
+      throw new Error("Expected switch to be pending.");
+    }
+    pendingSwitch.resolve();
+
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+    expect(aborted).toBe(true);
+  });
+
+  test("restores the terminal and exits on SIGINT during refresh", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const signalSource = new EventEmitter();
+    let loadCount = 0;
+    let resolveRefresh: ((snapshot: AccountDashboardSnapshot) => void) | null = null;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      signalSource,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => {
+        loadCount += 1;
+        if (loadCount === 1) {
+          return createSnapshot("alpha");
+        }
+
+        return await new Promise<AccountDashboardSnapshot>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      },
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+    });
+
+    await flushLoop();
+    stdin.emitInput("r");
+    await flushLoop();
+    signalSource.emit("SIGINT");
+
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+    expect(stdin.isRaw).toBe(false);
+    expect(stdout.read()).toContain("\u001B[?1049l");
   });
 
   test("bare interactive codexm enters the dashboard instead of printing help", async () => {
