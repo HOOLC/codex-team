@@ -40,6 +40,11 @@ import {
   handleSaveCommand,
   handleUpdateCommand,
 } from "./commands/account-management.js";
+import {
+  handleExportCommand,
+  handleImportCommand,
+  handleInspectBundleCommand,
+} from "./commands/share-bundle.js";
 import { handleCompletionCommand } from "./commands/completion.js";
 import {
   handleCurrentCommand,
@@ -470,6 +475,39 @@ export async function runCli(
           managedDesktopWaitStatusIntervalMs,
           watchQuotaMinReadIntervalMs,
           watchQuotaIdleReadIntervalMs,
+        });
+      }
+
+      case "export": {
+        return await handleExportCommand({
+          positionals: parsed.positionals,
+          outputPath: parsed.optionValues.get("--output"),
+          force: parsed.flags.has("--force"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "import": {
+        return await handleImportCommand({
+          positionals: parsed.positionals,
+          localName: parsed.optionValues.get("--name"),
+          force: parsed.flags.has("--force"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "inspect": {
+        return await handleInspectBundleCommand({
+          positionals: parsed.positionals,
+          json,
+          stdout: streams.stdout,
+          debugLog,
         });
       }
 

@@ -25,6 +25,12 @@ import {
 import { performManualSwitch } from "./switch.js";
 import { getUsage } from "../cli/spec.js";
 import { type RunnerOptions, type RunnerResult } from "../codex-cli-runner.js";
+import {
+  deleteAccountForTui,
+  exportShareBundleForTui,
+  importShareBundleForTui,
+  previewShareBundleForTui,
+} from "./tui-share.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -447,6 +453,25 @@ export async function handleTuiCommand(options: {
         warningMessages: [],
       };
     },
+    exportAccount: async (source, outputPath) =>
+      await exportShareBundleForTui({
+        store: options.store,
+        source,
+        outputPath,
+      }),
+    inspectImportBundle: async (bundlePath) =>
+      await previewShareBundleForTui(bundlePath),
+    importBundle: async (bundlePath, localName) =>
+      await importShareBundleForTui({
+        store: options.store,
+        bundlePath,
+        localName,
+      }),
+    deleteAccount: async (name) =>
+      await deleteAccountForTui({
+        store: options.store,
+        name,
+      }),
   });
 
   if (exit.action === "open-codex") {

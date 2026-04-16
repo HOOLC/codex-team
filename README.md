@@ -9,6 +9,7 @@ Use it when you regularly switch between multiple Codex accounts and want a simp
 - save named account snapshots
 - switch the active `~/.codex/auth.json`
 - check quota usage across saved accounts
+- export and import fully trusted share bundles without re-login
 - automatically switch and restart when the current account is exhausted
 
 ## Platform support
@@ -83,6 +84,9 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm save <name>`: save the currently active auth as a named snapshot
 - `codexm rename <old> <new>`: rename a saved snapshot
 - `codexm remove <name> --yes`: remove a saved snapshot
+- `codexm export [name] [--output <file>]`: export the current auth or a saved snapshot as a share bundle
+- `codexm import <file> --name <local-name>`: import a share bundle as a named managed account
+- `codexm inspect <file>`: preview bundle metadata before importing
 
 ### Inspect quota and status
 
@@ -108,9 +112,9 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm run [-- ...codexArgs]`: restart the codex CLI automatically after auth changes
 <!-- GENERATED:CORE_COMMANDS:END -->
 
-Use `codexm --help` for the full command reference.
+Use `codexm --help` for the full command reference. Share bundles are plain auth snapshots intended only for fully trusted recipients.
 
-In a TTY, plain `codexm` opens the dashboard directly. Inside the dashboard, use `Enter` to switch, `f` to force-switch or reload the current account, `o` to switch and open `codex`, and `d` to switch and open or focus Codex Desktop.
+In a TTY, plain `codexm` opens the dashboard directly. Inside the dashboard, use `Enter` to switch, `f` to force-switch or reload the current account, `o` to switch and open `codex`, `d` to switch and open or focus Codex Desktop, `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `Esc` backs out of prompts; `q` quits from the main dashboard.
 
 ## When should I use each command?
 

@@ -30,6 +30,36 @@ type SignalSource = {
 type LayoutMode = "wide" | "stacked" | "list";
 type ExitAction = "quit" | "open-codex";
 
+export interface AccountDashboardDetailOverride {
+  title: string;
+  lines: string[];
+}
+
+export interface AccountDashboardUndoAction {
+  label: string;
+  run: () => Promise<AccountDashboardActionResult>;
+  discard?: () => Promise<void>;
+}
+
+export interface AccountDashboardActionResult {
+  statusMessage?: string;
+  warningMessages?: string[];
+  preferredName?: string | null;
+  undo?: AccountDashboardUndoAction;
+}
+
+export interface AccountDashboardImportPreview {
+  bundlePath: string;
+  suggestedName: string | null;
+  title: string;
+  lines: string[];
+}
+
+export interface AccountDashboardExportSource {
+  type: "current" | "managed";
+  name: string | null;
+}
+
 export interface AccountDashboardAccount {
   name: string;
   planLabel: string;
@@ -80,6 +110,10 @@ export interface RenderAccountDashboardScreenOptions {
   height: number;
   busyMessage?: string | null;
   refreshing?: boolean;
+  detailOverride?: AccountDashboardDetailOverride | null;
+  footerOverride?: string | null;
+  hintOverride?: string | null;
+  statusOverride?: string | null;
 }
 
 export interface RunAccountDashboardTuiOptions {
@@ -102,6 +136,20 @@ export interface RunAccountDashboardTuiOptions {
     statusMessage?: string;
     warningMessages?: string[];
   }>;
+  exportAccount?: (
+    source: AccountDashboardExportSource,
+    outputPath: string,
+  ) => Promise<AccountDashboardActionResult>;
+  inspectImportBundle?: (
+    bundlePath: string,
+  ) => Promise<AccountDashboardImportPreview>;
+  importBundle?: (
+    bundlePath: string,
+    localName: string,
+  ) => Promise<AccountDashboardActionResult>;
+  deleteAccount?: (
+    name: string,
+  ) => Promise<AccountDashboardActionResult>;
 }
 
 export interface AccountDashboardExitResult {
@@ -137,6 +185,40 @@ interface InputEvent {
   value: string;
   name: string;
   ctrl?: boolean;
+}
+
+type PromptState =
+  | {
+      kind: "export";
+      label: string;
+      value: string;
+      cursor: number;
+      source: AccountDashboardExportSource;
+    }
+  | {
+      kind: "import-path";
+      label: string;
+      value: string;
+      cursor: number;
+    }
+  | {
+      kind: "import-name";
+      label: string;
+      value: string;
+      cursor: number;
+      bundlePath: string;
+      preview: AccountDashboardImportPreview;
+    };
+
+type ConfirmState = {
+  kind: "delete";
+  accountName: string;
+};
+
+function buildDefaultExportPath(source: AccountDashboardExportSource): string {
+  const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/u, "Z");
+  const base = source.type === "managed" && source.name ? source.name : "current";
+  return `./codexm-share-${base}-${timestamp}.json`;
 }
 
 function stripAnsi(value: string): string {
@@ -477,7 +559,15 @@ function renderDetailLines(
   selectedAccount: AccountDashboardAccount | null,
   width: number,
   height: number,
+  detailOverride?: AccountDashboardDetailOverride | null,
 ): string[] {
+  if (detailOverride) {
+    return fitLines(
+      [emphasize(detailOverride.title), ...detailOverride.lines].map((line) => truncate(line, width)),
+      height,
+    );
+  }
+
   if (!selectedAccount) {
     const lines = snapshot.accounts.length === 0
       ? [
@@ -528,13 +618,20 @@ function renderBodyLines(
   state: AccountDashboardState,
   width: number,
   height: number,
+  detailOverride?: AccountDashboardDetailOverride | null,
 ): string[] {
   const normalized = normalizeStateForViewport(snapshot, state, width, height + 5);
   const { layout } = normalized;
 
   if (layout.mode === "wide") {
     const listLines = renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows);
-    const detailLines = renderDetailLines(snapshot, normalized.filtered.selected, layout.detailWidth, layout.detailRows);
+    const detailLines = renderDetailLines(
+      snapshot,
+      normalized.filtered.selected,
+      layout.detailWidth,
+      layout.detailRows,
+      detailOverride,
+    );
     return fitLines(
       Array.from({ length: layout.bodyHeight }, (_, index) =>
         `${padEndVisible(listLines[index] ?? "", layout.listWidth)}${PANE_GAP}${padEndVisible(detailLines[index] ?? "", layout.detailWidth)}`,
@@ -545,7 +642,13 @@ function renderBodyLines(
 
   if (layout.mode === "stacked") {
     const listLines = renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows);
-    const detailLines = renderDetailLines(snapshot, normalized.filtered.selected, layout.detailWidth, layout.detailRows);
+    const detailLines = renderDetailLines(
+      snapshot,
+      normalized.filtered.selected,
+      layout.detailWidth,
+      layout.detailRows,
+      detailOverride,
+    );
     return fitLines([...listLines, ...detailLines], height);
   }
 
@@ -621,8 +724,8 @@ function renderFilterLine(
 function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
   const forceLabel = selectedAccount?.current ? "f reload" : "f force";
   const hint = width < 88
-    ? `Enter switch | ${forceLabel} | o codex | d desktop | r refresh | q quit`
-    : `j/k move | / filter | Enter switch | ${forceLabel} | o codex | d desktop | r refresh | q quit`;
+    ? `Enter switch | ${forceLabel} | o codex | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`
+    : `j/k move | / filter | Enter switch | ${forceLabel} | o codex | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`;
   return truncate(color(hint, "dim"), width);
 }
 
@@ -651,22 +754,36 @@ export function renderAccountDashboardScreen(
   const lines = [
     truncate(options.snapshot.headerLine, layout.innerWidth),
     renderDivider(layout.innerWidth),
-    ...renderBodyLines(options.snapshot, normalized.state, layout.innerWidth, layout.bodyHeight),
+    ...renderBodyLines(
+      options.snapshot,
+      normalized.state,
+      layout.innerWidth,
+      layout.bodyHeight,
+      options.detailOverride,
+    ),
     renderDivider(layout.innerWidth),
-    renderFilterLine(options.snapshot, normalized.state, filteredCount, layout.innerWidth),
     truncate(
-      formatStatusLine({
-        snapshot: options.snapshot,
-        state: normalized.state,
-        filteredCount,
-        selectedAccount: normalized.filtered.selected,
-        layoutMode: layout.mode,
-        busyMessage: options.busyMessage,
-        refreshing: options.refreshing ?? false,
-      }),
+      options.footerOverride
+        ?? renderFilterLine(options.snapshot, normalized.state, filteredCount, layout.innerWidth),
       layout.innerWidth,
     ),
-    renderHintBar(layout.innerWidth, normalized.filtered.selected),
+    truncate(
+      options.statusOverride
+        ?? formatStatusLine({
+          snapshot: options.snapshot,
+          state: normalized.state,
+          filteredCount,
+          selectedAccount: normalized.filtered.selected,
+          layoutMode: layout.mode,
+          busyMessage: options.busyMessage,
+          refreshing: options.refreshing ?? false,
+        }),
+      layout.innerWidth,
+    ),
+    truncate(
+      options.hintOverride ?? renderHintBar(layout.innerWidth, normalized.filtered.selected),
+      layout.innerWidth,
+    ),
   ];
 
   return renderFramedScreen(options.width, options.height, layout, lines);
@@ -831,6 +948,10 @@ export async function runAccountDashboardTui(
   let refreshPreferredName: string | null = null;
   let autoRefreshTimer: NodeJS.Timeout | null = null;
   let activeOperation: { controller: AbortController; label: string } | null = null;
+  let promptState: PromptState | null = null;
+  let confirmState: ConfirmState | null = null;
+  let detailOverride: AccountDashboardDetailOverride | null = null;
+  let undoAction: AccountDashboardUndoAction | null = null;
   let forceExitRequested = false;
   const previousRawMode = stdin.isRaw === true;
 
@@ -844,6 +965,28 @@ export async function runAccountDashboardTui(
       return;
     }
 
+    const footerOverride = promptState
+      ? `${promptState.label} ${formatInteractiveQuery(promptState.value, promptState.cursor, true)}`
+      : confirmState
+        ? `confirm: Delete account "${confirmState.accountName}"? [y/N]`
+        : null;
+    const hintOverride = promptState
+      ? color("Enter confirm | Esc back | Ctrl-U clear | Ctrl-C quit", "dim")
+      : confirmState
+        ? color("y confirm | n cancel | Esc back | q quit", "dim")
+        : null;
+    const statusOverride = state.statusMessage
+      ? null
+      : promptState
+        ? promptState.kind === "import-name"
+          ? "Choose the local managed account name. Enter confirms; Esc goes back."
+          : promptState.kind === "import-path"
+            ? "Enter a bundle path to preview it. Enter confirms; Esc goes back."
+            : "Enter an output path for the share bundle. Enter confirms; Esc goes back."
+        : confirmState
+          ? `Delete account "${confirmState.accountName}"? Press y to confirm.`
+          : null;
+
     stdout.write(
       `${ANSI.clear}${ANSI.home}${renderAccountDashboardScreen({
         snapshot,
@@ -852,6 +995,10 @@ export async function runAccountDashboardTui(
         height: stdout.rows ?? 24,
         busyMessage,
         refreshing,
+        detailOverride,
+        footerOverride,
+        hintOverride,
+        statusOverride,
       })}`,
     );
   };
@@ -870,6 +1017,7 @@ export async function runAccountDashboardTui(
     for (const { signal, handler } of signalHandlers) {
       signalSource.off(signal, handler);
     }
+    void undoAction?.discard?.().catch(() => undefined);
     stdin.setRawMode?.(previousRawMode);
     stdin.pause();
     stdout.write(`${ANSI.showCursor}${ANSI.altOff}`);
@@ -957,6 +1105,51 @@ export async function runAccountDashboardTui(
         render();
       }
     });
+  };
+
+  const setUndoAction = (nextUndo: AccountDashboardUndoAction | undefined) => {
+    if (undoAction && undoAction !== nextUndo) {
+      void undoAction.discard?.().catch(() => undefined);
+    }
+    undoAction = nextUndo ?? null;
+  };
+
+  const resolveActionStatus = (result: AccountDashboardActionResult, fallback: string): string => {
+    const base = result.statusMessage ?? fallback;
+    const withWarning = result.warningMessages?.length
+      ? `${base} Warning: ${result.warningMessages[0]}`
+      : base;
+    return result.undo ? `${withWarning} Press u to undo.` : withWarning;
+  };
+
+  const runSimpleAction = async (
+    label: string,
+    run: () => Promise<AccountDashboardActionResult>,
+  ) => {
+    busyMessage = label;
+    render();
+
+    try {
+      const result = await run();
+      setUndoAction(result.undo);
+      state = {
+        ...state,
+        statusMessage: resolveActionStatus(result, label),
+      };
+      if (typeof result.preferredName === "string") {
+        requestRefresh(result.preferredName);
+      } else if (result.preferredName === null) {
+        requestRefresh();
+      }
+    } catch (error) {
+      state = {
+        ...state,
+        statusMessage: `${label} failed: ${(error as Error).message}`,
+      };
+    } finally {
+      busyMessage = null;
+      render();
+    }
   };
 
   const moveSelection = (delta: number) => {
@@ -1163,6 +1356,239 @@ export async function runAccountDashboardTui(
     }
   };
 
+  const beginExportPrompt = (source: AccountDashboardExportSource) => {
+    if (!options.exportAccount) {
+      state = {
+        ...state,
+        statusMessage: "Export is unavailable in this session.",
+      };
+      render();
+      return;
+    }
+
+    detailOverride = null;
+    promptState = {
+      kind: "export",
+      label: "Export to file:",
+      value: buildDefaultExportPath(source),
+      cursor: buildDefaultExportPath(source).length,
+      source,
+    };
+    render();
+  };
+
+  const beginImportPrompt = () => {
+    if (!options.inspectImportBundle || !options.importBundle) {
+      state = {
+        ...state,
+        statusMessage: "Import is unavailable in this session.",
+      };
+      render();
+      return;
+    }
+
+    promptState = {
+      kind: "import-path",
+      label: "Bundle path:",
+      value: "",
+      cursor: 0,
+    };
+    detailOverride = null;
+    render();
+  };
+
+  const beginDeleteConfirm = () => {
+    if (!options.deleteAccount) {
+      state = {
+        ...state,
+        statusMessage: "Delete is unavailable in this session.",
+      };
+      render();
+      return;
+    }
+
+    const filtered = getFilteredAccounts(snapshot, state.query);
+    const selected = filtered[state.selected] ?? null;
+    if (!selected) {
+      return;
+    }
+
+    confirmState = {
+      kind: "delete",
+      accountName: selected.name,
+    };
+    detailOverride = null;
+    render();
+  };
+
+  const handlePromptKeypress = async (event: InputEvent): Promise<void> => {
+    if (!promptState) {
+      return;
+    }
+
+    if (event.name === "escape") {
+      if (promptState.kind === "import-name") {
+        promptState = {
+          kind: "import-path",
+          label: "Bundle path:",
+          value: promptState.bundlePath,
+          cursor: promptState.bundlePath.length,
+        };
+      } else {
+        promptState = null;
+        detailOverride = null;
+      }
+      render();
+      return;
+    }
+
+    if (event.name === "enter") {
+      if (promptState.kind === "export") {
+        const { source, value } = promptState;
+        if (!value.trim()) {
+          state = {
+            ...state,
+            statusMessage: "Output path is required.",
+          };
+          render();
+          return;
+        }
+        promptState = null;
+        await runSimpleAction("Export", async () =>
+          await options.exportAccount!(source, value),
+        );
+        return;
+      }
+
+      if (promptState.kind === "import-path") {
+        const bundlePath = promptState.value.trim();
+        if (!bundlePath) {
+          state = {
+            ...state,
+            statusMessage: "Bundle path is required.",
+          };
+          render();
+          return;
+        }
+
+        try {
+          const preview = await options.inspectImportBundle!(bundlePath);
+          detailOverride = {
+            title: preview.title,
+            lines: preview.lines,
+          };
+          promptState = {
+            kind: "import-name",
+            label: "Save as name:",
+            value: "",
+            cursor: 0,
+            bundlePath,
+            preview,
+          };
+        } catch (error) {
+          state = {
+            ...state,
+            statusMessage: `Preview failed: ${(error as Error).message}`,
+          };
+        }
+        render();
+        return;
+      }
+
+      const localName = promptState.value.trim();
+      if (!localName) {
+        state = {
+          ...state,
+          statusMessage: "Local account name is required.",
+        };
+        render();
+        return;
+      }
+
+      const bundlePath = promptState.bundlePath;
+      promptState = null;
+      await runSimpleAction("Import", async () =>
+        await options.importBundle!(bundlePath, localName),
+      );
+      detailOverride = null;
+      return;
+    }
+
+    if (event.name === "backspace") {
+      promptState = {
+        ...promptState,
+        value: `${promptState.value.slice(0, Math.max(0, promptState.cursor - 1))}${promptState.value.slice(promptState.cursor)}`,
+        cursor: Math.max(0, promptState.cursor - 1),
+      };
+      render();
+      return;
+    }
+
+    if (event.ctrl && event.name === "u") {
+      promptState = {
+        ...promptState,
+        value: "",
+        cursor: 0,
+      };
+      render();
+      return;
+    }
+
+    if (event.name === "left") {
+      promptState = {
+        ...promptState,
+        cursor: clamp(promptState.cursor - 1, 0, promptState.value.length),
+      };
+      render();
+      return;
+    }
+
+    if (event.name === "right") {
+      promptState = {
+        ...promptState,
+        cursor: clamp(promptState.cursor + 1, 0, promptState.value.length),
+      };
+      render();
+      return;
+    }
+
+    if (isPrintableInput(event.value)) {
+      promptState = {
+        ...promptState,
+        value: `${promptState.value.slice(0, promptState.cursor)}${event.value}${promptState.value.slice(promptState.cursor)}`,
+        cursor: promptState.cursor + event.value.length,
+      };
+      render();
+    }
+  };
+
+  const handleConfirmKeypress = async (event: InputEvent): Promise<void> => {
+    if (!confirmState) {
+      return;
+    }
+
+    if (event.name === "escape" || event.name === "n" || event.name === "enter") {
+      confirmState = null;
+      render();
+      return;
+    }
+
+    if (event.name === "q" || (event.ctrl && event.name === "c")) {
+      finish("quit");
+      return;
+    }
+
+    if (event.name !== "y") {
+      return;
+    }
+
+    const accountName = confirmState.accountName;
+    confirmState = null;
+    await runSimpleAction("Delete", async () =>
+      await options.deleteAccount!(accountName),
+    );
+  };
+
   const handleBrowseKeypress = async (event: InputEvent): Promise<void> => {
     if (activeOperation) {
       if ((event.ctrl && event.name === "c") || event.name === "escape") {
@@ -1185,8 +1611,13 @@ export async function runAccountDashboardTui(
       return;
     }
 
-    if ((event.ctrl && event.name === "c") || event.name === "escape" || event.name === "q") {
+    if ((event.ctrl && event.name === "c") || event.name === "q") {
       finish("quit");
+      return;
+    }
+    if (event.name === "escape") {
+      detailOverride = null;
+      render();
       return;
     }
     if (event.name === "up" || event.name === "k") {
@@ -1230,6 +1661,48 @@ export async function runAccountDashboardTui(
       requestRefresh();
       return;
     }
+    if (event.value === "e") {
+      const filtered = getFilteredAccounts(snapshot, state.query);
+      const selected = filtered[state.selected] ?? null;
+      if (!selected) {
+        return;
+      }
+      beginExportPrompt({
+        type: "managed",
+        name: selected.name,
+      });
+      return;
+    }
+    if (event.value === "E") {
+      beginExportPrompt({
+        type: "current",
+        name: null,
+      });
+      return;
+    }
+    if (event.value === "i") {
+      beginImportPrompt();
+      return;
+    }
+    if (event.value === "x") {
+      beginDeleteConfirm();
+      return;
+    }
+    if (event.value === "u") {
+      if (!undoAction) {
+        state = {
+          ...state,
+          statusMessage: "Nothing to undo.",
+        };
+        render();
+        return;
+      }
+
+      const currentUndo = undoAction;
+      undoAction = null;
+      await runSimpleAction("Undo", async () => await currentUndo.run());
+      return;
+    }
     if (event.value === "f") {
       await runSwitchAction({
         force: true,
@@ -1268,6 +1741,16 @@ export async function runAccountDashboardTui(
       actionQueue = actionQueue
         .then(async () => {
           if (cleanedUp) {
+            return;
+          }
+
+          if (promptState) {
+            await handlePromptKeypress(event);
+            return;
+          }
+
+          if (confirmState) {
+            await handleConfirmKeypress(event);
             return;
           }
 

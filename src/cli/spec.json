@@ -13,7 +13,9 @@
     { "flag": "--dry-run", "description": "show the selected account without switching", "global": false, "aliases": ["-n"] },
     { "flag": "--force", "description": "skip confirmation and force the action", "global": false, "aliases": ["-f"] },
     { "flag": "--json", "description": "print JSON output", "global": false, "aliases": ["-j"] },
+    { "flag": "--name", "description": "set the local account name for import", "global": false, "takesValue": true },
     { "flag": "--no-auto-switch", "description": "watch without switching accounts automatically", "global": false },
+    { "flag": "--output", "description": "write output to the given file", "global": false, "takesValue": true },
     { "flag": "--refresh", "description": "refresh quota data before printing", "global": false },
     { "flag": "--status", "description": "show background watch status", "global": false },
     { "flag": "--stop", "description": "stop the background watch", "global": false },
@@ -29,7 +31,8 @@
     "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
     "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --verbose to expand score inputs.",
-    "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, background refresh, and opening codex or Desktop from the selected account.",
+    "codexm export writes a share bundle for the current auth or a managed account; codexm import saves a shared bundle without switching current auth.",
+    "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, sharing bundles, deleting accounts, undoing the latest import/export/delete, and opening codex or Desktop from the selected account.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
     "Unknown commands and flags fail fast; close matches include a suggestion."
   ],
@@ -112,6 +115,30 @@
       }
     },
     {
+      "name": "export",
+      "flags": ["--output", "--force", "--json"],
+      "helpUsages": ["codexm export [name] [--output <file>] [--force] [--json]"],
+      "usageErrors": {
+        "default": "codexm export [name] [--output <file>] [--force] [--json]"
+      }
+    },
+    {
+      "name": "import",
+      "flags": ["--name", "--force", "--json"],
+      "helpUsages": ["codexm import <file> --name <local-name> [--force] [--json]"],
+      "usageErrors": {
+        "default": "codexm import <file> --name <local-name> [--force] [--json]"
+      }
+    },
+    {
+      "name": "inspect",
+      "flags": ["--json"],
+      "helpUsages": ["codexm inspect <file> [--json]"],
+      "usageErrors": {
+        "default": "codexm inspect <file> [--json]"
+      }
+    },
+    {
       "name": "tui",
       "flags": [],
       "helpUsages": ["codexm tui [query]"],
@@ -189,6 +216,27 @@
             "description": {
               "en": "remove a saved snapshot",
               "zh-CN": "删除已保存快照"
+            }
+          },
+          {
+            "usage": "codexm export [name] [--output <file>]",
+            "description": {
+              "en": "export the current auth or a saved snapshot as a share bundle",
+              "zh-CN": "把当前 auth 或已保存快照导出成分享 bundle"
+            }
+          },
+          {
+            "usage": "codexm import <file> --name <local-name>",
+            "description": {
+              "en": "import a share bundle as a named managed account",
+              "zh-CN": "把分享 bundle 导入成命名托管账号"
+            }
+          },
+          {
+            "usage": "codexm inspect <file>",
+            "description": {
+              "en": "preview bundle metadata before importing",
+              "zh-CN": "导入前预览 bundle 元数据"
             }
           }
         ]

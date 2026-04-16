@@ -2,6 +2,7 @@ import {
   COMMAND_FLAGS,
   COMMAND_NAMES,
   GLOBAL_FLAGS,
+  VALUE_FLAGS,
   resolveCommandName,
   resolveFlagName,
 } from "./spec.js";
@@ -12,6 +13,7 @@ export interface ParsedArgs {
   command: string | null;
   positionals: string[];
   flags: Set<string>;
+  optionValues: Map<string, string>;
   passthrough: string[];
   hasPassthroughSeparator: boolean;
 }
@@ -28,13 +30,26 @@ export class CliUsageError extends Error {
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Set<string>();
+  const optionValues = new Map<string, string>();
   const positionals: string[] = [];
   const separatorIndex = argv.indexOf("--");
   const args =
     separatorIndex >= 0 ? argv.slice(0, separatorIndex) : argv;
-  for (const arg of args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
     if (arg.startsWith("-")) {
-      flags.add(resolveFlagName(arg));
+      const resolved = resolveFlagName(arg);
+      if (VALUE_FLAGS.has(resolved)) {
+        const next = args[index + 1];
+        if (next === undefined || next === "--" || next.startsWith("-")) {
+          optionValues.set(resolved, "");
+          continue;
+        }
+        optionValues.set(resolved, next);
+        index += 1;
+        continue;
+      }
+      flags.add(resolved);
     } else {
       positionals.push(arg);
     }
@@ -46,6 +61,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     command: normalizedCommand,
     positionals: positionals.slice(1),
     flags,
+    optionValues,
     passthrough: separatorIndex >= 0 ? argv.slice(separatorIndex + 1) : [],
     hasPassthroughSeparator: separatorIndex >= 0,
   };
@@ -120,6 +136,20 @@ export function validateParsedArgs(parsed: ParsedArgs): void {
         `Unknown flag "${flag}"${commandContext}.`,
         findClosestSuggestion(flag, [...allowedFlags]),
       );
+    }
+  }
+
+  for (const [flag, value] of parsed.optionValues) {
+    if (!allowedFlags.has(flag)) {
+      const commandContext = parsed.command ? ` for command "${parsed.command}"` : "";
+      throw new CliUsageError(
+        `Unknown flag "${flag}"${commandContext}.`,
+        findClosestSuggestion(flag, [...allowedFlags]),
+      );
+    }
+    if (value === "") {
+      const commandContext = parsed.command ? ` for command "${parsed.command}"` : "";
+      throw new CliUsageError(`Missing value for flag "${flag}"${commandContext}.`);
     }
   }
 }

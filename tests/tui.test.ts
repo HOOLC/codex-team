@@ -26,6 +26,10 @@ function stripAnsi(value: string): string {
   return value.replace(/\u001B\[[0-9;?]*[A-Za-z]/g, "");
 }
 
+function latestDashboardFrame(value: string): string {
+  return stripAnsi(value.split("\u001B[2J\u001B[H").at(-1) ?? value);
+}
+
 function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
   return {
     headerLine: `codexm | current ${currentName} | 2/3 usable | updated 13:24`,
@@ -163,6 +167,7 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("filter:");
     expect(screen).toContain("Enter switch");
     expect(screen).toContain("o codex");
+    expect(screen).toContain("e export");
   });
 
   test("renders a reload hint when the selected account is already current", () => {
@@ -519,6 +524,330 @@ describe("Account Dashboard TUI", () => {
     });
     expect(stdin.isRaw).toBe(false);
     expect(stdout.read()).toContain("\u001B[?1049l");
+  });
+
+  test("uses Esc to back out of an export prompt and q to exit from browse mode", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let exportCalls = 0;
+    let settled = false;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+      exportAccount: async () => {
+        exportCalls += 1;
+        return {
+          statusMessage: "unreachable",
+        };
+      },
+    });
+    void tuiPromise.finally(() => {
+      settled = true;
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("E");
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain("Export to file:");
+
+      stdin.emitInput("\u001b");
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).not.toContain("Export to file:");
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+      expect(exportCalls).toBe(0);
+    } finally {
+      if (!settled) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+    }
+  });
+
+  test("imports a bundle through preview and can undo the latest import", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const importedAccount = {
+      ...createSnapshot("alpha").accounts[0],
+      name: "friend-main",
+      current: false,
+      identityLabel: "acct-friend:user-friend",
+      accountIdLabel: "acct...end",
+      userIdLabel: "user...end",
+    };
+    let currentSnapshot = createSnapshot("alpha");
+    let settled = false;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => currentSnapshot,
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+      inspectImportBundle: async (bundlePath) => ({
+        bundlePath,
+        suggestedName: "source-main",
+        title: "Import Bundle",
+        lines: [
+          'Source: managed account "source-main"',
+          "Suggested name: source-main",
+          "Auth mode: chatgpt",
+          "Identity: acct-friend:user-friend",
+        ],
+      }),
+      importBundle: async (_bundlePath, localName) => {
+        const previousSnapshot = currentSnapshot;
+        currentSnapshot = {
+          ...currentSnapshot,
+          accounts: [...currentSnapshot.accounts, { ...importedAccount, name: localName }],
+        };
+        return {
+          statusMessage: `Imported account "${localName}".`,
+          preferredName: localName,
+          undo: {
+            label: "undo import",
+            run: async () => {
+              currentSnapshot = previousSnapshot;
+              return {
+                statusMessage: `Undid import "${localName}".`,
+                preferredName: "alpha",
+              };
+            },
+          },
+        };
+      },
+    });
+    void tuiPromise.finally(() => {
+      settled = true;
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("i");
+      await flushLoop();
+      stdin.emitInput("bundle.json\r");
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain("Import Bundle");
+      expect(latestDashboardFrame(stdout.read())).toContain("Save as name:");
+
+      stdin.emitInput("friend-main\r");
+      await flushLoop();
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain('Imported account "friend-main". Press u to undo.');
+      expect(latestDashboardFrame(stdout.read())).toContain("friend-main");
+
+      stdin.emitInput("u");
+      await flushLoop();
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain('Undid import "friend-main".');
+      expect(latestDashboardFrame(stdout.read())).not.toContain(">  friend-main");
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } finally {
+      if (!settled) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+    }
+  });
+
+  test("requires explicit confirmation before deleting and can undo the delete", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let currentSnapshot = createSnapshot("alpha");
+    let settled = false;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => currentSnapshot,
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+      deleteAccount: async (name) => {
+        const previousSnapshot = currentSnapshot;
+        currentSnapshot = {
+          ...currentSnapshot,
+          accounts: currentSnapshot.accounts.filter((account) => account.name !== name),
+        };
+        return {
+          statusMessage: `Deleted "${name}".`,
+          preferredName: "beta",
+          undo: {
+            label: "undo delete",
+            run: async () => {
+              currentSnapshot = previousSnapshot;
+              return {
+                statusMessage: `Restored "${name}".`,
+                preferredName: name,
+              };
+            },
+          },
+        };
+      },
+    });
+    void tuiPromise.finally(() => {
+      settled = true;
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("x");
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain('Delete account "alpha"? [y/N]');
+
+      stdin.emitInput("\u001b");
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).not.toContain('Delete account "alpha"? [y/N]');
+
+      stdin.emitInput("x");
+      await flushLoop();
+      stdin.emitInput("y");
+      await flushLoop();
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain('Deleted "alpha". Press u to undo.');
+      expect(latestDashboardFrame(stdout.read())).not.toContain("* alpha");
+
+      stdin.emitInput("u");
+      await flushLoop();
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain('Restored "alpha".');
+      expect(latestDashboardFrame(stdout.read())).toContain("* alpha");
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } finally {
+      if (!settled) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+    }
+  });
+
+  test("keeps a single undo slot shared by export and import", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let exportUndoCalls = 0;
+    let importUndoCalls = 0;
+    let currentSnapshot = createSnapshot("alpha");
+    let settled = false;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => currentSnapshot,
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+      exportAccount: async (_source, outputPath) => ({
+        statusMessage: `Exported share bundle to ${outputPath}.`,
+        undo: {
+          label: "undo export",
+          run: async () => {
+            exportUndoCalls += 1;
+            return {
+              statusMessage: `Removed ${outputPath}.`,
+            };
+          },
+        },
+      }),
+      inspectImportBundle: async () => ({
+        bundlePath: "bundle.json",
+        suggestedName: "source-main",
+        title: "Import Bundle",
+        lines: [
+          'Source: managed account "source-main"',
+          "Suggested name: source-main",
+          "Auth mode: chatgpt",
+          "Identity: acct-friend:user-friend",
+        ],
+      }),
+      importBundle: async (_bundlePath, localName) => {
+        const previousSnapshot = currentSnapshot;
+        currentSnapshot = {
+          ...currentSnapshot,
+          accounts: [...currentSnapshot.accounts, { ...currentSnapshot.accounts[0], name: localName, current: false }],
+        };
+        return {
+          statusMessage: `Imported account "${localName}".`,
+          preferredName: localName,
+          undo: {
+            label: "undo import",
+            run: async () => {
+              importUndoCalls += 1;
+              currentSnapshot = previousSnapshot;
+              return {
+                statusMessage: `Undid import "${localName}".`,
+                preferredName: "alpha",
+              };
+            },
+          },
+        };
+      },
+    });
+    void tuiPromise.finally(() => {
+      settled = true;
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("e");
+      await flushLoop();
+      stdin.emitInput("\r");
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain("Press u to undo.");
+
+      stdin.emitInput("i");
+      await flushLoop();
+      stdin.emitInput("bundle.json\r");
+      await flushLoop();
+      stdin.emitInput("friend-main\r");
+      await flushLoop();
+      await flushLoop();
+      stdin.emitInput("u");
+      await flushLoop();
+      await flushLoop();
+
+      expect(importUndoCalls).toBe(1);
+      expect(exportUndoCalls).toBe(0);
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } finally {
+      if (!settled) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+    }
   });
 
   test("bare interactive codexm enters the dashboard instead of printing help", async () => {

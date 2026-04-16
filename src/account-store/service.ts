@@ -149,6 +149,11 @@ export class AccountStore {
     return await this.repository.listAccounts();
   }
 
+  async getManagedAccount(name: string): Promise<ManagedAccount> {
+    ensureAccountName(name);
+    return await this.repository.readManagedAccount(name);
+  }
+
   async getCurrentStatus(): Promise<CurrentAccountStatus> {
     const { accounts, warnings } = await this.listAccounts();
 

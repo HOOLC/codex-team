@@ -9,6 +9,7 @@
 - 保存多个命名账号快照
 - 切换当前生效的 `~/.codex/auth.json`
 - 查看多个账号的 quota 使用情况
+- 导出和导入完全信任前提下的分享 bundle，而不需要重新登录
 - 在当前账号耗尽时自动切号并重启运行中的 Codex
 
 ## 平台支持
@@ -83,6 +84,9 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 - `codexm save <name>`: 把当前生效的 auth 保存成命名快照
 - `codexm rename <old> <new>`: 重命名已保存快照
 - `codexm remove <name> --yes`: 删除已保存快照
+- `codexm export [name] [--output <file>]`: 把当前 auth 或已保存快照导出成分享 bundle
+- `codexm import <file> --name <local-name>`: 把分享 bundle 导入成命名托管账号
+- `codexm inspect <file>`: 导入前预览 bundle 元数据
 
 ### 查看状态与 quota
 
@@ -108,9 +112,9 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 - `codexm run [-- ...codexArgs]`: 在 auth 变化后自动重启 codex CLI
 <!-- GENERATED:CORE_COMMANDS:END -->
 
-完整命令参考请使用 `codexm --help`。
+完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。面板里 `Enter` 用来切号，`f` 用来强制切号或在当前账号上重新 reload，`o` 用来切号后打开 `codex`，`d` 用来切号后打开或聚焦 Codex Desktop。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。面板里 `Enter` 用来切号，`f` 用来强制切号或在当前账号上重新 reload，`o` 用来切号后打开 `codex`，`d` 用来切号后打开或聚焦 Codex Desktop，`e` / `E` 用来导出选中账号或当前 auth，`i` 用来导入 bundle，`x` 用来删除选中账号，`u` 用来撤销最近一次 import/export/delete。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。
 
 ## 什么时候该用哪个命令？
 
