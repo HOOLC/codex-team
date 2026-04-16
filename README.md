@@ -86,11 +86,12 @@ This is the main command to use when deciding which account to switch to next.
 
 ### Inspect quota and status
 
+- `codexm`: open the interactive account dashboard when running in a TTY
 - `codexm current [--refresh]`: show the current account and optionally refresh quota
 - `codexm list [--verbose]`: show saved accounts, quota usage, score, ETA, and reset times
 - `codexm list --json`: machine-readable output
 - `codexm list --debug`: include diagnostic details about quota normalization and observed ratios
-- `codexm tui [query]`: open an interactive account dashboard for filtering, switching, and refresh
+- `codexm tui [query]`: explicitly open the account dashboard, optionally with an initial filter
 
 ### Switch and launch
 
@@ -108,6 +109,8 @@ This is the main command to use when deciding which account to switch to next.
 <!-- GENERATED:CORE_COMMANDS:END -->
 
 Use `codexm --help` for the full command reference.
+
+In a TTY, plain `codexm` opens the dashboard directly. Inside the dashboard, use `Enter` to switch, `f` to force-switch or reload the current account, `o` to switch and open `codex`, and `d` to switch and open or focus Codex Desktop.
 
 ## When should I use each command?
 

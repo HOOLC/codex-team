@@ -158,6 +158,25 @@ export async function runCli(
       return 0;
     }
 
+    if (
+      !parsed.command &&
+      !parsed.flags.has("--help") &&
+      streams.stdin.isTTY &&
+      streams.stdout.isTTY
+    ) {
+      return await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher,
+        streams,
+        runCodexCli,
+        debugLog,
+        interruptSignal,
+        managedDesktopWaitStatusDelayMs,
+        managedDesktopWaitStatusIntervalMs,
+      });
+    }
+
     if (!parsed.command || parsed.flags.has("--help")) {
       printHelp(streams.stdout);
       return 0;
@@ -460,6 +479,7 @@ export async function runCli(
           store,
           desktopLauncher,
           streams,
+          runCodexCli,
           debugLog,
           interruptSignal,
           managedDesktopWaitStatusDelayMs,

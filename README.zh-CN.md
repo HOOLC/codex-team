@@ -86,11 +86,12 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 
 ### 查看状态与 quota
 
+- `codexm`: 在交互式终端里直接打开账号面板
 - `codexm current [--refresh]`: 查看当前账号；可选刷新 quota
 - `codexm list [--verbose]`: 查看所有保存账号、quota、score、ETA 和 reset 时间
 - `codexm list --json`: 输出机器可读 JSON
 - `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
-- `codexm tui [query]`: 打开交互式账号面板，可筛选、切号和刷新 quota
+- `codexm tui [query]`: 显式打开账号面板，可选带初始筛选词
 
 ### 切换与启动
 
@@ -108,6 +109,8 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 <!-- GENERATED:CORE_COMMANDS:END -->
 
 完整命令参考请使用 `codexm --help`。
+
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。面板里 `Enter` 用来切号，`f` 用来强制切号或在当前账号上重新 reload，`o` 用来切号后打开 `codex`，`d` 用来切号后打开或聚焦 Codex Desktop。
 
 ## 什么时候该用哪个命令？
 

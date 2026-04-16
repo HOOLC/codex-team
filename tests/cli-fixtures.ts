@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 import type {
@@ -33,6 +34,7 @@ export function createDesktopLauncherStub(overrides: Partial<{
   listRunningApps: () => Promise<RunningCodexDesktop[]>;
   quitRunningApps: (options?: { force?: boolean }) => Promise<void>;
   launch: (appPath: string) => Promise<void>;
+  activateApp: (appPath: string) => Promise<void>;
   writeManagedState: (state: ManagedCodexDesktopState) => Promise<void>;
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
@@ -97,6 +99,9 @@ export function createDesktopLauncherStub(overrides: Partial<{
     quitRunningApps: overrides.quitRunningApps ?? (async () => undefined),
     launch:
       overrides.launch ??
+      (async () => undefined),
+    activateApp:
+      overrides.activateApp ??
       (async () => undefined),
     writeManagedState: overrides.writeManagedState ?? (async () => undefined),
     readManagedState: overrides.readManagedState ?? (async () => null),
@@ -178,14 +183,13 @@ export function createInteractiveStdin(): NodeJS.ReadStream & {
   stream.resumeCalls = 0;
   stream.rawModeCalls = [];
   stream.isRaw = false;
-
   const originalPause = stream.pause.bind(stream);
+  const originalResume = stream.resume.bind(stream);
+
   stream.pause = (() => {
     stream.pauseCalls += 1;
     return originalPause();
   }) as typeof stream.pause;
-
-  const originalResume = stream.resume.bind(stream);
   stream.resume = (() => {
     stream.resumeCalls += 1;
     return originalResume();
@@ -214,7 +218,7 @@ export function createInteractiveStdout(
   read: () => string;
   emitResize: (nextColumns: number, nextRows: number) => void;
 } {
-  const stream = new PassThrough() as unknown as NodeJS.WriteStream & {
+  const stream = new EventEmitter() as NodeJS.WriteStream & {
     read: () => string;
     emitResize: (nextColumns: number, nextRows: number) => void;
   };
@@ -223,10 +227,11 @@ export function createInteractiveStdout(
   stream.isTTY = true;
   stream.columns = columns;
   stream.rows = rows;
-  stream.on("data", (chunk) => {
-    output += chunk.toString("utf8");
-  });
-  stream.read = () => output;
+  stream.write = ((chunk: string | Uint8Array) => {
+    output += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    return true;
+  }) as typeof stream.write;
+  stream.read = (() => output) as typeof stream.read;
   stream.emitResize = (nextColumns: number, nextRows: number) => {
     stream.columns = nextColumns;
     stream.rows = nextRows;

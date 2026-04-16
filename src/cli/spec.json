@@ -24,11 +24,12 @@
   ],
   "completionAccountCommands": ["launch", "list", "remove", "rename", "switch"],
   "notes": [
+    "In an interactive terminal, running plain codexm opens the account dashboard; use \"codexm tui [query]\" for an explicit entry or initial filter.",
     "codexm current shows live usage when a managed Codex Desktop session is available.",
     "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
     "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --verbose to expand score inputs.",
-    "codexm tui opens an interactive account dashboard for filtering, switching, and refreshing quota data.",
+    "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, background refresh, and opening codex or Desktop from the selected account.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
     "Unknown commands and flags fail fast; close matches include a suggestion."
   ],
@@ -200,6 +201,13 @@
         },
         "entries": [
           {
+            "usage": "codexm",
+            "description": {
+              "en": "open the interactive account dashboard when running in a TTY",
+              "zh-CN": "在交互式终端里直接打开账号面板"
+            }
+          },
+          {
             "usage": "codexm current [--refresh]",
             "description": {
               "en": "show the current account and optionally refresh quota",
@@ -230,8 +238,8 @@
           {
             "usage": "codexm tui [query]",
             "description": {
-              "en": "open an interactive account dashboard for filtering, switching, and refresh",
-              "zh-CN": "打开交互式账号面板，可筛选、切号和刷新 quota"
+              "en": "explicitly open the account dashboard, optionally with an initial filter",
+              "zh-CN": "显式打开账号面板，可选带初始筛选词"
             }
           }
         ]

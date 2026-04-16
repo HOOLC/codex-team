@@ -81,6 +81,7 @@ export interface CodexDesktopLauncher {
   isRunningInsideDesktopShell(): Promise<boolean>;
   quitRunningApps(options?: { force?: boolean }): Promise<void>;
   launch(appPath: string): Promise<void>;
+  activateApp(appPath: string): Promise<void>;
   readManagedState(): Promise<ManagedCodexDesktopState | null>;
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;

@@ -15,10 +15,15 @@ const ANSI = {
   yellow: "\u001B[33m",
 } as const;
 
-const PANEL_MIN_WIDTH = 56;
-const PANEL_MIN_HEIGHT = 16;
-const WIDE_LAYOUT_MIN_WIDTH = 90;
+const PANEL_MIN_WIDTH = 52;
+const PANEL_MIN_HEIGHT = 14;
+const WIDE_LAYOUT_MIN_WIDTH = 104;
+const STACKED_LAYOUT_MIN_WIDTH = 72;
+const DEFAULT_AUTO_REFRESH_INTERVAL_MS = 75_000;
 const PANE_GAP = " | ";
+
+type LayoutMode = "wide" | "stacked" | "list";
+type ExitAction = "quit" | "open-codex";
 
 export interface AccountDashboardAccount {
   name: string;
@@ -32,10 +37,20 @@ export interface AccountDashboardAccount {
   nextResetLabel: string;
   fiveHourLabel: string;
   oneWeekLabel: string;
+  authModeLabel: string;
+  accountIdLabel: string;
+  userIdLabel: string;
+  joinedAtLabel: string;
+  lastSwitchedAtLabel: string;
+  fetchedAtLabel: string;
+  refreshStatusLabel: string;
+  bottleneckLabel: string;
+  reasonLabel: string;
   detailLines: string[];
 }
 
 export interface AccountDashboardSnapshot {
+  headerLine: string;
   currentStatusLine: string;
   summaryLine: string;
   poolLine: string;
@@ -59,17 +74,33 @@ export interface RenderAccountDashboardScreenOptions {
   width: number;
   height: number;
   busyMessage?: string | null;
+  refreshing?: boolean;
 }
 
 export interface RunAccountDashboardTuiOptions {
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   initialQuery?: string;
+  autoRefreshIntervalMs?: number | null;
   loadSnapshot: () => Promise<AccountDashboardSnapshot>;
-  switchAccount: (name: string) => Promise<{
+  switchAccount: (
+    name: string,
+    options: { force: boolean; signal?: AbortSignal },
+  ) => Promise<{
     statusMessage?: string;
     warningMessages?: string[];
   }>;
+  openDesktop?: (
+    name: string,
+  ) => Promise<{
+    statusMessage?: string;
+    warningMessages?: string[];
+  }>;
+}
+
+export interface AccountDashboardExitResult {
+  code: number;
+  action: ExitAction;
 }
 
 interface PanelFrame {
@@ -83,8 +114,8 @@ interface DashboardLayout {
   frame: PanelFrame;
   innerWidth: number;
   innerHeight: number;
+  mode: LayoutMode;
   bodyHeight: number;
-  wide: boolean;
   listWidth: number;
   detailWidth: number;
   listRows: number;
@@ -161,29 +192,12 @@ function invert(value: string): string {
   return `${ANSI.inverse}${value}${ANSI.reset}`;
 }
 
-function formatStatusLine(
-  snapshot: AccountDashboardSnapshot,
-  state: AccountDashboardState,
-  filteredCount: number,
-  busyMessage: string | null | undefined,
-): string {
-  if (busyMessage) {
-    return busyMessage;
+function fitLines(lines: string[], height: number): string[] {
+  const trimmed = lines.slice(0, Math.max(0, height));
+  while (trimmed.length < height) {
+    trimmed.push("");
   }
-  if (state.statusMessage) {
-    return state.statusMessage;
-  }
-  if (snapshot.failures.length > 0) {
-    const failure = snapshot.failures[0];
-    return `Failure: ${failure.name}: ${failure.error}`;
-  }
-  if (snapshot.warnings.length > 0) {
-    return `Warning: ${snapshot.warnings[0]}`;
-  }
-  if (snapshot.accounts.length === 0) {
-    return "Ready to add or save an account.";
-  }
-  return `Showing ${filteredCount}/${snapshot.accounts.length} accounts.`;
+  return trimmed;
 }
 
 function computePanelFrame(width: number, height: number): PanelFrame {
@@ -209,19 +223,18 @@ function getLayout(width: number, height: number, accountCount: number): Dashboa
   const frame = computePanelFrame(width, height);
   const innerWidth = Math.max(1, frame.width - 2);
   const innerHeight = Math.max(1, frame.height - 2);
-  const bodyHeight = Math.max(4, innerHeight - 9);
-  const wide = innerWidth >= WIDE_LAYOUT_MIN_WIDTH;
+  const bodyHeight = Math.max(4, innerHeight - 6);
 
-  if (wide) {
+  if (innerWidth >= WIDE_LAYOUT_MIN_WIDTH && bodyHeight >= 10) {
     const availableWidth = Math.max(1, innerWidth - PANE_GAP.length);
-    const listWidth = Math.max(34, Math.min(Math.floor(availableWidth * 0.48), availableWidth - 28));
-    const detailWidth = Math.max(20, innerWidth - listWidth - PANE_GAP.length);
+    const listWidth = Math.max(36, Math.min(Math.floor(availableWidth * 0.48), availableWidth - 30));
+    const detailWidth = Math.max(22, innerWidth - listWidth - PANE_GAP.length);
     return {
       frame,
       innerWidth,
       innerHeight,
+      mode: "wide",
       bodyHeight,
-      wide,
       listWidth,
       detailWidth,
       listRows: bodyHeight,
@@ -229,26 +242,32 @@ function getLayout(width: number, height: number, accountCount: number): Dashboa
     };
   }
 
-  const listRows = Math.max(5, Math.min(Math.max(5, accountCount + 1), Math.floor(bodyHeight * 0.45)));
+  if (innerWidth >= STACKED_LAYOUT_MIN_WIDTH && bodyHeight >= 8) {
+    const listRows = Math.max(5, Math.min(Math.max(5, accountCount + 1), Math.floor(bodyHeight * 0.45)));
+    return {
+      frame,
+      innerWidth,
+      innerHeight,
+      mode: "stacked",
+      bodyHeight,
+      listWidth: innerWidth,
+      detailWidth: innerWidth,
+      listRows,
+      detailRows: Math.max(3, bodyHeight - listRows),
+    };
+  }
+
   return {
     frame,
     innerWidth,
     innerHeight,
+    mode: "list",
     bodyHeight,
-    wide,
     listWidth: innerWidth,
-    detailWidth: innerWidth,
-    listRows,
-    detailRows: Math.max(3, bodyHeight - listRows),
+    detailWidth: 0,
+    listRows: bodyHeight,
+    detailRows: 0,
   };
-}
-
-function fitLines(lines: string[], height: number): string[] {
-  const trimmed = lines.slice(0, Math.max(0, height));
-  while (trimmed.length < height) {
-    trimmed.push("");
-  }
-  return trimmed;
 }
 
 function renderFramedScreen(width: number, height: number, layout: DashboardLayout, lines: string[]): string {
@@ -258,6 +277,7 @@ function renderFramedScreen(width: number, height: number, layout: DashboardLayo
     ...fitLines(lines, layout.innerHeight).map((line) => `|${padEndVisible(truncate(line, layout.innerWidth), layout.innerWidth)}|`),
     topBorder,
   ];
+
   return [
     ...Array.from({ length: layout.frame.y }, () => ""),
     ...framed.map((line) => `${repeat(" ", layout.frame.x)}${line}`),
@@ -276,8 +296,18 @@ function getFilteredAccounts(snapshot: AccountDashboardSnapshot, query: string):
       account.planLabel,
       account.identityLabel,
       account.availabilityLabel,
+      account.authModeLabel,
+      account.accountIdLabel,
+      account.userIdLabel,
+      account.joinedAtLabel,
+      account.lastSwitchedAtLabel,
+      account.fetchedAtLabel,
+      account.refreshStatusLabel,
+      account.bottleneckLabel,
+      account.reasonLabel,
       ...account.detailLines,
     ].map((value) => value.toLowerCase());
+
     return haystacks.some((value) => value.includes(normalizedQuery));
   });
 }
@@ -295,7 +325,7 @@ function normalizeStateForViewport(
   state: AccountDashboardState,
   width: number,
   height: number,
-): { state: AccountDashboardState; filtered: FilteredAccounts } {
+): { state: AccountDashboardState; filtered: FilteredAccounts; layout: DashboardLayout } {
   const filteredAccounts = getFilteredAccounts(snapshot, state.query);
   const layout = getLayout(width, height, filteredAccounts.length);
   const visibleRows = Math.max(1, layout.listRows - 1);
@@ -325,10 +355,24 @@ function normalizeStateForViewport(
       all: filteredAccounts,
       selected: filteredAccounts[nextState.selected] ?? null,
     },
+    layout,
   };
 }
 
 function renderListHeader(width: number): string {
+  if (width < 66) {
+    const fixedWidth = 2 + 1 + 1 + 1 + 5 + 1 + 6;
+    const nameWidth = Math.max(8, width - fixedWidth);
+    return [
+      "  ",
+      padEndVisible("NAME", nameWidth),
+      " ",
+      padStartVisible("SCORE", 5),
+      " ",
+      padStartVisible("ETA", 6),
+    ].join("");
+  }
+
   const fixedWidth = 2 + 1 + 1 + 1 + 6 + 1 + 5 + 1 + 6 + 1 + 11;
   const nameWidth = Math.max(8, width - fixedWidth);
   return [
@@ -346,25 +390,48 @@ function renderListHeader(width: number): string {
 }
 
 function renderListRow(account: AccountDashboardAccount, selected: boolean, width: number): string {
-  const fixedWidth = 2 + 1 + 1 + 1 + 6 + 1 + 5 + 1 + 6 + 1 + 11;
-  const nameWidth = Math.max(8, width - fixedWidth);
-  const line = [
-    selected ? ">" : " ",
-    account.current ? "*" : " ",
-    " ",
-    padEndVisible(truncate(account.name, nameWidth), nameWidth),
-    " ",
-    padEndVisible(truncate(account.planLabel, 6), 6),
-    " ",
-    padStartVisible(account.scoreLabel, 5),
-    " ",
-    padStartVisible(account.etaLabel, 6),
-    " ",
-    padEndVisible(truncate(account.nextResetLabel, 11), 11),
-  ].join("");
+  const line = width < 66
+    ? (() => {
+        const fixedWidth = 2 + 1 + 1 + 1 + 5 + 1 + 6;
+        const nameWidth = Math.max(8, width - fixedWidth);
+        return [
+          selected ? ">" : " ",
+          account.current ? "*" : " ",
+          " ",
+          padEndVisible(truncate(account.name, nameWidth), nameWidth),
+          " ",
+          padStartVisible(account.scoreLabel, 5),
+          " ",
+          padStartVisible(account.etaLabel, 6),
+        ].join("");
+      })()
+    : (() => {
+        const fixedWidth = 2 + 1 + 1 + 1 + 6 + 1 + 5 + 1 + 6 + 1 + 11;
+        const nameWidth = Math.max(8, width - fixedWidth);
+        return [
+          selected ? ">" : " ",
+          account.current ? "*" : " ",
+          " ",
+          padEndVisible(truncate(account.name, nameWidth), nameWidth),
+          " ",
+          padEndVisible(truncate(account.planLabel, 6), 6),
+          " ",
+          padStartVisible(account.scoreLabel, 5),
+          " ",
+          padStartVisible(account.etaLabel, 6),
+          " ",
+          padEndVisible(truncate(account.nextResetLabel, 11), 11),
+        ].join("");
+      })();
 
   if (selected) {
     return invert(line);
+  }
+  if (account.refreshStatusLabel === "error" || account.availabilityLabel === "error") {
+    return color(line, "red");
+  }
+  if (account.refreshStatusLabel === "stale") {
+    return color(line, "yellow");
   }
   if (account.availabilityLabel === "unavailable") {
     return color(line, "red");
@@ -420,31 +487,32 @@ function renderDetailLines(
     return fitLines(lines, height);
   }
 
+  const title = selectedAccount.current
+    ? `${selectedAccount.name} [current] [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`
+    : `${selectedAccount.name} [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`;
+
   const lines = [
-    emphasize(selectedAccount.current ? `* ${selectedAccount.name}` : selectedAccount.name),
+    emphasize(title),
     `Identity: ${selectedAccount.identityLabel}`,
-    `Plan: ${selectedAccount.planLabel}`,
-    `Availability: ${selectedAccount.availabilityLabel}`,
+    `Account: ${selectedAccount.accountIdLabel}`,
+    `User: ${selectedAccount.userIdLabel}`,
+    `Auth: ${selectedAccount.authModeLabel}`,
+    "",
+    `Joined: ${selectedAccount.joinedAtLabel}`,
+    `Switched: ${selectedAccount.lastSwitchedAtLabel}`,
+    `Fetched: ${selectedAccount.fetchedAtLabel}`,
+    "",
     `Score: ${selectedAccount.scoreLabel}`,
     `ETA: ${selectedAccount.etaLabel}`,
+    `Bottleneck: ${selectedAccount.bottleneckLabel}`,
     `5H used: ${selectedAccount.fiveHourLabel}`,
     `1W used: ${selectedAccount.oneWeekLabel}`,
     `Next reset: ${selectedAccount.nextResetLabel}`,
+    "",
+    `Availability: ${selectedAccount.availabilityLabel}`,
+    `Refresh: ${selectedAccount.refreshStatusLabel}`,
+    `Reason: ${selectedAccount.reasonLabel}`,
   ];
-
-  if (snapshot.failures.length > 0) {
-    lines.push("", emphasize("Refresh failures"));
-    for (const failure of snapshot.failures.slice(0, 2)) {
-      lines.push(truncate(`${failure.name}: ${failure.error}`, width));
-    }
-  }
-
-  if (snapshot.warnings.length > 0) {
-    lines.push("", emphasize("Warnings"));
-    for (const warning of snapshot.warnings.slice(0, 2)) {
-      lines.push(truncate(warning, width));
-    }
-  }
 
   return fitLines(lines.map((line) => truncate(line, width)), height);
 }
@@ -455,10 +523,10 @@ function renderBodyLines(
   width: number,
   height: number,
 ): string[] {
-  const normalized = normalizeStateForViewport(snapshot, state, width, height + 9);
-  const layout = getLayout(width, height + 9, normalized.filtered.all.length);
+  const normalized = normalizeStateForViewport(snapshot, state, width, height + 5);
+  const { layout } = normalized;
 
-  if (layout.wide) {
+  if (layout.mode === "wide") {
     const listLines = renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows);
     const detailLines = renderDetailLines(snapshot, normalized.filtered.selected, layout.detailWidth, layout.detailRows);
     return fitLines(
@@ -469,18 +537,67 @@ function renderBodyLines(
     );
   }
 
-  const listLines = renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows);
-  const detailLines = renderDetailLines(snapshot, normalized.filtered.selected, layout.detailWidth, layout.detailRows);
-  return fitLines([...listLines, ...detailLines], height);
+  if (layout.mode === "stacked") {
+    const listLines = renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows);
+    const detailLines = renderDetailLines(snapshot, normalized.filtered.selected, layout.detailWidth, layout.detailRows);
+    return fitLines([...listLines, ...detailLines], height);
+  }
+
+  return fitLines(
+    renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows),
+    height,
+  );
 }
 
 function renderDivider(width: number): string {
   return repeat("-", width);
 }
 
-function renderHintBar(width: number): string {
-  const hint = "j/k move  / filter  Enter switch  r refresh  q quit";
-  return truncate(color(hint, "dim"), width);
+function buildCompactSelectionLine(account: AccountDashboardAccount | null): string {
+  if (!account) {
+    return "No account selected.";
+  }
+
+  return [
+    account.name,
+    account.planLabel,
+    account.refreshStatusLabel,
+    `fetched ${account.fetchedAtLabel}`,
+  ].join(" | ");
+}
+
+function formatStatusLine(options: {
+  snapshot: AccountDashboardSnapshot;
+  state: AccountDashboardState;
+  filteredCount: number;
+  selectedAccount: AccountDashboardAccount | null;
+  layoutMode: LayoutMode;
+  busyMessage: string | null | undefined;
+  refreshing: boolean;
+}): string {
+  if (options.busyMessage) {
+    return options.busyMessage;
+  }
+  if (options.state.statusMessage) {
+    return options.state.statusMessage;
+  }
+  if (options.refreshing) {
+    return "Refreshing accounts...";
+  }
+  if (options.layoutMode === "list") {
+    return buildCompactSelectionLine(options.selectedAccount);
+  }
+  if (options.snapshot.failures.length > 0) {
+    const failure = options.snapshot.failures[0];
+    return `Failure: ${failure.name}: ${failure.error}`;
+  }
+  if (options.snapshot.warnings.length > 0) {
+    return `Warning: ${options.snapshot.warnings[0]}`;
+  }
+  if (options.snapshot.accounts.length === 0) {
+    return "Ready to add or save an account.";
+  }
+  return `Showing ${options.filteredCount}/${options.snapshot.accounts.length} accounts.`;
 }
 
 function renderFilterLine(
@@ -493,6 +610,14 @@ function renderFilterLine(
     ? "(press / to filter)"
     : formatInteractiveQuery(state.query, state.cursor, state.filterActive);
   return truncate(`filter: ${query} | showing ${filteredCount}/${snapshot.accounts.length}`, width);
+}
+
+function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
+  const forceLabel = selectedAccount?.current ? "f reload" : "f force";
+  const hint = width < 88
+    ? `Enter switch | ${forceLabel} | o codex | d desktop | r refresh | q quit`
+    : `j/k move | / filter | Enter switch | ${forceLabel} | o codex | d desktop | r refresh | q quit`;
+  return truncate(color(hint, "dim"), width);
 }
 
 export function createInitialAccountDashboardState(initialQuery = ""): AccountDashboardState {
@@ -509,28 +634,33 @@ export function createInitialAccountDashboardState(initialQuery = ""): AccountDa
 export function renderAccountDashboardScreen(
   options: RenderAccountDashboardScreenOptions,
 ): string {
-  const layout = getLayout(options.width, options.height, options.snapshot.accounts.length);
   const normalized = normalizeStateForViewport(
     options.snapshot,
     options.state,
     options.width,
     options.height,
   );
+  const { layout } = normalized;
   const filteredCount = normalized.filtered.all.length;
   const lines = [
-    `${emphasize(color("codexm", "cyan"))}  ${color("account dashboard", "dim")}`,
-    truncate(options.snapshot.currentStatusLine, layout.innerWidth),
-    truncate(options.snapshot.summaryLine, layout.innerWidth),
-    truncate(options.snapshot.poolLine, layout.innerWidth),
+    truncate(options.snapshot.headerLine, layout.innerWidth),
     renderDivider(layout.innerWidth),
     ...renderBodyLines(options.snapshot, normalized.state, layout.innerWidth, layout.bodyHeight),
     renderDivider(layout.innerWidth),
     renderFilterLine(options.snapshot, normalized.state, filteredCount, layout.innerWidth),
     truncate(
-      formatStatusLine(options.snapshot, normalized.state, filteredCount, options.busyMessage),
+      formatStatusLine({
+        snapshot: options.snapshot,
+        state: normalized.state,
+        filteredCount,
+        selectedAccount: normalized.filtered.selected,
+        layoutMode: layout.mode,
+        busyMessage: options.busyMessage,
+        refreshing: options.refreshing ?? false,
+      }),
       layout.innerWidth,
     ),
-    renderHintBar(layout.innerWidth),
+    renderHintBar(layout.innerWidth, normalized.filtered.selected),
   ];
 
   return renderFramedScreen(options.width, options.height, layout, lines);
@@ -618,6 +748,10 @@ function consumeInputBuffer(buffer: string): { events: InputEvent[]; rest: strin
           events.push({ value: sequence, name: "right" });
         } else if (code === "D") {
           events.push({ value: sequence, name: "left" });
+        } else if (code === "H") {
+          events.push({ value: sequence, name: "home" });
+        } else if (code === "F") {
+          events.push({ value: sequence, name: "end" });
         }
         index += 3;
         continue;
@@ -659,12 +793,9 @@ function consumeInputBuffer(buffer: string): { events: InputEvent[]; rest: strin
   };
 }
 
-export async function runAccountDashboardTui(
-  options: RunAccountDashboardTuiOptions,
-): Promise<number> {
-  const stdin = options.stdin ?? process.stdin;
-  const stdout = options.stdout ?? process.stdout;
-  let snapshot: AccountDashboardSnapshot = {
+function createPlaceholderSnapshot(): AccountDashboardSnapshot {
+  return {
+    headerLine: "codexm | current loading | 0/0 usable | updated -",
     currentStatusLine: "Current auth: missing",
     summaryLine: "Accounts: 0/0 usable | blocked: 1W 0, 5H 0",
     poolLine: "Available: bottleneck - | 5H->1W - | 1W - (plus 1W)",
@@ -672,14 +803,36 @@ export async function runAccountDashboardTui(
     failures: [],
     accounts: [],
   };
+}
+
+export async function runAccountDashboardTui(
+  options: RunAccountDashboardTuiOptions,
+): Promise<AccountDashboardExitResult> {
+  const stdin = options.stdin ?? process.stdin;
+  const stdout = options.stdout ?? process.stdout;
+  const autoRefreshIntervalMs = options.autoRefreshIntervalMs ?? DEFAULT_AUTO_REFRESH_INTERVAL_MS;
+  let snapshot = createPlaceholderSnapshot();
   let state = createInitialAccountDashboardState(options.initialQuery ?? "");
-  let busyMessage: string | null = "Refreshing accounts...";
+  let refreshing = false;
+  let busyMessage: string | null = null;
   let cleanedUp = false;
+  let resolved = false;
   let actionQueue = Promise.resolve();
   let inputBuffer = "";
+  let refreshPromise: Promise<void> | null = null;
+  let refreshQueued = false;
+  let refreshPreferredName: string | null = null;
+  let autoRefreshTimer: NodeJS.Timeout | null = null;
+  let activeOperation: { controller: AbortController; label: string } | null = null;
   const previousRawMode = stdin.isRaw === true;
 
+  let resolveExit: ((result: AccountDashboardExitResult) => void) | null = null;
+
   const render = () => {
+    if (cleanedUp) {
+      return;
+    }
+
     stdout.write(
       `${ANSI.clear}${ANSI.home}${renderAccountDashboardScreen({
         snapshot,
@@ -687,6 +840,7 @@ export async function runAccountDashboardTui(
         width: stdout.columns ?? 80,
         height: stdout.rows ?? 24,
         busyMessage,
+        refreshing,
       })}`,
     );
   };
@@ -696,6 +850,10 @@ export async function runAccountDashboardTui(
       return;
     }
     cleanedUp = true;
+    if (autoRefreshTimer) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
     stdin.off("data", onData);
     stdout.off?.("resize", onResize);
     stdin.setRawMode?.(previousRawMode);
@@ -703,24 +861,74 @@ export async function runAccountDashboardTui(
     stdout.write(`${ANSI.showCursor}${ANSI.altOff}`);
   };
 
-  const refreshSnapshot = async (preferredName: string | null = null, preserveStatus = false) => {
-    busyMessage = "Refreshing accounts...";
-    render();
-    const priorStatus = state.statusMessage;
-    try {
-      snapshot = await options.loadSnapshot();
-      state = resolvePreferredSelection(snapshot, state, preferredName);
-      if (!preserveStatus) {
-        state.statusMessage = null;
-      } else {
-        state.statusMessage = priorStatus;
-      }
-    } catch (error) {
-      state.statusMessage = `Refresh failed: ${(error as Error).message}`;
-    } finally {
-      busyMessage = null;
-      render();
+  const finish = (action: ExitAction) => {
+    if (resolved) {
+      return;
     }
+    resolved = true;
+    cleanup();
+    resolveExit?.({
+      code: 0,
+      action,
+    });
+  };
+
+  const requestRefresh = (preferredName: string | null = null) => {
+    refreshQueued = true;
+    if (preferredName) {
+      refreshPreferredName = preferredName;
+    }
+
+    if (activeOperation || refreshPromise) {
+      render();
+      return;
+    }
+
+    refreshPromise = (async () => {
+      while (refreshQueued && !cleanedUp) {
+        refreshQueued = false;
+        const preferred = refreshPreferredName;
+        refreshPreferredName = null;
+        refreshing = true;
+        render();
+
+        try {
+          const nextSnapshot = await options.loadSnapshot();
+          if (cleanedUp) {
+            return;
+          }
+
+          const priorStatus = state.statusMessage;
+          snapshot = nextSnapshot;
+          state = resolvePreferredSelection(snapshot, state, preferred);
+          if (priorStatus?.startsWith("Refresh failed:")) {
+            state.statusMessage = null;
+          }
+        } catch (error) {
+          if (!cleanedUp) {
+            state = {
+              ...state,
+              statusMessage: `Refresh failed: ${(error as Error).message}`,
+            };
+          }
+        } finally {
+          refreshing = false;
+          render();
+        }
+      }
+
+      refreshPromise = null;
+    })().catch((error) => {
+      refreshing = false;
+      refreshPromise = null;
+      if (!cleanedUp) {
+        state = {
+          ...state,
+          statusMessage: `Refresh failed: ${(error as Error).message}`,
+        };
+        render();
+      }
+    });
   };
 
   const moveSelection = (delta: number) => {
@@ -793,19 +1001,175 @@ export async function runAccountDashboardTui(
     }
   };
 
-  const handleBrowseKeypress = async (event: InputEvent): Promise<boolean> => {
+  const withOperationStatus = (
+    accountName: string,
+    result: { statusMessage?: string; warningMessages?: string[] },
+    baseOverride?: string,
+  ): string => {
+    const base = baseOverride ?? result.statusMessage ?? `Switched to "${accountName}".`;
+    return result.warningMessages?.length
+      ? `${base} Warning: ${result.warningMessages[0]}`
+      : base;
+  };
+
+  const runDesktopAction = async (name: string) => {
+    if (!options.openDesktop) {
+      state = {
+        ...state,
+        statusMessage: "Desktop open is unavailable in this session.",
+      };
+      render();
+      return;
+    }
+
+    busyMessage = `Opening Codex Desktop for "${name}"...`;
+    render();
+
+    const result = await options.openDesktop(name);
+    state = {
+      ...state,
+      statusMessage: withOperationStatus(name, result),
+    };
+    render();
+    finish("quit");
+  };
+
+  const runSwitchAction = async (optionsForAction: {
+    force: boolean;
+    after: ExitAction | "desktop" | null;
+  }) => {
+    const filtered = getFilteredAccounts(snapshot, state.query);
+    const selected = filtered[state.selected] ?? null;
+    if (!selected) {
+      return;
+    }
+
+    const reloadingCurrentAccount =
+      selected.current && optionsForAction.force && optionsForAction.after === null;
+
+    if (selected.current && !reloadingCurrentAccount) {
+      if (optionsForAction.after === "open-codex") {
+        finish("open-codex");
+        return;
+      }
+      if (optionsForAction.after === "desktop") {
+        await runDesktopAction(selected.name);
+        return;
+      }
+
+      state = {
+        ...state,
+        statusMessage: `"${selected.name}" is already current. Press f to reload it.`,
+      };
+      render();
+      return;
+    }
+
+    const controller = new AbortController();
+    activeOperation = {
+      controller,
+      label: reloadingCurrentAccount
+        ? `reloading "${selected.name}"`
+        : optionsForAction.after === "open-codex"
+        ? `opening Codex TUI for "${selected.name}"`
+        : optionsForAction.after === "desktop"
+          ? `opening Codex Desktop for "${selected.name}"`
+          : `switching "${selected.name}"`,
+    };
+    busyMessage = reloadingCurrentAccount
+      ? `Reloading "${selected.name}"...`
+      : optionsForAction.after === "open-codex"
+      ? `Switching to "${selected.name}" and opening Codex TUI...`
+      : optionsForAction.after === "desktop"
+        ? `Switching to "${selected.name}" and opening Codex Desktop...`
+        : optionsForAction.force
+          ? `Force-switching to "${selected.name}"...`
+          : `Switching to "${selected.name}"...`;
+    render();
+
+    try {
+      const result = await options.switchAccount(selected.name, {
+        force: optionsForAction.force,
+        signal: controller.signal,
+      });
+
+      state = {
+        ...state,
+        statusMessage: withOperationStatus(
+          selected.name,
+          result,
+          reloadingCurrentAccount ? `Reloaded "${selected.name}".` : undefined,
+        ),
+      };
+
+      if (optionsForAction.after === "open-codex") {
+        render();
+        finish("open-codex");
+        return;
+      }
+
+      if (optionsForAction.after === "desktop") {
+        await runDesktopAction(selected.name);
+        return;
+      }
+
+      requestRefresh(selected.name);
+    } catch (error) {
+      state = {
+        ...state,
+        statusMessage: optionsForAction.after === "desktop"
+          ? `Desktop open failed: ${(error as Error).message}`
+          : optionsForAction.after === "open-codex"
+            ? `Codex TUI open failed: ${(error as Error).message}`
+            : reloadingCurrentAccount
+              ? `Reload failed: ${(error as Error).message}`
+            : `Switch failed: ${(error as Error).message}`,
+      };
+    } finally {
+      busyMessage = null;
+      activeOperation = null;
+      render();
+      if (refreshQueued && !refreshPromise && !cleanedUp) {
+        requestRefresh();
+      }
+    }
+  };
+
+  const handleBrowseKeypress = async (event: InputEvent): Promise<void> => {
+    if (activeOperation) {
+      if ((event.ctrl && event.name === "c") || event.name === "escape") {
+        activeOperation.controller.abort();
+        state = {
+          ...state,
+          statusMessage: `Cancelling ${activeOperation.label}...`,
+        };
+        render();
+        return;
+      }
+
+      if (event.name === "q") {
+        state = {
+          ...state,
+          statusMessage: `Busy. Press Esc or Ctrl-C to cancel ${activeOperation.label}.`,
+        };
+        render();
+      }
+      return;
+    }
+
     if ((event.ctrl && event.name === "c") || event.name === "escape" || event.name === "q") {
-      return true;
+      finish("quit");
+      return;
     }
     if (event.name === "up" || event.name === "k") {
       moveSelection(-1);
       render();
-      return false;
+      return;
     }
     if (event.name === "down" || event.name === "j") {
       moveSelection(1);
       render();
-      return false;
+      return;
     }
     if (event.name === "home" || event.value === "g") {
       state = {
@@ -814,7 +1178,7 @@ export async function runAccountDashboardTui(
         scrollTop: 0,
       };
       render();
-      return false;
+      return;
     }
     if (event.name === "end" || event.value === "G") {
       const filtered = getFilteredAccounts(snapshot, state.query);
@@ -823,7 +1187,7 @@ export async function runAccountDashboardTui(
         selected: Math.max(0, filtered.length - 1),
       };
       render();
-      return false;
+      return;
     }
     if (event.value === "/") {
       state = {
@@ -832,72 +1196,63 @@ export async function runAccountDashboardTui(
         cursor: state.query.length,
       };
       render();
-      return false;
+      return;
     }
     if (event.value === "r") {
-      await refreshSnapshot();
-      return false;
+      requestRefresh();
+      return;
+    }
+    if (event.value === "f") {
+      await runSwitchAction({
+        force: true,
+        after: null,
+      });
+      return;
+    }
+    if (event.value === "o") {
+      await runSwitchAction({
+        force: false,
+        after: "open-codex",
+      });
+      return;
+    }
+    if (event.value === "d") {
+      await runSwitchAction({
+        force: false,
+        after: "desktop",
+      });
+      return;
     }
     if (event.name === "enter") {
-      const filtered = getFilteredAccounts(snapshot, state.query);
-      const selected = filtered[state.selected] ?? null;
-      if (!selected) {
-        return false;
-      }
-      if (selected.current) {
-        state = {
-          ...state,
-          statusMessage: `"${selected.name}" is already current.`,
-        };
-        render();
-        return false;
-      }
-      busyMessage = `Switching to "${selected.name}"...`;
-      render();
-      try {
-        const result = await options.switchAccount(selected.name);
-        state = {
-          ...state,
-          statusMessage: result.warningMessages?.length
-            ? `${result.statusMessage ?? `Switched to "${selected.name}".`} Warning: ${result.warningMessages[0]}`
-            : (result.statusMessage ?? `Switched to "${selected.name}".`),
-        };
-        await refreshSnapshot(selected.name, true);
-      } catch (error) {
-        busyMessage = null;
-        state = {
-          ...state,
-          statusMessage: `Switch failed: ${(error as Error).message}`,
-        };
-        render();
-      }
-      return false;
+      await runSwitchAction({
+        force: false,
+        after: null,
+      });
     }
-    return false;
   };
 
   const onData = (chunk: Buffer | string) => {
     inputBuffer += chunk.toString();
     const { events, rest } = consumeInputBuffer(inputBuffer);
     inputBuffer = rest;
+
     for (const event of events) {
       actionQueue = actionQueue
         .then(async () => {
           if (cleanedUp) {
             return;
           }
-          const shouldExit = state.filterActive
-            ? await (async () => {
-                await handleFilterKeypress(event);
-                return false;
-              })()
-            : await handleBrowseKeypress(event);
-          if (shouldExit) {
-            cleanup();
+
+          if (state.filterActive) {
+            await handleFilterKeypress(event);
+            return;
           }
+
+          await handleBrowseKeypress(event);
         })
         .catch((error) => {
           busyMessage = null;
+          activeOperation = null;
           state = {
             ...state,
             statusMessage: `TUI error: ${(error as Error).message}`,
@@ -914,21 +1269,38 @@ export async function runAccountDashboardTui(
   stdout.on?.("resize", onResize);
   stdin.on("data", onData);
 
-  render();
+  if (typeof autoRefreshIntervalMs === "number" && autoRefreshIntervalMs > 0) {
+    autoRefreshTimer = setInterval(() => {
+      if (cleanedUp || activeOperation) {
+        return;
+      }
+      requestRefresh();
+    }, autoRefreshIntervalMs);
+  }
 
+  render();
+  requestRefresh();
+
+  const settlePendingWork = async () => {
+    await actionQueue.catch(() => undefined);
+    while (refreshPromise) {
+      const pendingRefresh = refreshPromise;
+      await pendingRefresh.catch(() => undefined);
+      if (refreshPromise === pendingRefresh) {
+        break;
+      }
+    }
+  };
+
+  let exitResult: AccountDashboardExitResult;
   try {
-    await refreshSnapshot();
-    return await new Promise<number>((resolve) => {
-      const poll = () => {
-        if (cleanedUp) {
-          resolve(0);
-          return;
-        }
-        setTimeout(poll, 10);
-      };
-      poll();
+    exitResult = await new Promise<AccountDashboardExitResult>((resolve) => {
+      resolveExit = resolve;
     });
   } finally {
     cleanup();
+    await settlePendingWork();
   }
+
+  return exitResult;
 }

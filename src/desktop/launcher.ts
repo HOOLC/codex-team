@@ -257,6 +257,14 @@ export function createCodexDesktopLauncher(options: {
     });
   }
 
+  async function activateApp(appPath: string): Promise<void> {
+    if (appPath.trim() === "") {
+      throw new Error("App path is required to activate Codex Desktop.");
+    }
+
+    await execFileImpl("osascript", ["-e", `tell application "${CODEX_APP_NAME}" to activate`]);
+  }
+
   async function readManagedState(): Promise<ManagedCodexDesktopState | null> {
     try {
       return parseManagedState(await readFileImpl(statePath));
@@ -812,6 +820,7 @@ export function createCodexDesktopLauncher(options: {
     isRunningInsideDesktopShell,
     quitRunningApps,
     launch,
+    activateApp,
     readManagedState,
     writeManagedState,
     clearManagedState,
