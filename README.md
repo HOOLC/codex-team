@@ -82,6 +82,7 @@ This is the main command to use when deciding which account to switch to next.
 
 - `codexm add <name>`: add a new managed account snapshot
 - `codexm save <name>`: save the currently active auth as a named snapshot
+- `codexm update`: refresh the saved snapshot for the current managed account
 - `codexm rename <old> <new>`: rename a saved snapshot
 - `codexm remove <name> --yes`: remove a saved snapshot
 - `codexm export [name] [--output <file>]`: export the current auth or a saved snapshot as a share bundle
@@ -92,6 +93,7 @@ This is the main command to use when deciding which account to switch to next.
 
 - `codexm`: open the interactive account dashboard when running in a TTY
 - `codexm current [--refresh]`: show the current account and optionally refresh quota
+- `codexm doctor`: diagnose local auth, runtime probes, and managed Desktop consistency
 - `codexm list [--verbose]`: show saved accounts, quota usage, score, ETA, and reset times
 - `codexm list --json`: machine-readable output
 - `codexm list --debug`: include diagnostic details about quota normalization and observed ratios

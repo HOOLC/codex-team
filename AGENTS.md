@@ -8,18 +8,25 @@ Detailed design notes live in `docs/internal/`.
 - Do not add a command by querying both Desktop and direct runtime paths unless the command semantics explicitly require it.
 - Do not spread new platform-specific Desktop process logic outside the Desktop launcher boundary.
 - Do not duplicate plan or quota normalization rules outside `src/plan-quota-profile.ts`.
+- Do not duplicate share-bundle schema or file I/O rules outside `src/share-bundle.ts`.
 - Before adding legacy interface, data, or code compatibility paths, confirm with the user that backward compatibility is necessary.
 
 ## Module Boundaries
 
 - `src/main.ts`: CLI orchestration only.
 - `src/commands/*`: command handlers.
+- `src/share-bundle.ts`: trusted share-bundle schema and file read/write helpers.
+- `src/commands/share-bundle.ts`: CLI import, export, and inspect flows for share bundles.
+- `src/commands/tui-share.ts`: dashboard import, export, delete, and undo flows.
+- `src/tui/index.ts`: interactive dashboard rendering, layout, prompts, and action contracts.
 - `src/desktop/launcher.ts`: managed Desktop lifecycle, DevTools bridge, Desktop runtime reads, and watch stream handling.
+- `src/codex-cli-runner.ts`: `codexm run` restart, resume, and session discovery flow.
 - `src/codex-direct-client.ts`: direct `codex app-server` client for one-shot runtime reads.
 - `src/watch/history.ts`: watch history persistence and ETA calculation.
 - `src/account-store/service.ts`: account store orchestration and mutation flows.
 - `src/plan-quota-profile.ts`: centralized plan normalization and quota ratio rules.
 - `src/cli/quota.ts`: quota presentation, list ordering, and auto-switch candidate formatting.
+- `src/cli/quota-display.ts`: shared list and dashboard emphasis, color, and truncation rules.
 
 ## Runtime Path Rules
 
@@ -50,3 +57,5 @@ Detailed design notes live in `docs/internal/`.
 
 - Treat `README.md` and `README.zh-CN.md` as user-facing onboarding guides, not internal reference manuals.
 - Keep README sections short and task-oriented; prefer a few high-signal commands and examples over exhaustive command listings.
+- Treat `src/cli/spec.json` as the source of truth for spec-driven CLI usage/help text and generated README command sections; do not hand-edit generated copies first.
+- Run `pnpm docs:readme` after editing spec-backed README command entries.

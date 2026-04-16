@@ -205,6 +205,13 @@
             }
           },
           {
+            "usage": "codexm update",
+            "description": {
+              "en": "refresh the saved snapshot for the current managed account",
+              "zh-CN": "刷新当前托管账号对应的已保存快照"
+            }
+          },
+          {
             "usage": "codexm rename <old> <new>",
             "description": {
               "en": "rename a saved snapshot",
@@ -260,6 +267,13 @@
             "description": {
               "en": "show the current account and optionally refresh quota",
               "zh-CN": "查看当前账号；可选刷新 quota"
+            }
+          },
+          {
+            "usage": "codexm doctor",
+            "description": {
+              "en": "diagnose local auth, runtime probes, and managed Desktop consistency",
+              "zh-CN": "诊断本地 auth、runtime 探测和托管 Desktop 一致性"
             }
           },
           {
