@@ -10,7 +10,10 @@ import {
 } from "../src/tui/index.js";
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
-import { buildAccountDashboardSnapshot } from "../src/commands/tui.js";
+import {
+  buildAccountDashboardSnapshot,
+  buildCachedAccountDashboardSnapshot,
+} from "../src/commands/tui.js";
 import {
   cleanupTempHome,
   createTempHome,
@@ -52,6 +55,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         fiveHourLabel: "18%",
         oneWeekLabel: "42%",
         authModeLabel: "chatgpt",
+        emailLabel: "alpha@example.com",
         accountIdLabel: "acct...pha",
         userIdLabel: "user...pha",
         joinedAtLabel: "2026-03-18 12:30",
@@ -60,10 +64,21 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         refreshStatusLabel: "ok",
         bottleneckLabel: "1W",
         reasonLabel: "available",
+        oneWeekBlocked: false,
         detailLines: [
+          "Email: alpha@example.com",
+          "Auth: chatgpt",
+          "Fetched: 2026-04-16 13:23",
+          "Refresh: ok",
+          "Reason: available",
+          "",
           "Identity: acct-alpha:user-alpha",
-          "Plan: plus",
-          "Availability: available",
+          "Account: acct...pha",
+          "User: user...pha",
+          "Bottleneck: 1W",
+          "Joined: 2026-03-18 12:30",
+          "Switched: 2026-04-16 13:24",
+          "",
           "Score: 88%",
           "ETA: 8.2h",
           "5H used: 18%",
@@ -84,6 +99,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         fiveHourLabel: "36%",
         oneWeekLabel: "27%",
         authModeLabel: "chatgpt",
+        emailLabel: "beta@example.com",
         accountIdLabel: "acct...eta",
         userIdLabel: "user...eta",
         joinedAtLabel: "2026-03-20 09:00",
@@ -92,10 +108,21 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         refreshStatusLabel: "stale",
         bottleneckLabel: "5H",
         reasonLabel: "cached quota after refresh failure",
+        oneWeekBlocked: false,
         detailLines: [
+          "Email: beta@example.com",
+          "Auth: chatgpt",
+          "Fetched: 2026-04-16 13:20",
+          "Refresh: stale",
+          "Reason: cached quota after refresh failure",
+          "",
           "Identity: acct-beta:user-beta",
-          "Plan: pro",
-          "Availability: available",
+          "Account: acct...eta",
+          "User: user...eta",
+          "Bottleneck: 5H",
+          "Joined: 2026-03-20 09:00",
+          "Switched: 2026-04-15 10:10",
+          "",
           "Score: 64%",
           "ETA: 3.5h",
           "5H used: 36%",
@@ -116,6 +143,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         fiveHourLabel: "100%",
         oneWeekLabel: "100%",
         authModeLabel: "chatgpt",
+        emailLabel: "gamma@example.com",
         accountIdLabel: "acct...mma",
         userIdLabel: "user...mma",
         joinedAtLabel: "2026-03-21 11:00",
@@ -124,10 +152,21 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         refreshStatusLabel: "error",
         bottleneckLabel: "-",
         reasonLabel: "quota refresh failed: 429",
+        oneWeekBlocked: true,
         detailLines: [
+          "Email: gamma@example.com",
+          "Auth: chatgpt",
+          "Fetched: 2026-04-16 13:21",
+          "Refresh: error",
+          "Reason: quota refresh failed: 429",
+          "",
           "Identity: acct-gamma:user-gamma",
-          "Plan: plus",
-          "Availability: blocked",
+          "Account: acct...mma",
+          "User: user...mma",
+          "Bottleneck: -",
+          "Joined: 2026-03-21 11:00",
+          "Switched: -",
+          "",
           "Score: 0%",
           "ETA: -",
           "5H used: 100%",
@@ -159,8 +198,14 @@ describe("Account Dashboard TUI", () => {
 
     expect(screen).toContain("codexm | current beta | 2/3 usable | updated 13:24");
     expect(screen).toContain("NAME");
+    expect(screen).toContain("IDENTITY");
+    expect(screen).toContain("USED");
+    expect(screen).toContain("5H");
+    expect(screen).toContain("1W");
+    expect(screen).toContain("NEXT RESET");
     expect(screen).toContain(">* beta");
     expect(screen).toContain("alpha");
+    expect(screen).toContain("Email: beta@example.com");
     expect(screen).toContain("Joined: 2026-03-20 09:00");
     expect(screen).toContain("Fetched: 2026-04-16 13:20");
     expect(screen).toContain("Bottleneck: 5H");
@@ -204,6 +249,26 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("No saved accounts.");
     expect(screen).toContain("Use \"codexm add <name>\" or \"codexm save <name>\"");
     expect(screen).toContain("filter:");
+  });
+
+  test("keeps score, eta, and used windows visible in compact list mode", () => {
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot: createSnapshot("alpha"),
+        state: {
+          ...createInitialAccountDashboardState("beta@example.com"),
+          selected: 0,
+        },
+        width: 68,
+        height: 24,
+      }),
+    );
+
+    expect(screen).toContain("beta");
+    expect(screen).toContain("64%");
+    expect(screen).toContain("3.5h");
+    expect(screen).toContain("36%");
+    expect(screen).toContain("27%");
   });
 
   test("exits without busy-polling the event loop", async () => {
@@ -524,6 +589,40 @@ describe("Account Dashboard TUI", () => {
     });
     expect(stdin.isRaw).toBe(false);
     expect(stdout.read()).toContain("\u001B[?1049l");
+  });
+
+  test("shows an initial refresh warning banner while keeping the cached list visible", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      initialSnapshot: createSnapshot("alpha"),
+      loadSnapshot: async () => {
+        throw new Error("network unavailable");
+      },
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+    });
+
+    await flushLoop();
+    await flushLoop();
+
+    const frame = latestDashboardFrame(stdout.read());
+    expect(frame).toContain("alpha");
+    expect(frame).toContain("beta");
+    expect(frame).toContain("Initial refresh failed");
+    expect(frame).toContain("network unavailable");
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
   });
 
   test("uses Esc to back out of an export prompt and q to exit from browse mode", async () => {
@@ -871,7 +970,7 @@ describe("Account Dashboard TUI", () => {
       stdin.emitInput("q");
 
       await expect(cliPromise).resolves.toBe(0);
-      expect(stripAnsi(stdout.read())).toContain("codexm | current loading | 0/0 usable | updated -");
+      expect(stripAnsi(stdout.read())).toContain("codexm | current missing | 0/0 usable | updated -");
       expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
@@ -896,6 +995,7 @@ describe("Account Dashboard TUI", () => {
                 account_id: "acct-alpha",
                 user_id: "user-alpha",
                 identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
                 created_at: "2026-03-18T04:30:00.000Z",
                 updated_at: "2026-04-16T05:23:00.000Z",
                 last_switched_at: "2026-04-16T05:24:00.000Z",
@@ -914,6 +1014,7 @@ describe("Account Dashboard TUI", () => {
                 account_id: "acct-beta",
                 user_id: "user-beta",
                 identity: "acct-beta:user-beta",
+                email: "beta@example.com",
                 created_at: "2026-03-19T01:00:00.000Z",
                 updated_at: "2026-04-16T05:20:00.000Z",
                 last_switched_at: "2026-04-15T02:10:00.000Z",
@@ -933,6 +1034,7 @@ describe("Account Dashboard TUI", () => {
                 account_id: "acct-gamma",
                 user_id: "user-gamma",
                 identity: "acct-gamma:user-gamma",
+                email: "gamma@example.com",
                 created_at: "2026-03-20T01:00:00.000Z",
                 updated_at: "2026-04-16T05:21:00.000Z",
                 last_switched_at: null,
@@ -1011,11 +1113,97 @@ describe("Account Dashboard TUI", () => {
       });
       expect(snapshot.accounts[0]).toMatchObject({
         planLabel: "pro",
+        emailLabel: "beta@example.com",
         refreshStatusLabel: "ok",
       });
       expect(snapshot.accounts[2]).toMatchObject({
         refreshStatusLabel: "error",
         reasonLabel: "quota failed",
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("builds a cached dashboard snapshot from local quota metadata without refreshing", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const snapshot = await buildCachedAccountDashboardSnapshot({
+        store: {
+          paths: {
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "alpha",
+                auth_mode: "chatgpt",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "ok",
+                  plan_type: "plus",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  five_hour: { used_percent: 18, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                  one_week: { used_percent: 42, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+                },
+                authPath: `${homeDir}/alpha/auth.json`,
+                metaPath: `${homeDir}/alpha/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+              {
+                name: "beta",
+                auth_mode: "chatgpt",
+                account_id: "acct-beta",
+                user_id: "user-beta",
+                identity: "acct-beta:user-beta",
+                email: "beta@example.com",
+                created_at: "2026-03-19T01:00:00.000Z",
+                updated_at: "2026-04-16T05:20:00.000Z",
+                last_switched_at: "2026-04-15T02:10:00.000Z",
+                quota: {
+                  status: "stale",
+                  plan_type: "pro",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  error_message: "refresh failed",
+                  five_hour: { used_percent: 36, window_seconds: 18_000, reset_at: "2026-04-16T10:00:00.000Z" },
+                  one_week: { used_percent: 27, window_seconds: 604_800, reset_at: "2026-04-18T10:00:00.000Z" },
+                },
+                authPath: `${homeDir}/beta/auth.json`,
+                metaPath: `${homeDir}/beta/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+            ],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-alpha",
+            user_id: "user-alpha",
+            identity: "acct-alpha:user-alpha",
+            matched_accounts: ["alpha"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+        } as never,
+      });
+
+      expect(snapshot.headerLine).toContain("codexm | current alpha");
+      expect(snapshot.summaryLine).toContain("Accounts: 1/2 usable");
+      expect(snapshot.accounts.map((account) => account.name)).toEqual(["alpha", "beta"]);
+      expect(snapshot.accounts[1]).toMatchObject({
+        emailLabel: "beta@example.com",
+        refreshStatusLabel: "stale",
       });
     } finally {
       await cleanupTempHome(homeDir);
