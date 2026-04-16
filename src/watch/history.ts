@@ -24,6 +24,8 @@ export interface WatchHistoryWindowSnapshot {
 
 export interface WatchHistoryRecord {
   recorded_at: string;
+  scope_kind: "global" | "isolated";
+  scope_id: string | null;
   account_name: string;
   account_id: string | null;
   identity: string | null;
@@ -72,6 +74,7 @@ export interface WatchHistoryStore {
 
 export type WatchQuotaHistoryRecord = WatchHistoryRecord;
 export type WatchEtaContext = WatchHistoryEtaContext;
+export type WatchHistoryScopeKind = WatchHistoryRecord["scope_kind"];
 
 export interface WatchHistoryObservedRatioDiagnostic {
   dimension: "plan";
@@ -163,6 +166,8 @@ function parseWatchHistoryRecord(raw: unknown): WatchHistoryRecord | null {
 
   return {
     recorded_at: candidate.recorded_at,
+    scope_kind: candidate.scope_kind === "isolated" ? "isolated" : "global",
+    scope_id: typeof candidate.scope_id === "string" ? candidate.scope_id : null,
     account_name: candidate.account_name,
     account_id:
       candidate.account_id === null || typeof candidate.account_id === "string"
@@ -286,6 +291,17 @@ function normalizeRecordInput(raw: unknown): WatchHistoryRecord {
     throw new Error("Watch history record requires account_name/accountName.");
   }
 
+  const scopeKind =
+    candidate.scope_kind === "isolated" || candidate.scopeKind === "isolated"
+      ? "isolated"
+      : "global";
+  const scopeId =
+    typeof candidate.scope_id === "string"
+      ? candidate.scope_id
+      : typeof candidate.scopeId === "string"
+        ? candidate.scopeId
+        : null;
+
   const accountId =
     candidate.account_id === null || typeof candidate.account_id === "string"
       ? candidate.account_id
@@ -319,6 +335,8 @@ function normalizeRecordInput(raw: unknown): WatchHistoryRecord {
 
   return {
     recorded_at: recordedAt,
+    scope_kind: scopeKind,
+    scope_id: scopeId,
     account_name: accountName,
     account_id: accountId,
     identity,
@@ -328,6 +346,26 @@ function normalizeRecordInput(raw: unknown): WatchHistoryRecord {
     one_week: oneWeek,
     source: "watch",
   };
+}
+
+export function filterWatchHistoryByScope(
+  history: WatchHistoryRecord[],
+  scope: {
+    kind: WatchHistoryScopeKind;
+    id?: string | null;
+  },
+): WatchHistoryRecord[] {
+  return history.filter((record) => {
+    if (record.scope_kind !== scope.kind) {
+      return false;
+    }
+
+    if (scope.kind === "isolated") {
+      return record.scope_id === (scope.id ?? null);
+    }
+
+    return true;
+  });
 }
 
 function normalizeTargetSnapshot(raw: unknown): WatchHistoryTargetSnapshot {
@@ -781,6 +819,8 @@ function readHistoryFile(path: string, now: Date): Promise<WatchHistoryRecord[]>
 
 function hasMeaningfulDifference(left: WatchHistoryRecord, right: WatchHistoryRecord): boolean {
   return (
+    left.scope_kind !== right.scope_kind ||
+    left.scope_id !== right.scope_id ||
     left.account_name !== right.account_name ||
     left.account_id !== right.account_id ||
     left.identity !== right.identity ||

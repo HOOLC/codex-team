@@ -24,6 +24,7 @@ import {
   computeWatchHistoryEta,
   computeWatchObservedRatioDiagnostics,
   createWatchHistoryStore,
+  filterWatchHistoryByScope,
   type WatchHistoryEtaContext,
 } from "../watch/history.js";
 
@@ -657,7 +658,10 @@ export async function handleListCommand(options: {
   const currentAccounts = new Set(current.matched_accounts);
   const now = new Date();
   const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
-  const watchHistory = await watchHistoryStore.read(now);
+  const watchHistory = filterWatchHistoryByScope(
+    await watchHistoryStore.read(now),
+    { kind: "global" },
+  );
   const etaByName = new Map(
     result.successes.map((account) => [
       account.name,

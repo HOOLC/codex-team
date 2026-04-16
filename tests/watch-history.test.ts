@@ -27,6 +27,8 @@ function makeRecord(
 ): WatchHistoryRecord {
   return {
     recorded_at,
+    scope_kind: "global",
+    scope_id: null,
     account_name: "main",
     account_id: "acct-main",
     identity: "acct-main:user-main",

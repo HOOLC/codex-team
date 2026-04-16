@@ -271,6 +271,43 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("27%");
   });
 
+  test("hides the ETA list column when no account has ETA history", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.showEtaColumn = false;
+    for (const account of snapshot.accounts) {
+      account.etaLabel = "-";
+    }
+
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot,
+        state: createInitialAccountDashboardState(),
+        width: 120,
+        height: 28,
+      }),
+    );
+    const headerLine = screen.split("\n").find((line) => line.includes("NAME"));
+
+    expect(headerLine).toBeDefined();
+    expect(headerLine).toContain("NEXT RESET");
+    expect(headerLine).not.toContain("ETA");
+  });
+
+  test("shows an unavailable screen when the dashboard terminal is too small", () => {
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot: createSnapshot("alpha"),
+        state: createInitialAccountDashboardState(),
+        width: 40,
+        height: 7,
+      }),
+    );
+
+    expect(screen).toContain("Terminal too small to render the dash");
+    expect(screen).toContain("Need at least: 36x8");
+    expect(screen).toContain('Resize the terminal, or use "codexm li');
+  });
+
   test("exits without busy-polling the event loop", async () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();
@@ -1111,6 +1148,13 @@ describe("Account Dashboard TUI", () => {
         joinedAtLabel: "2026-03-18 12:30",
         lastSwitchedAtLabel: "2026-04-16 13:24",
       });
+      expect(snapshot.accounts[1]?.detailLines).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/^Switched: .*ago\)$/),
+          expect.stringMatching(/^Next reset: .*\((?:in .+|.+ ago|now)\)$/),
+        ]),
+      );
+      expect(snapshot.accounts[1]?.nextResetLabel).toMatch(/^(?:now|[0-9.]+[mhd])$/);
       expect(snapshot.accounts[0]).toMatchObject({
         planLabel: "pro",
         emailLabel: "beta@example.com",

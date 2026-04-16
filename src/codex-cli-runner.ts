@@ -71,8 +71,12 @@ export interface RunnerOptions {
   debugLog?: (message: string) => void;
   /** Streams for output. */
   stderr?: NodeJS.WriteStream;
+  /** Environment variables passed to the spawned codex process. */
+  env?: NodeJS.ProcessEnv;
   /** Disable auth file watching (useful for testing). */
   disableAuthWatch?: boolean;
+  /** Register spawned processes in the global CLI registry. Default: true. */
+  registerProcess?: boolean;
   /** CLI process manager instance (for DI/testing). */
   cliManager?: CliProcessManager;
   /** Spawn implementation override for tests. */
@@ -419,6 +423,8 @@ export async function runCodexWithAutoRestart(
   const signal = options.signal;
   const debugLog = options.debugLog ?? (() => {});
   const stderr = options.stderr ?? process.stderr;
+  const spawnEnv = options.env ?? process.env;
+  const registerProcess = options.registerProcess ?? true;
   const cliManager =
     options.cliManager ?? createCliProcessManager({});
   const spawnImpl = options.spawnImpl ?? spawn;
@@ -645,14 +651,14 @@ export async function runCodexWithAutoRestart(
     const child = trackChild(
       spawnImpl(codexBinary, args, {
         stdio: "inherit",
-        env: process.env,
+        env: spawnEnv,
       }),
     );
 
     debugLog(`run: codex started with pid=${child.pid}`);
 
     // Register in process registry
-    if (child.pid) {
+    if (registerProcess && child.pid) {
       void cliManager
         .registerProcess(
           {

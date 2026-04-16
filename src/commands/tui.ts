@@ -32,6 +32,7 @@ import { getPlatform } from "../platform.js";
 import {
   computeWatchHistoryEta,
   createWatchHistoryStore,
+  filterWatchHistoryByScope,
   type WatchHistoryEtaContext,
 } from "../watch/history.js";
 import {
@@ -114,6 +115,95 @@ function formatClock(value: string | null | undefined): string {
   return dayjs.utc(value).tz(dayjs.tz.guess()).format("HH:mm");
 }
 
+function formatRelativeOffsetCompact(offsetMs: number): string {
+  const absMs = Math.abs(offsetMs);
+  if (absMs < 60_000) {
+    return "now";
+  }
+
+  const minutes = absMs / 60_000;
+  if (minutes < 60) {
+    return `${Math.max(1, Math.round(minutes))}m`;
+  }
+
+  const hours = absMs / 3_600_000;
+  if (hours < 24) {
+    const value = hours < 10 ? hours.toFixed(1) : String(Math.round(hours));
+    return `${value.replace(/\.0$/u, "")}h`;
+  }
+
+  const days = absMs / 86_400_000;
+  const value = days < 10 ? days.toFixed(1) : String(Math.round(days));
+  return `${value.replace(/\.0$/u, "")}d`;
+}
+
+function formatRelativeOffsetLabel(
+  value: string | null | undefined,
+  now: Date,
+): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+
+  const compact = formatRelativeOffsetCompact(timestamp - now.getTime());
+  if (compact === "now") {
+    return "now";
+  }
+
+  return timestamp >= now.getTime() ? `in ${compact}` : `${compact} ago`;
+}
+
+function formatDateTimeWithRelative(
+  value: string | null | undefined,
+  now: Date,
+): string {
+  const absolute = formatDateTime(value);
+  if (absolute === "-") {
+    return absolute;
+  }
+
+  const relative = formatRelativeOffsetLabel(value, now);
+  return relative ? `${absolute} (${relative})` : absolute;
+}
+
+function formatWindowResetForList(
+  window: { reset_at?: string | null } | null | undefined,
+  now: Date,
+): string {
+  if (!window?.reset_at) {
+    return "-";
+  }
+
+  const timestamp = Date.parse(window.reset_at);
+  if (Number.isNaN(timestamp)) {
+    return "-";
+  }
+
+  if (timestamp <= now.getTime()) {
+    return "now";
+  }
+
+  return formatRelativeOffsetCompact(timestamp - now.getTime());
+}
+
+function formatWindowResetForDetail(
+  window: { reset_at?: string | null } | null | undefined,
+  now: Date,
+): string {
+  if (!window?.reset_at) {
+    return "-";
+  }
+
+  const absolute = dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
+  const relative = formatRelativeOffsetLabel(window.reset_at, now);
+  return relative ? `${absolute} (${relative})` : absolute;
+}
+
 function toQuotaSummary(account: ManagedAccount, refreshed: AccountQuotaSummary | null): AccountQuotaSummary {
   if (refreshed) {
     return refreshed;
@@ -157,7 +247,7 @@ async function readWatchHistory(
   now: Date,
 ) {
   const watchHistoryStore = createWatchHistoryStore(store.paths.codexTeamDir);
-  return await watchHistoryStore.read(now);
+  return filterWatchHistoryByScope(await watchHistoryStore.read(now), { kind: "global" });
 }
 
 function buildAccountDetailLines(options: {
@@ -166,11 +256,22 @@ function buildAccountDetailLines(options: {
   availabilityLabel: string;
   score: number | null;
   eta: WatchHistoryEtaContext | undefined;
-  nextResetLabel: string;
+  nextResetDetailLabel: string;
   reasonLabel: string;
   candidate: ReturnType<typeof toAutoSwitchCandidate>;
+  now: Date;
 }): string[] {
-  const { account, accountMeta, availabilityLabel, score, eta, nextResetLabel, reasonLabel, candidate } = options;
+  const {
+    account,
+    accountMeta,
+    availabilityLabel,
+    score,
+    eta,
+    nextResetDetailLabel,
+    reasonLabel,
+    candidate,
+    now,
+  } = options;
   const etaSummary = toQuotaEtaSummary(eta);
   const maskedIdentity = maskAccountId(account.identity);
   const formattedScore = colorizeScore(formatRemainingPercent(score), score);
@@ -193,13 +294,13 @@ function buildAccountDetailLines(options: {
     `User: ${account.user_id ? maskAccountId(account.user_id) : "-"}`,
     `Bottleneck: ${formatBottleneck(eta)}`,
     `Joined: ${formatDateTime(accountMeta?.created_at)}`,
-    `Switched: ${formatDateTime(accountMeta?.last_switched_at ?? null)}`,
+    `Switched: ${formatDateTimeWithRelative(accountMeta?.last_switched_at ?? null, now)}`,
     "",
     `Score: ${formattedScore}`,
     `ETA: ${formatEtaLabel(eta)}`,
     `5H used: ${formattedFiveHour}`,
     `1W used: ${formattedOneWeek}`,
-    `Next reset: ${nextResetLabel}`,
+    `Next reset: ${nextResetDetailLabel}`,
     `Availability: ${availabilityLabel}`,
     "",
     `ETA 5H->1W: ${etaSummary ? formatEtaSummary({ ...etaSummary, hours: etaSummary.eta_5h_eq_1w_hours }) : "-"}`,
@@ -235,6 +336,9 @@ function buildDashboardSnapshot(options: {
       computeWatchHistoryEta(options.watchHistory, toWatchEtaTarget(account), now),
     ] as const),
   );
+  const showEtaColumn = allAccounts.some((account) => (
+    formatEtaLabel(etaByName.get(account.name)) !== "-"
+  ));
   const orderedAccounts = orderListAccounts(allAccounts);
   const currentAccounts = new Set(options.current.matched_accounts);
   const { summaryLine, poolLine } = buildListSummary(options.summaryAccounts);
@@ -254,13 +358,16 @@ function buildDashboardSnapshot(options: {
     currentStatusLine: describeCurrentListStatus(options.current),
     summaryLine,
     poolLine,
+    showEtaColumn,
     warnings: options.warnings,
     failures: options.failures,
     accounts: orderedAccounts.map((account) => {
       const candidate = toAutoSwitchCandidate(account);
       const eta = etaByName.get(account.name);
       const score = candidate ? normalizePlusScore(candidate.current_score) : null;
-      const nextResetLabel = candidate ? formatResetAt(selectCurrentNextResetWindow(account, candidate)) : "-";
+      const nextResetWindow = candidate ? selectCurrentNextResetWindow(account, candidate) : null;
+      const nextResetLabel = formatWindowResetForList(nextResetWindow, now);
+      const nextResetDetailLabel = formatWindowResetForDetail(nextResetWindow, now);
       const availabilityLabel = deriveAvailability(account);
       const reasonLabel = buildReasonLabel(account, eta);
       const accountMeta = accountMetaByName.get(account.name);
@@ -294,9 +401,10 @@ function buildDashboardSnapshot(options: {
           availabilityLabel,
           score,
           eta,
-          nextResetLabel,
+          nextResetDetailLabel,
           reasonLabel,
           candidate,
+          now,
         }),
       };
     }),

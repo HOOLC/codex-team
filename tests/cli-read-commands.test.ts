@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -184,7 +184,7 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
     expect(output).toContain("codexm tui [query]");
-    expect(output).toContain("codexm run [-- ...codexArgs]");
+    expect(output).toContain("codexm run [--account <name>] [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(output).toContain("Command aliases: ls=list");
@@ -244,6 +244,65 @@ describe("CLI Read Commands", () => {
       });
       expect(stdout.read()).toBe("");
       expect(stderr.read()).toContain("[codexm run] codex args: --model o3");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("run --account starts codex in an isolated runtime without global auth watching", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-isolated");
+      await writeCurrentConfig(homeDir, 'cli_auth_credentials_store = "keyring"');
+      const store = createAccountStore(homeDir);
+      await store.saveCurrentAccount("isolated-main");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let runnerOptions: Record<string, unknown> | null = null;
+      let overlayConfig = "";
+      let overlayAuth = "";
+      let isolatedCodexHome = "";
+
+      const exitCode = await runCli(["run", "--account", "isolated-main", "--", "--model", "o3"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runCodexCli: async (options) => {
+          isolatedCodexHome = options.env?.CODEX_HOME ?? "";
+          runnerOptions = {
+            codexArgs: options.codexArgs,
+            accountId: options.accountId,
+            disableAuthWatch: options.disableAuthWatch,
+            registerProcess: options.registerProcess,
+            codexHome: isolatedCodexHome,
+          };
+          overlayConfig = await readFile(join(isolatedCodexHome, "config.toml"), "utf8");
+          overlayAuth = await readFile(options.authFilePath ?? "", "utf8");
+          return {
+            exitCode: 0,
+            restartCount: 0,
+          };
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(runnerOptions).toEqual({
+        codexArgs: ["--model", "o3"],
+        accountId: "acct-isolated",
+        disableAuthWatch: true,
+        registerProcess: false,
+        codexHome: isolatedCodexHome,
+      });
+      expect(isolatedCodexHome).toContain(`${homeDir}/.codex-team/run-overlays/isolated-main/`);
+      expect(overlayConfig).toContain('cli_auth_credentials_store = "file"');
+      expect(overlayAuth).toContain('"account_id": "acct-isolated"');
+      await expect(access(isolatedCodexHome)).rejects.toBeTruthy();
+      expect(stdout.read()).toBe("");
+      const stderrOutput = stderr.read();
+      expect(stderrOutput).toContain('Starting codex in isolated mode with saved snapshot "isolated-main"');
+      expect(stderrOutput).toContain("will not follow codexm switch/watch restarts");
     } finally {
       await cleanupTempHome(homeDir);
     }

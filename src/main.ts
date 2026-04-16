@@ -68,6 +68,10 @@ import {
   runCodexWithAutoRestart,
 } from "./codex-cli-runner.js";
 import {
+  prepareIsolatedCodexRun,
+  startIsolatedQuotaHistorySampler,
+} from "./run/isolated-runtime.js";
+import {
   createPlatformDesktopLauncher,
 } from "./platform-desktop-adapter.js";
 export { rankAutoSwitchCandidates } from "./cli/quota.js";
@@ -531,42 +535,96 @@ export async function runCli(
         if (parsed.positionals.length > 0) {
           throw new Error(`Usage: ${getUsage("run")}`);
         }
+        const isolatedAccountName = parsed.optionValues.get("--account") ?? null;
+        if (isolatedAccountName) {
+          ensureAccountName(isolatedAccountName);
+        }
         const codexArgs = parsed.passthrough;
+        if (!isolatedAccountName) {
+          const currentAccount = await readCurrentRunAccountMetadata(store);
 
-        const currentAccount = await readCurrentRunAccountMetadata(store);
-
-        streams.stderr.write(
-          `[codexm run] Starting codex with auto-restart on auth changes...
-`,
-        );
-        if (codexArgs.length > 0) {
           streams.stderr.write(
-            `[codexm run] codex args: ${codexArgs.join(" ")}
+            `[codexm run] Starting codex with auto-restart on auth changes...
 `,
           );
-        }
-        streams.stderr.write(
-          `[codexm run] Use "codexm switch <account>" in another terminal to hot-switch accounts.
+          if (codexArgs.length > 0) {
+            streams.stderr.write(
+              `[codexm run] codex args: ${codexArgs.join(" ")}
+`,
+            );
+          }
+          streams.stderr.write(
+            `[codexm run] Use "codexm switch <account>" in another terminal to hot-switch accounts.
 
 `,
-        );
+          );
 
-        const result = await runCodexCli({
-          codexArgs,
-          accountId: currentAccount.accountId,
-          email: currentAccount.email,
-          debugLog,
-          stderr: streams.stderr,
-        });
+          const result = await runCodexCli({
+            codexArgs,
+            accountId: currentAccount.accountId,
+            email: currentAccount.email,
+            debugLog,
+            stderr: streams.stderr,
+          });
 
-        if (result.restartCount > 0) {
-          streams.stderr.write(
-            `
+          if (result.restartCount > 0) {
+            streams.stderr.write(
+              `
 [codexm run] Session ended. Restarted ${result.restartCount} time(s) due to auth changes.
 `,
-          );
+            );
+          }
+          return result.exitCode;
         }
-        return result.exitCode;
+
+        const preparedRun = await prepareIsolatedCodexRun({
+          accountName: isolatedAccountName,
+          baseEnv: process.env,
+          store,
+        });
+        const sampler = startIsolatedQuotaHistorySampler({
+          account: preparedRun.account,
+          codexHomeEnv: preparedRun.env,
+          pollIntervalMs: watchQuotaMinReadIntervalMs,
+          scopeId: preparedRun.runId,
+          store,
+          debugLog,
+        });
+
+        try {
+          streams.stderr.write(
+            `[codexm run] Starting codex in isolated mode with saved snapshot "${preparedRun.account.name}"...
+`,
+          );
+          if (codexArgs.length > 0) {
+            streams.stderr.write(
+              `[codexm run] codex args: ${codexArgs.join(" ")}
+`,
+            );
+          }
+          streams.stderr.write(
+            `[codexm run] CODEX_HOME is isolated for this process. It will not follow codexm switch/watch restarts.
+
+`,
+          );
+
+          const result = await runCodexCli({
+            codexArgs,
+            accountId: preparedRun.account.account_id,
+            email: preparedRun.account.email ?? null,
+            authFilePath: preparedRun.authFilePath,
+            sessionsDirPath: preparedRun.sessionsDirPath,
+            env: preparedRun.env,
+            disableAuthWatch: true,
+            registerProcess: false,
+            debugLog,
+            stderr: streams.stderr,
+          });
+          return result.exitCode;
+        } finally {
+          await sampler.stop();
+          await preparedRun.cleanup();
+        }
       }
 
 

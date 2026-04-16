@@ -534,9 +534,10 @@ describe("CLI", () => {
       expect(exitCode).toBe(0);
       expect(readManagedCurrentQuotaCalls).toBeGreaterThanOrEqual(2);
       expect(stderr.read()).toContain("[debug] watch: reading managed Desktop quota reason=idle");
-      expect(stdout.read()).toMatch(
-        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=80% left 1W=70% left/,
-      );
+      const stdoutOutput = stdout.read();
+      expect(stdoutOutput).toContain('quota account="current" usage=available');
+      expect(stdoutOutput).toContain("5H=80% left");
+      expect(stdoutOutput).toContain("1W=70% left");
     } finally {
       await cleanupTempHome(homeDir);
     }

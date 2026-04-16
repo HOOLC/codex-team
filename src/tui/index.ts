@@ -19,6 +19,8 @@ const ANSI = {
 
 const PANEL_MIN_WIDTH = 52;
 const PANEL_MIN_HEIGHT = 14;
+const MIN_RENDERABLE_WIDTH = 36;
+const MIN_RENDERABLE_HEIGHT = 8;
 const WIDE_LAYOUT_MIN_WIDTH = 104;
 const STACKED_LAYOUT_MIN_WIDTH = 72;
 const DEFAULT_AUTO_REFRESH_INTERVAL_MS = 75_000;
@@ -93,6 +95,7 @@ export interface AccountDashboardSnapshot {
   currentStatusLine: string;
   summaryLine: string;
   poolLine: string;
+  showEtaColumn?: boolean;
   warnings: string[];
   failures: Array<{ name: string; error: string }>;
   accounts: AccountDashboardAccount[];
@@ -239,6 +242,10 @@ function repeat(char: string, width: number): string {
   return Array.from({ length: Math.max(0, width) }, () => char).join("");
 }
 
+function isTerminalTooSmall(width: number, height: number): boolean {
+  return width < MIN_RENDERABLE_WIDTH || height < MIN_RENDERABLE_HEIGHT;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -326,8 +333,8 @@ function computePanelFrame(width: number, height: number): PanelFrame {
   return {
     x: horizontalMargin,
     y: verticalMargin,
-    width: Math.max(PANEL_MIN_WIDTH, width - (horizontalMargin * 2)),
-    height: Math.max(PANEL_MIN_HEIGHT, height - (verticalMargin * 2)),
+    width: Math.max(4, width - (horizontalMargin * 2)),
+    height: Math.max(4, height - (verticalMargin * 2)),
   };
 }
 
@@ -485,11 +492,12 @@ function styleListLine(line: string, account: AccountDashboardAccount, selected:
   return line;
 }
 
-function renderWideListHeader(width: number): string[] {
+function renderWideListHeader(width: number, showEtaColumn: boolean): string[] {
   const identityWidth = 8;
-  const fixedWidth = 2 + 1 + 1 + 1 + identityWidth + 1 + 6 + 1 + 5 + 1 + 6 + 1 + 4 + 1 + 4 + 1 + 11;
+  const etaBlockWidth = showEtaColumn ? 1 + 6 : 0;
+  const fixedWidth = 2 + 1 + 1 + 1 + identityWidth + 1 + 6 + 1 + 5 + etaBlockWidth + 1 + 4 + 1 + 4 + 1 + 11;
   const nameWidth = Math.max(8, width - fixedWidth);
-  const groupPrefix = 2 + nameWidth + 1 + identityWidth + 1 + 6 + 1 + 5 + 1 + 6 + 1;
+  const groupPrefix = 2 + nameWidth + 1 + identityWidth + 1 + 6 + 1 + 5 + etaBlockWidth + 1;
   const usedSpan = 4 + 1 + 4;
 
   return [
@@ -503,8 +511,7 @@ function renderWideListHeader(width: number): string[] {
       padEndVisible("PLAN", 6),
       " ",
       padStartVisible("SCORE", 5),
-      " ",
-      padStartVisible("ETA", 6),
+      showEtaColumn ? ` ${padStartVisible("ETA", 6)}` : "",
       " ",
       padStartVisible("5H", 4),
       " ",
@@ -522,8 +529,7 @@ function renderWideListHeader(width: number): string[] {
       repeat("-", 6),
       " ",
       repeat("-", 5),
-      " ",
-      repeat("-", 6),
+      showEtaColumn ? ` ${repeat("-", 6)}` : "",
       " ",
       repeat("-", 4),
       " ",
@@ -534,9 +540,15 @@ function renderWideListHeader(width: number): string[] {
   ];
 }
 
-function renderWideListRow(account: AccountDashboardAccount, selected: boolean, width: number): string {
+function renderWideListRow(
+  account: AccountDashboardAccount,
+  selected: boolean,
+  width: number,
+  showEtaColumn: boolean,
+): string {
   const identityWidth = 8;
-  const fixedWidth = 2 + 1 + 1 + 1 + identityWidth + 1 + 6 + 1 + 5 + 1 + 6 + 1 + 4 + 1 + 4 + 1 + 11;
+  const etaBlockWidth = showEtaColumn ? 1 + 6 : 0;
+  const fixedWidth = 2 + 1 + 1 + 1 + identityWidth + 1 + 6 + 1 + 5 + etaBlockWidth + 1 + 4 + 1 + 4 + 1 + 11;
   const nameWidth = Math.max(8, width - fixedWidth);
   const line = [
     selected ? ">" : " ",
@@ -549,8 +561,7 @@ function renderWideListRow(account: AccountDashboardAccount, selected: boolean, 
     padEndVisible(truncate(account.planLabel, 6), 6),
     " ",
     padStartVisible(account.scoreLabel, 5),
-    " ",
-    padStartVisible(account.etaLabel, 6),
+    showEtaColumn ? ` ${padStartVisible(account.etaLabel, 6)}` : "",
     " ",
     padStartVisible(account.fiveHourLabel, 4),
     " ",
@@ -562,11 +573,16 @@ function renderWideListRow(account: AccountDashboardAccount, selected: boolean, 
   return styleListLine(line, account, selected);
 }
 
-function renderCompactListRow(account: AccountDashboardAccount, selected: boolean, width: number): string[] {
+function renderCompactListRow(
+  account: AccountDashboardAccount,
+  selected: boolean,
+  width: number,
+  showEtaColumn: boolean,
+): string[] {
   const includePlan = width >= 64;
   const includeIdentity = width >= 64;
   const includeReset = width >= 58;
-  const firstFixedWidth = 2 + 1 + 1 + 1 + (includePlan ? 1 + 6 : 0) + 1 + 5 + 1 + 6;
+  const firstFixedWidth = 2 + 1 + 1 + 1 + (includePlan ? 1 + 6 : 0) + 1 + 5 + (showEtaColumn ? 1 + 6 : 0);
   const nameWidth = Math.max(8, width - firstFixedWidth);
   const firstLine = [
     selected ? ">" : " ",
@@ -576,8 +592,7 @@ function renderCompactListRow(account: AccountDashboardAccount, selected: boolea
     includePlan ? ` ${padEndVisible(truncate(account.planLabel, 6), 6)}` : "",
     " ",
     padStartVisible(account.scoreLabel, 5),
-    " ",
-    padStartVisible(account.etaLabel, 6),
+    showEtaColumn ? ` ${padStartVisible(account.etaLabel, 6)}` : "",
   ].join("");
 
   const secondSegments = [
@@ -600,9 +615,10 @@ function renderListLines(
   width: number,
   height: number,
   layoutMode: LayoutMode,
+  showEtaColumn: boolean,
 ): string[] {
   if (layoutMode === "wide") {
-    const headerLines = renderWideListHeader(width);
+    const headerLines = renderWideListHeader(width, showEtaColumn);
     if (filteredAccounts.length === 0) {
       return fitLines(headerLines, height);
     }
@@ -613,7 +629,9 @@ function renderListLines(
     return fitLines(
       [
         ...headerLines,
-        ...visible.map((account, index) => renderWideListRow(account, start + index === state.selected, width)),
+        ...visible.map((account, index) => (
+          renderWideListRow(account, start + index === state.selected, width, showEtaColumn)
+        )),
       ],
       height,
     );
@@ -627,7 +645,9 @@ function renderListLines(
   const start = clamp(state.scrollTop, 0, Math.max(0, filteredAccounts.length - visibleAccounts));
   const visible = filteredAccounts.slice(start, start + visibleAccounts);
   return fitLines(
-    visible.flatMap((account, index) => renderCompactListRow(account, start + index === state.selected, width)),
+    visible.flatMap((account, index) => (
+      renderCompactListRow(account, start + index === state.selected, width, showEtaColumn)
+    )),
     height,
   );
 }
@@ -677,12 +697,20 @@ function renderBodyLines(
   width: number,
   height: number,
   detailOverride?: AccountDashboardDetailOverride | null,
+  showEtaColumn = true,
 ): string[] {
   const normalized = normalizeStateForViewport(snapshot, state, width, height + 9);
   const { layout } = normalized;
 
   if (layout.mode === "wide") {
-    const listLines = renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows, layout.mode);
+    const listLines = renderListLines(
+      normalized.filtered.all,
+      normalized.state,
+      layout.listWidth,
+      layout.listRows,
+      layout.mode,
+      showEtaColumn,
+    );
     const detailLines = renderDetailLines(
       snapshot,
       normalized.filtered.selected,
@@ -699,7 +727,14 @@ function renderBodyLines(
   }
 
   if (layout.mode === "stacked") {
-    const listLines = renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows, layout.mode);
+    const listLines = renderListLines(
+      normalized.filtered.all,
+      normalized.state,
+      layout.listWidth,
+      layout.listRows,
+      layout.mode,
+      showEtaColumn,
+    );
     const detailLines = renderDetailLines(
       snapshot,
       normalized.filtered.selected,
@@ -711,7 +746,14 @@ function renderBodyLines(
   }
 
   return fitLines(
-    renderListLines(normalized.filtered.all, normalized.state, layout.listWidth, layout.listRows, layout.mode),
+    renderListLines(
+      normalized.filtered.all,
+      normalized.state,
+      layout.listWidth,
+      layout.listRows,
+      layout.mode,
+      showEtaColumn,
+    ),
     height,
   );
 }
@@ -801,6 +843,18 @@ export function createInitialAccountDashboardState(initialQuery = ""): AccountDa
 export function renderAccountDashboardScreen(
   options: RenderAccountDashboardScreenOptions,
 ): string {
+  if (isTerminalTooSmall(options.width, options.height)) {
+    return [
+      `${ANSI.clear}${ANSI.home}${ANSI.bold}codexm${ANSI.reset}`,
+      "Terminal too small to render the dashboard.",
+      `Current: ${options.width}x${options.height} | Need at least: ${MIN_RENDERABLE_WIDTH}x${MIN_RENDERABLE_HEIGHT}`,
+      'Resize the terminal, or use "codexm list".',
+    ]
+      .slice(0, Math.max(1, options.height))
+      .map((line) => truncate(line, Math.max(1, options.width)))
+      .join("\n");
+  }
+
   const normalized = normalizeStateForViewport(
     options.snapshot,
     options.state,
@@ -809,6 +863,7 @@ export function renderAccountDashboardScreen(
   );
   const { layout } = normalized;
   const filteredCount = normalized.filtered.all.length;
+  const showEtaColumn = options.snapshot.showEtaColumn ?? true;
   const bannerLine = options.bannerMessage
     ? emphasize(color(options.bannerMessage, "yellow"))
     : "";
@@ -823,6 +878,7 @@ export function renderAccountDashboardScreen(
       layout.innerWidth,
       layout.bodyHeight,
       options.detailOverride,
+      showEtaColumn,
     ),
     renderDivider(layout.innerWidth),
     truncate(

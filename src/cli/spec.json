@@ -7,6 +7,7 @@
     { "flag": "--version", "description": "print the installed version", "global": true },
     { "flag": "--debug", "description": "enable debug logging", "global": true, "aliases": ["-d"] },
     { "flag": "--accounts", "description": "print saved account names for shell completion", "global": false },
+    { "flag": "--account", "description": "run codex with a saved account snapshot in an isolated runtime", "global": false, "takesValue": true },
     { "flag": "--auto", "description": "switch to the best available account", "global": false, "aliases": ["-a"] },
     { "flag": "--detach", "description": "run watch in the background", "global": false },
     { "flag": "--device-auth", "description": "add account with device-code login", "global": false },
@@ -148,10 +149,10 @@
     },
     {
       "name": "run",
-      "flags": [],
-      "helpUsages": ["codexm run [-- ...codexArgs]"],
+      "flags": ["--account"],
+      "helpUsages": ["codexm run [--account <name>] [-- ...codexArgs]"],
       "usageErrors": {
-        "default": "codexm run [-- ...codexArgs]"
+        "default": "codexm run [--account <name>] [-- ...codexArgs]"
       }
     },
     {
@@ -372,10 +373,10 @@
             }
           },
           {
-            "usage": "codexm run [-- ...codexArgs]",
+            "usage": "codexm run [--account <name>] [-- ...codexArgs]",
             "description": {
-              "en": "restart the codex CLI automatically after auth changes",
-              "zh-CN": "在 auth 变化后自动重启 codex CLI"
+              "en": "run codex with global auth follow-restart or an isolated managed account snapshot",
+              "zh-CN": "以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行"
             }
           }
         ]

@@ -322,23 +322,39 @@ function describeQuotaAccounts(
     return row;
   });
 
+  const showEtaColumn = rows.some((row) => row.eta !== "-");
+  const showVerboseEtaColumns = options.verbose
+    ? rows.some((row) => row.eta_5h_eq_1w !== "-" || row.eta_1w !== "-")
+    : false;
+
   const columns: TableColumn[] = [
     { key: "name", label: "  NAME" },
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN" },
     { key: "score", label: "SCORE", align: "right", headerAlign: "right" },
-    { key: "eta", label: "ETA", align: "right", headerAlign: "right" },
     { key: "five_hour", label: "5H", groupLabel: "USED", align: "right", headerAlign: "center" },
     { key: "one_week", label: "1W", groupLabel: "USED", align: "right", headerAlign: "center" },
     { key: "next_reset", label: "NEXT RESET" },
   ];
 
+  if (showEtaColumn) {
+    columns.splice(4, 0, {
+      key: "eta",
+      label: "ETA",
+      align: "right",
+      headerAlign: "right",
+    });
+  }
+
   if (options.verbose) {
-    columns.splice(
-      5,
-      0,
-      { key: "eta_5h_eq_1w", label: "ETA 5H->1W", align: "right", headerAlign: "right" },
-      { key: "eta_1w", label: "ETA 1W", align: "right", headerAlign: "right" },
+    const verboseInsertColumns: TableColumn[] = [];
+    if (showVerboseEtaColumns) {
+      verboseInsertColumns.push(
+        { key: "eta_5h_eq_1w", label: "ETA 5H->1W", align: "right", headerAlign: "right" },
+        { key: "eta_1w", label: "ETA 1W", align: "right", headerAlign: "right" },
+      );
+    }
+    verboseInsertColumns.push(
       { key: "rate_1w_units", label: "RATE 1W UNITS", align: "right", headerAlign: "right" },
       { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W", align: "right", headerAlign: "right" },
       { key: "score_1h", label: "1H SCORE", align: "right", headerAlign: "right" },
@@ -346,6 +362,7 @@ function describeQuotaAccounts(
       { key: "projected_1w_1h", label: "1W 1H", align: "right", headerAlign: "right" },
       { key: "five_hour_to_one_week_ratio", label: "5H:1W", align: "right", headerAlign: "right" },
     );
+    columns.splice(showEtaColumn ? 5 : 4, 0, ...verboseInsertColumns);
     columns.push(
       { key: "five_hour_reset", label: "5H RESET AT" },
       { key: "one_week_reset", label: "1W RESET AT" },
