@@ -6,6 +6,7 @@ import {
   createInitialAccountDashboardState,
   renderAccountDashboardScreen,
   runAccountDashboardTui,
+  type AccountDashboardExternalUpdate,
   type AccountDashboardSnapshot,
 } from "../src/tui/index.js";
 import { runCli } from "../src/main.js";
@@ -13,6 +14,7 @@ import { createAccountStore } from "../src/account-store/index.js";
 import {
   buildAccountDashboardSnapshot,
   buildCachedAccountDashboardSnapshot,
+  handleTuiCommand,
 } from "../src/commands/tui.js";
 import {
   cleanupTempHome,
@@ -23,6 +25,7 @@ import {
   createDesktopLauncherStub,
   createInteractiveStdin,
   createInteractiveStdout,
+  createWatchProcessManagerStub,
 } from "./cli-fixtures.js";
 
 function stripAnsi(value: string): string {
@@ -662,6 +665,78 @@ describe("Account Dashboard TUI", () => {
     });
   });
 
+  test("keeps an active export prompt open while applying an external switch update", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let currentName = "alpha";
+    let emitExternalUpdate: ((update: AccountDashboardExternalUpdate) => void) | null = null;
+    let settled = false;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      initialSnapshot: createSnapshot(currentName),
+      subscribeExternalUpdates: (listener) => {
+        emitExternalUpdate = listener;
+        return () => {
+          if (emitExternalUpdate === listener) {
+            emitExternalUpdate = null;
+          }
+        };
+      },
+      loadSnapshot: async () => createSnapshot(currentName),
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+      exportAccount: async (_source, outputPath) => ({
+        statusMessage: `Exported share bundle to ${outputPath}.`,
+      }),
+    });
+    void tuiPromise.finally(() => {
+      settled = true;
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("E");
+      await flushLoop();
+      expect(latestDashboardFrame(stdout.read())).toContain("Export to file:");
+
+      currentName = "beta";
+      const sendExternalUpdate = emitExternalUpdate;
+      if (!sendExternalUpdate) {
+        throw new Error("Expected external update subscription to be active.");
+      }
+      (sendExternalUpdate as (update: AccountDashboardExternalUpdate) => void)({
+        statusMessage: 'Current account switched from "alpha" to "beta".',
+        preferredName: "beta",
+      });
+      await flushLoop();
+      await flushLoop();
+
+      const frame = latestDashboardFrame(stdout.read());
+      expect(frame).toContain("Export to file:");
+      expect(frame).toContain('Current account switched from "alpha" to "beta".');
+      expect(frame).toContain("codexm | current beta");
+
+      stdin.emitInput("\u001b");
+      await flushLoop();
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } finally {
+      if (!settled) {
+        stdin.emitInput("\u001b");
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+    }
+  });
+
   test("uses Esc to back out of an export prompt and q to exit from browse mode", async () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();
@@ -1010,6 +1085,97 @@ describe("Account Dashboard TUI", () => {
       expect(stripAnsi(stdout.read())).toContain("codexm | current missing | 0/0 usable | updated -");
       expect(stderr.read()).toBe("");
     } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("starts a foreground watch when no detached watch is running", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    let settled = false;
+    let foregroundWatchStarts = 0;
+    let foregroundWatchAborts = 0;
+    let authWatcherClosed = 0;
+    let tuiPromise: Promise<number> | null = null;
+    let resolveForegroundWatchStarted: (() => void) | null = null;
+    const foregroundWatchStarted = new Promise<void>((resolve) => {
+      resolveForegroundWatchStarted = resolve;
+    });
+
+    try {
+      const store = createAccountStore(homeDir);
+      tuiPromise = handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => null,
+          watchManagedQuotaSignals: async (options) => {
+            foregroundWatchStarts += 1;
+            resolveForegroundWatchStarted?.();
+            await new Promise<void>((resolve) => {
+              if (options?.signal?.aborted) {
+                foregroundWatchAborts += 1;
+                resolve();
+                return;
+              }
+
+              options?.signal?.addEventListener("abort", () => {
+                foregroundWatchAborts += 1;
+                resolve();
+              }, { once: true });
+            });
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        authWatchImpl: (() => Object.assign(new EventEmitter(), {
+          close: () => {
+            authWatcherClosed += 1;
+          },
+        }) as never) as never,
+      });
+      void tuiPromise.finally(() => {
+        settled = true;
+      });
+
+      await Promise.race([
+        foregroundWatchStarted,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => {
+            reject(new Error("Expected foreground watch to start."));
+          }, 250);
+        }),
+      ]);
+      expect(foregroundWatchStarts).toBe(1);
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toBe(0);
+      expect(foregroundWatchAborts).toBe(1);
+      expect(authWatcherClosed).toBe(1);
+      expect(stderr.read()).toBe("");
+    } finally {
+      if (!settled && tuiPromise) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
       await cleanupTempHome(homeDir);
     }
   });

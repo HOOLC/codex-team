@@ -116,7 +116,7 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。面板里 `Enter` 用来切号，`f` 用来强制切号或在当前账号上重新 reload，`o` 用来切号后打开 `codex`，`d` 用来切号后打开或聚焦 Codex Desktop，`e` / `E` 用来导出选中账号或当前 auth，`i` 用来导入 bundle，`x` 用来删除选中账号，`u` 用来撤销最近一次 import/export/delete。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。面板里 `Enter` 用来切号，`f` 用来强制切号或在当前账号上重新 reload，`o` 用来切号后打开 `codex`，`d` 用来切号后打开或聚焦 Codex Desktop，`e` / `E` 用来导出选中账号或当前 auth，`i` 用来导入 bundle，`x` 用来删除选中账号，`u` 用来撤销最近一次 import/export/delete。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板还会在前台挂一个 watch，并在不打断当前 prompt 的前提下提示账号切换事件。
 
 ## 什么时候该用哪个命令？
 

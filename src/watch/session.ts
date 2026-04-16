@@ -333,6 +333,20 @@ export async function runManagedDesktopWatchSession(options: {
   managedDesktopWaitStatusIntervalMs: number;
   watchQuotaMinReadIntervalMs: number;
   watchQuotaIdleReadIntervalMs: number;
+  onAutoSwitchEvent?: (
+    event:
+      | {
+          type: "switched";
+          fromAccount: string;
+          toAccount: string;
+          warnings: string[];
+        }
+      | {
+          type: "skipped";
+          account: string;
+          reason: "lock-busy" | "already-best";
+        },
+  ) => Promise<void> | void;
 }): Promise<number> {
   const {
     store,
@@ -346,6 +360,7 @@ export async function runManagedDesktopWatchSession(options: {
     managedDesktopWaitStatusIntervalMs,
     watchQuotaMinReadIntervalMs,
     watchQuotaIdleReadIntervalMs,
+    onAutoSwitchEvent,
   } = options;
 
   let watchExitCode = 0;
@@ -401,6 +416,11 @@ export async function runManagedDesktopWatchSession(options: {
           describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "lock-busy"),
         )}\n`,
       );
+      await onAutoSwitchEvent?.({
+        type: "skipped",
+        account: currentWatchAccountLabel,
+        reason: "lock-busy",
+      });
       return;
     }
 
@@ -435,6 +455,11 @@ export async function runManagedDesktopWatchSession(options: {
             describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "already-best"),
           )}\n`,
         );
+        await onAutoSwitchEvent?.({
+          type: "skipped",
+          account: currentWatchAccountLabel,
+          reason: "already-best",
+        });
       } else if (autoSwitchResult.result) {
         const previousAccountLabel = currentWatchAccountLabel;
         currentWatchAccountLabel = autoSwitchResult.result.account.name;
@@ -447,6 +472,12 @@ export async function runManagedDesktopWatchSession(options: {
             ),
           )}\n`,
         );
+        await onAutoSwitchEvent?.({
+          type: "switched",
+          fromAccount: previousAccountLabel,
+          toAccount: currentWatchAccountLabel,
+          warnings: autoSwitchResult.result.warnings,
+        });
       }
 
       if (autoSwitchResult.refreshResult.failures.length > 0) {

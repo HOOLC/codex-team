@@ -131,6 +131,9 @@ export interface RunAccountDashboardTuiOptions {
   initialQuery?: string;
   initialSnapshot?: AccountDashboardSnapshot;
   autoRefreshIntervalMs?: number | null;
+  subscribeExternalUpdates?: (
+    listener: (update: AccountDashboardExternalUpdate) => void,
+  ) => (() => void);
   loadSnapshot: () => Promise<AccountDashboardSnapshot>;
   switchAccount: (
     name: string,
@@ -164,6 +167,12 @@ export interface RunAccountDashboardTuiOptions {
 export interface AccountDashboardExitResult {
   code: number;
   action: ExitAction;
+}
+
+export interface AccountDashboardExternalUpdate {
+  statusMessage?: string;
+  preferredName?: string | null;
+  refresh?: boolean;
 }
 
 interface PanelFrame {
@@ -1075,6 +1084,7 @@ export async function runAccountDashboardTui(
   let detailOverride: AccountDashboardDetailOverride | null = null;
   let undoAction: AccountDashboardUndoAction | null = null;
   let forceExitRequested = false;
+  let unsubscribeExternalUpdates: (() => void) | null = null;
   const previousRawMode = stdin.isRaw === true;
 
   let resolveExit: ((result: AccountDashboardExitResult) => void) | null = null;
@@ -1134,6 +1144,10 @@ export async function runAccountDashboardTui(
     if (autoRefreshTimer) {
       clearInterval(autoRefreshTimer);
       autoRefreshTimer = null;
+    }
+    if (unsubscribeExternalUpdates) {
+      unsubscribeExternalUpdates();
+      unsubscribeExternalUpdates = null;
     }
     stdin.off("data", onData);
     stdout.off?.("resize", onResize);
@@ -1243,6 +1257,31 @@ export async function runAccountDashboardTui(
       void undoAction.discard?.().catch(() => undefined);
     }
     undoAction = nextUndo ?? null;
+  };
+
+  const applyExternalUpdate = (update: AccountDashboardExternalUpdate) => {
+    if (cleanedUp) {
+      return;
+    }
+
+    if (typeof update.statusMessage === "string" && update.statusMessage !== "") {
+      state = {
+        ...state,
+        statusMessage: update.statusMessage,
+      };
+    }
+
+    if ("preferredName" in update) {
+      requestRefresh(update.preferredName ?? null);
+      return;
+    }
+
+    if (update.refresh) {
+      requestRefresh();
+      return;
+    }
+
+    render();
   };
 
   const resolveActionStatus = (result: AccountDashboardActionResult, fallback: string): string => {
@@ -1910,6 +1949,23 @@ export async function runAccountDashboardTui(
   stdout.write(`${ANSI.altOn}${ANSI.hideCursor}`);
   stdout.on?.("resize", onResize);
   stdin.on("data", onData);
+  if (options.subscribeExternalUpdates) {
+    unsubscribeExternalUpdates = options.subscribeExternalUpdates((update) => {
+      actionQueue = actionQueue
+        .then(async () => {
+          applyExternalUpdate(update);
+        })
+        .catch((error) => {
+          busyMessage = null;
+          activeOperation = null;
+          state = {
+            ...state,
+            statusMessage: `TUI error: ${(error as Error).message}`,
+          };
+          render();
+        });
+    });
+  }
 
   if (typeof autoRefreshIntervalMs === "number" && autoRefreshIntervalMs > 0) {
     autoRefreshTimer = setInterval(() => {
