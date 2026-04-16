@@ -90,6 +90,7 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 - `codexm list [--verbose]`: 查看所有保存账号、quota、score、ETA 和 reset 时间
 - `codexm list --json`: 输出机器可读 JSON
 - `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
+- `codexm tui [query]`: 打开交互式账号面板，可筛选、切号和刷新 quota
 
 ### 切换与启动
 

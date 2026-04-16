@@ -28,6 +28,7 @@
     "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
     "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --verbose to expand score inputs.",
+    "codexm tui opens an interactive account dashboard for filtering, switching, and refreshing quota data.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
     "Unknown commands and flags fail fast; close matches include a suggestion."
   ],
@@ -107,6 +108,14 @@
       "helpUsages": ["codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"],
       "usageErrors": {
         "default": "codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"
+      }
+    },
+    {
+      "name": "tui",
+      "flags": [],
+      "helpUsages": ["codexm tui [query]"],
+      "usageErrors": {
+        "default": "codexm tui [query]"
       }
     },
     {
@@ -216,6 +225,13 @@
             "description": {
               "en": "include diagnostic details about quota normalization and observed ratios",
               "zh-CN": "输出 quota 归一化和观测比例相关诊断信息"
+            }
+          },
+          {
+            "usage": "codexm tui [query]",
+            "description": {
+              "en": "open an interactive account dashboard for filtering, switching, and refresh",
+              "zh-CN": "打开交互式账号面板，可筛选、切号和刷新 quota"
             }
           }
         ]

@@ -90,6 +90,7 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm list [--verbose]`: show saved accounts, quota usage, score, ETA, and reset times
 - `codexm list --json`: machine-readable output
 - `codexm list --debug`: include diagnostic details about quota normalization and observed ratios
+- `codexm tui [query]`: open an interactive account dashboard for filtering, switching, and refresh
 
 ### Switch and launch
 

@@ -156,18 +156,28 @@ export function createDesktopLauncherStub(overrides: Partial<{
 
 export function createInteractiveStdin(): NodeJS.ReadStream & {
   emitInput: (value: string) => void;
+  emitKeypress: (value: string, key?: Record<string, unknown>) => void;
   pauseCalls: number;
   resumeCalls: number;
+  rawModeCalls: boolean[];
+  isRaw: boolean;
+  setRawMode: (raw: boolean) => NodeJS.ReadStream;
 } {
   const stream = new PassThrough() as unknown as NodeJS.ReadStream & {
     emitInput: (value: string) => void;
+    emitKeypress: (value: string, key?: Record<string, unknown>) => void;
     pauseCalls: number;
     resumeCalls: number;
+    rawModeCalls: boolean[];
+    isRaw: boolean;
+    setRawMode: (raw: boolean) => NodeJS.ReadStream;
   };
 
   stream.isTTY = true;
   stream.pauseCalls = 0;
   stream.resumeCalls = 0;
+  stream.rawModeCalls = [];
+  stream.isRaw = false;
 
   const originalPause = stream.pause.bind(stream);
   stream.pause = (() => {
@@ -181,8 +191,46 @@ export function createInteractiveStdin(): NodeJS.ReadStream & {
     return originalResume();
   }) as typeof stream.resume;
 
+  stream.setRawMode = ((raw: boolean) => {
+    stream.rawModeCalls.push(raw);
+    stream.isRaw = raw;
+    return stream;
+  }) as typeof stream.setRawMode;
+
   stream.emitInput = (value: string) => {
     stream.write(value);
+  };
+  stream.emitKeypress = (value: string, key?: Record<string, unknown>) => {
+    stream.emit("keypress", value, key);
+  };
+
+  return stream;
+}
+
+export function createInteractiveStdout(
+  columns = 120,
+  rows = 32,
+): NodeJS.WriteStream & {
+  read: () => string;
+  emitResize: (nextColumns: number, nextRows: number) => void;
+} {
+  const stream = new PassThrough() as unknown as NodeJS.WriteStream & {
+    read: () => string;
+    emitResize: (nextColumns: number, nextRows: number) => void;
+  };
+  let output = "";
+
+  stream.isTTY = true;
+  stream.columns = columns;
+  stream.rows = rows;
+  stream.on("data", (chunk) => {
+    output += chunk.toString("utf8");
+  });
+  stream.read = () => output;
+  stream.emitResize = (nextColumns: number, nextRows: number) => {
+    stream.columns = nextColumns;
+    stream.rows = nextRows;
+    stream.emit("resize");
   };
 
   return stream;

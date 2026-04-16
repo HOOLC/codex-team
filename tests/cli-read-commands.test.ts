@@ -183,6 +183,7 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    expect(output).toContain("codexm tui [query]");
     expect(output).toContain("codexm run [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
@@ -191,6 +192,23 @@ describe("CLI Read Commands", () => {
       "Flag aliases: -a=--auto, -d=--debug, -f=--force, -j=--json, -n=--dry-run, -v=--verbose, -y=--yes",
     );
     expect(stderr.read()).toBe("");
+  });
+
+  test("tui rejects non-interactive terminals", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["tui"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub(),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.read()).toBe("");
+    expect(stderr.read()).toContain(
+      'Error: codexm tui requires an interactive terminal. Use "codexm list" or "codexm list --json" instead.\n',
+    );
   });
 
   test("run accepts passthrough codex args and delegates to the runner", async () => {

@@ -46,6 +46,8 @@ import {
   handleDoctorCommand,
   handleListCommand,
 } from "./commands/inspection.js";
+import { performManualSwitch } from "./commands/switch.js";
+import { handleTuiCommand } from "./commands/tui.js";
 import {
   handleLaunchCommand,
   handleWatchCommand,
@@ -53,8 +55,6 @@ import {
 import {
   describeBusySwitchLock,
   performAutoSwitch,
-  refreshManagedDesktopAfterSwitch,
-  stripManagedDesktopWarning,
   tryAcquireSwitchLock,
 } from "./switching.js";
 
@@ -65,10 +65,6 @@ import {
 import {
   createPlatformDesktopLauncher,
 } from "./platform-desktop-adapter.js";
-import {
-  shouldSkipManagedDesktopRefresh,
-} from "./desktop/managed-state.js";
-
 export { rankAutoSwitchCandidates } from "./cli/quota.js";
 
 interface CliStreams {
@@ -383,58 +379,20 @@ export async function runCli(
           throw new Error(`Usage: ${getUsage("switch")}`);
         }
         ensureAccountName(name);
-
-        debugLog(`switch: mode=manual target=${name} force=${force}`);
-        const switchCommand = `switch ${name}`;
-        const lock = await tryAcquireSwitchLock(store, switchCommand);
-        if (!lock.acquired) {
-          throw new Error(describeBusySwitchLock(lock.lockPath, lock.owner));
+        const { result, quota, desktopForceWarning } = await performManualSwitch({
+          name,
+          force,
+          store,
+          desktopLauncher,
+          stderr: streams.stderr,
+          debugLog,
+          interruptSignal,
+          managedDesktopWaitStatusDelayMs,
+          managedDesktopWaitStatusIntervalMs,
+        });
+        if (desktopForceWarning) {
+          streams.stderr.write(`${desktopForceWarning}\n`);
         }
-
-        const result = await (async () => {
-          try {
-            const switched = await store.switchAccount(name);
-            switched.warnings = stripManagedDesktopWarning(switched.warnings);
-            const skipDesktopRefresh = await shouldSkipManagedDesktopRefresh(
-              store,
-              desktopLauncher,
-              debugLog,
-            );
-            if (!skipDesktopRefresh) {
-              const refreshOutcome = await refreshManagedDesktopAfterSwitch(switched.warnings, desktopLauncher, {
-                force,
-                signal: interruptSignal,
-                statusStream: streams.stderr,
-                statusDelayMs: managedDesktopWaitStatusDelayMs,
-                statusIntervalMs: managedDesktopWaitStatusIntervalMs,
-              });
-              if (force && refreshOutcome === "none") {
-                streams.stderr.write(
-                  "Warning: --force is only meaningful with a managed Desktop session. " +
-                  "In CLI mode, use \"codexm run\" for seamless auth hot-switching.\n",
-                );
-              }
-            }
-            return switched;
-          } finally {
-            await lock.release();
-          }
-        })();
-        let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
-        try {
-          await store.refreshQuotaForAccount(result.account.name, {
-            quotaClientMode: "list-fast",
-          });
-          const quotaList = await store.listQuotaSummaries();
-          const matched =
-            quotaList.accounts.find((account) => account.name === result.account.name) ?? null;
-          quota = matched ? toCliQuotaSummary(matched) : null;
-        } catch (error) {
-          result.warnings.push((error as Error).message);
-        }
-        debugLog(
-          `switch: completed target=${result.account.name} warnings=${result.warnings.length} quota_refreshed=${quota !== null}`,
-        );
         const payload = {
           ok: true,
           action: "switch",
@@ -493,6 +451,19 @@ export async function runCli(
           managedDesktopWaitStatusIntervalMs,
           watchQuotaMinReadIntervalMs,
           watchQuotaIdleReadIntervalMs,
+        });
+      }
+
+      case "tui": {
+        return await handleTuiCommand({
+          positionals: parsed.positionals,
+          store,
+          desktopLauncher,
+          streams,
+          debugLog,
+          interruptSignal,
+          managedDesktopWaitStatusDelayMs,
+          managedDesktopWaitStatusIntervalMs,
         });
       }
 
