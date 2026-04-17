@@ -34,6 +34,11 @@ export interface AccountDashboardExternalUpdateFeed {
   ) => (() => void);
 }
 
+export interface TuiExternalUpdateMonitors {
+  reconcileNow(): Promise<void>;
+  stop(): Promise<void>;
+}
+
 const DEFAULT_TUI_WATCH_QUOTA_MIN_READ_INTERVAL_MS = 30_000;
 const DEFAULT_TUI_WATCH_QUOTA_IDLE_READ_INTERVAL_MS = 120_000;
 const DEFAULT_TUI_WATCH_LEASE_POLL_INTERVAL_MS = 5_000;
@@ -121,7 +126,7 @@ export async function startTuiExternalUpdateMonitors(options: {
   managedDesktopWaitStatusIntervalMs: number;
   foregroundWatchLeasePollIntervalMs?: number;
   authWatchImpl?: typeof watch;
-}): Promise<() => Promise<void>> {
+}): Promise<TuiExternalUpdateMonitors> {
   const {
     store,
     desktopLauncher,
@@ -424,31 +429,36 @@ export async function startTuiExternalUpdateMonitors(options: {
     void reconcileForegroundWatch();
   }, foregroundWatchLeasePollIntervalMs);
 
-  return async () => {
-    stopped = true;
-    stopAuthWatcher();
-    if (foregroundWatchPollTimer) {
-      clearInterval(foregroundWatchPollTimer);
-      foregroundWatchPollTimer = null;
-    }
-
-    const detachedWatchStatusBeforeStop = await getDetachedWatchStatus();
-    const shouldHandoffForegroundWatch =
-      startedForegroundWatch && !detachedWatchStatusBeforeStop.running;
-
-    await stopForegroundWatch();
-
-    if (shouldHandoffForegroundWatch) {
-      const activeLease = await getActiveWatchLease();
-      if (!activeLease.active) {
-        await watchProcessManager.startDetached({
-          autoSwitch: true,
-          debug: false,
-        }).catch((error) => {
-          debugLog?.(`tui: failed to hand off to detached watch: ${(error as Error).message}`);
-        });
+  return {
+    async reconcileNow() {
+      await reconcileForegroundWatch();
+    },
+    async stop() {
+      stopped = true;
+      stopAuthWatcher();
+      if (foregroundWatchPollTimer) {
+        clearInterval(foregroundWatchPollTimer);
+        foregroundWatchPollTimer = null;
       }
-    }
+
+      const detachedWatchStatusBeforeStop = await getDetachedWatchStatus();
+      const shouldHandoffForegroundWatch =
+        startedForegroundWatch && !detachedWatchStatusBeforeStop.running;
+
+      await stopForegroundWatch();
+
+      if (shouldHandoffForegroundWatch) {
+        const activeLease = await getActiveWatchLease();
+        if (!activeLease.active) {
+          await watchProcessManager.startDetached({
+            autoSwitch: true,
+            debug: false,
+          }).catch((error) => {
+            debugLog?.(`tui: failed to hand off to detached watch: ${(error as Error).message}`);
+          });
+        }
+      }
+    },
   };
 }
 

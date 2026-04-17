@@ -608,6 +608,86 @@ describe("Account Dashboard TUI", () => {
     });
   });
 
+  test("starts the foreground watch immediately after opening a managed Desktop from the dashboard", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    let managedDesktopRunning = false;
+    let foregroundWatchStarts = 0;
+    let runningApps: Array<{ pid: number; command: string }> = [];
+
+    try {
+      const store = createAccountStore(homeDir);
+      const result = await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => runningApps,
+          launch: async () => {
+            managedDesktopRunning = true;
+            runningApps = [
+              {
+                pid: 54321,
+                command: "/Applications/Codex.app/Contents/MacOS/Codex",
+              },
+            ];
+          },
+          writeManagedState: async () => {
+            managedDesktopRunning = true;
+          },
+          isManagedDesktopRunning: async () => managedDesktopRunning,
+          readManagedCurrentQuota: async () => null,
+          watchManagedQuotaSignals: async (options) => {
+            foregroundWatchStarts += 1;
+            await new Promise<void>((resolve) => {
+              if (options?.signal?.aborted) {
+                resolve();
+                return;
+              }
+
+              options?.signal?.addEventListener("abort", () => {
+                resolve();
+              }, { once: true });
+            });
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        runDashboardTuiImpl: async (options) => {
+          if (!options.openDesktop) {
+            throw new Error("Expected openDesktop callback.");
+          }
+          await options.openDesktop("alpha");
+          return {
+            code: 0,
+            action: "quit",
+          };
+        },
+      });
+
+      expect(result).toBe(0);
+      expect(foregroundWatchStarts).toBe(1);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("force-reloads the current account instead of short-circuiting", async () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();

@@ -539,7 +539,7 @@ export async function handleTuiCommand(options: {
     const localSwitchInFlightRef = {
       value: false,
     };
-    const stopExternalUpdateMonitors = await startTuiExternalUpdateMonitors({
+    const externalUpdateMonitors = await startTuiExternalUpdateMonitors({
       store: options.store,
       desktopLauncher: options.desktopLauncher,
       watchProcessManager: options.watchProcessManager,
@@ -630,6 +630,7 @@ export async function handleTuiCommand(options: {
           }
 
           await options.desktopLauncher.writeManagedState(managedState);
+          await externalUpdateMonitors.reconcileNow();
           return {
             statusMessage: `Opened Codex Desktop for "${name}".`,
             warningMessages: [],
@@ -656,7 +657,7 @@ export async function handleTuiCommand(options: {
           }),
       });
     } finally {
-      await stopExternalUpdateMonitors();
+      await externalUpdateMonitors.stop();
     }
 
     nextInitialQuery = "";
