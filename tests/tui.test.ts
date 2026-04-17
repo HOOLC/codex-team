@@ -862,6 +862,71 @@ describe("Account Dashboard TUI", () => {
     expect(stripAnsi(stdout.read())).toContain('Reloaded "alpha".');
   });
 
+  test("updates the current indicator immediately after a manual switch succeeds", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let loadCount = 0;
+    let resolveRefresh: ((snapshot: AccountDashboardSnapshot) => void) | null = null;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => {
+        loadCount += 1;
+        if (loadCount === 1) {
+          return createSnapshot("alpha");
+        }
+
+        return await new Promise<AccountDashboardSnapshot>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      },
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("j");
+      await flushLoop();
+      stdin.emitInput("\r");
+      await flushLoop();
+      await flushLoop();
+
+      const frame = latestDashboardFrame(stdout.read());
+      expect(frame).toContain('Switched to "beta".');
+      expect(frame).toContain("codexm | current beta");
+      expect(frame).toContain(">* beta");
+      expect(frame).toContain("beta [current]");
+      expect(frame).toContain("f reload");
+
+      stdin.emitInput("q");
+      await flushLoop();
+      const refreshResolver = resolveRefresh as ((snapshot: AccountDashboardSnapshot) => void) | null;
+      if (!refreshResolver) {
+        throw new Error("Expected refresh promise to be pending.");
+      }
+      refreshResolver(createSnapshot("beta"));
+
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } catch (error) {
+      stdin.emitInput("q");
+      await flushLoop();
+      const refreshResolver = resolveRefresh as ((snapshot: AccountDashboardSnapshot) => void) | null;
+      if (refreshResolver) {
+        refreshResolver(createSnapshot("beta"));
+      }
+      await tuiPromise;
+      throw error;
+    }
+  });
+
   test("waits for a queued refresh to settle before exiting", async () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();

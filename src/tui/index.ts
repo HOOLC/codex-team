@@ -1001,6 +1001,41 @@ function resolvePreferredSelection(
   };
 }
 
+function updateSnapshotCurrentIndicator(
+  snapshot: AccountDashboardSnapshot,
+  currentName: string,
+): AccountDashboardSnapshot {
+  const nextAccounts = snapshot.accounts.map((account) => {
+    const nextCurrent = account.name === currentName;
+    return account.current === nextCurrent
+      ? account
+      : {
+          ...account,
+          current: nextCurrent,
+        };
+  });
+  const nextHeaderLine = snapshot.headerLine.replace(
+    /(codexm \| current )(.+?)( \| )/u,
+    `$1${currentName}$3`,
+  );
+  const nextCurrentStatusLine = `Current managed account: ${currentName}`;
+
+  if (
+    nextHeaderLine === snapshot.headerLine
+    && nextCurrentStatusLine === snapshot.currentStatusLine
+    && nextAccounts.every((account, index) => account === snapshot.accounts[index])
+  ) {
+    return snapshot;
+  }
+
+  return {
+    ...snapshot,
+    headerLine: nextHeaderLine,
+    currentStatusLine: nextCurrentStatusLine,
+    accounts: nextAccounts,
+  };
+}
+
 function insertTextAtCursor(state: AccountDashboardState, value: string): AccountDashboardState {
   return {
     ...state,
@@ -1581,6 +1616,8 @@ export async function runAccountDashboardTui(
           reloadingCurrentAccount ? `Reloaded "${selected.name}".` : undefined,
         ),
       };
+      snapshot = updateSnapshotCurrentIndicator(snapshot, selected.name);
+      state = resolvePreferredSelection(snapshot, state, selected.name);
 
       if (optionsForAction.after === "open-codex") {
         render();
