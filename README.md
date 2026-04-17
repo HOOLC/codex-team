@@ -54,6 +54,7 @@ Inside the dashboard:
 - `o`: run `codex` in the current terminal, then return to the dashboard when it exits
 - `O`: run `codex` with an isolated managed snapshot, then return to the dashboard when it exits
 - `d`: open or focus Codex Desktop without leaving the dashboard
+- `Shift+D`: relaunch Codex Desktop for the selected account; when an unmanaged Desktop instance is already running, confirm before forcing it closed
 
 ### 3. Keep working automatically
 
@@ -139,7 +140,7 @@ This is the main command to use when deciding which account to switch to next.
 
 Use `codexm --help` for the full command reference. Share bundles are plain auth snapshots intended only for fully trusted recipients.
 
-In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `f` / `o` / `O` / `d`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `Esc` backs out of prompts; `q` quits from the main dashboard. When no detached `codexm watch` is already running and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active, avoids duplicating other live watch owners, and hands that watch off to a detached watcher when you quit.
+In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `f` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `Esc` backs out of prompts; `q` quits from the main dashboard. When no detached `codexm watch` is already running and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active, avoids duplicating other live watch owners, and hands that watch off to a detached watcher when you quit.
 
 ## When should I use each command?
 

@@ -28,7 +28,10 @@ import {
 import { buildListSummary } from "../cli/quota-summary.js";
 import { selectCurrentNextResetWindow, toAutoSwitchCandidate } from "../cli/quota-ranking.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
-import { resolveManagedDesktopState } from "../desktop/managed-state.js";
+import {
+  isOnlyManagedDesktopInstanceRunning,
+  resolveManagedDesktopState,
+} from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
 import type { WatchProcessManager } from "../watch/process.js";
 import type { WatchLeaseManager } from "../watch/lease.js";
@@ -593,14 +596,14 @@ export async function handleTuiCommand(options: {
             localSwitchInFlightRef.value = false;
           }
         },
-        openDesktop: async (name) => {
+        openDesktop: async (name, desktopOptions = {}) => {
           const appPath = await options.desktopLauncher.findInstalledApp();
           if (!appPath) {
             throw new Error("Codex Desktop not found at /Applications/Codex.app.");
           }
 
           const runningApps = await options.desktopLauncher.listRunningApps();
-          if (runningApps.length > 0) {
+          if (runningApps.length > 0 && !desktopOptions.forceRelaunch) {
             await options.desktopLauncher.activateApp(appPath);
             const warnings = (await options.desktopLauncher.isManagedDesktopRunning())
               ? []
@@ -614,8 +617,20 @@ export async function handleTuiCommand(options: {
             };
           }
 
-          await options.desktopLauncher.launch(appPath);
           const platform = await getPlatform();
+          if (runningApps.length > 0 && desktopOptions.forceRelaunch) {
+            const managedDesktopState = await options.desktopLauncher.readManagedState();
+            const canRelaunchGracefully = isOnlyManagedDesktopInstanceRunning(
+              runningApps,
+              managedDesktopState,
+              platform,
+            );
+            await options.desktopLauncher.quitRunningApps({
+              force: !canRelaunchGracefully,
+            });
+          }
+
+          await options.desktopLauncher.launch(appPath);
           const managedState = await resolveManagedDesktopState(
             options.desktopLauncher,
             appPath,
@@ -632,7 +647,9 @@ export async function handleTuiCommand(options: {
           await options.desktopLauncher.writeManagedState(managedState);
           await externalUpdateMonitors.reconcileNow();
           return {
-            statusMessage: `Opened Codex Desktop for "${name}".`,
+            statusMessage: runningApps.length > 0 && desktopOptions.forceRelaunch
+              ? `Relaunched Codex Desktop for "${name}".`
+              : `Opened Codex Desktop for "${name}".`,
             warningMessages: [],
           };
         },

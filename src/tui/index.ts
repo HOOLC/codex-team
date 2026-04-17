@@ -151,6 +151,7 @@ export interface RunAccountDashboardTuiOptions {
   }>;
   openDesktop?: (
     name: string,
+    options?: { forceRelaunch?: boolean },
   ) => Promise<{
     statusMessage?: string;
     warningMessages?: string[];
@@ -238,6 +239,9 @@ type PromptState =
 
 type ConfirmState = {
   kind: "delete";
+  accountName: string;
+} | {
+  kind: "desktop-relaunch";
   accountName: string;
 };
 
@@ -864,9 +868,11 @@ function renderFilterLine(
 
 function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
   const forceLabel = selectedAccount?.current ? "f reload" : "f force";
-  const hint = width < 88
-    ? `Enter switch | ${forceLabel} | o codex | O isolated | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`
-    : `j/k move | / filter | Enter switch | ${forceLabel} | o codex | O isolated | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`;
+  const hint = width < 92
+    ? `Enter | ${forceLabel} | o run | O iso | d desk | D relaunch | q quit`
+    : width < 132
+      ? `/ filter | Enter | ${forceLabel} | o run | O iso | d desk | D relaunch | e/E exp | i imp | x del | u undo | q quit`
+      : `j/k move | / filter | Enter | ${forceLabel} | o run | O iso | d desk | D relaunch | e/E exp | i imp | x del | u undo | r refresh | q quit`;
   return truncate(color(hint, "dim"), width);
 }
 
@@ -1149,7 +1155,9 @@ export async function runAccountDashboardTui(
     const footerOverride = promptState
       ? `${promptState.label} ${formatInteractiveQuery(promptState.value, promptState.cursor, true)}`
       : confirmState
-        ? `confirm: Delete account "${confirmState.accountName}"? [y/N]`
+        ? confirmState.kind === "delete"
+          ? `confirm: Delete account "${confirmState.accountName}"? [y/N]`
+          : `confirm: Relaunch Desktop for "${confirmState.accountName}"? May force-close non-codexm app. [y/N]`
         : null;
     const hintOverride = promptState
       ? color("Enter confirm | Esc back | Ctrl-U clear | Ctrl-C quit", "dim")
@@ -1165,7 +1173,9 @@ export async function runAccountDashboardTui(
             ? "Enter a bundle path to preview it. Enter confirms; Esc goes back."
             : "Enter an output path for the share bundle. Enter confirms; Esc goes back."
         : confirmState
-          ? `Delete account "${confirmState.accountName}"? Press y to confirm.`
+          ? confirmState.kind === "delete"
+            ? `Delete account "${confirmState.accountName}"? Press y to confirm.`
+            : `Relaunch Desktop for "${confirmState.accountName}"? Press y to confirm.`
           : null;
 
     stdout.write(
@@ -1456,7 +1466,10 @@ export async function runAccountDashboardTui(
       : base;
   };
 
-  const runDesktopAction = async (name: string) => {
+  const runDesktopAction = async (
+    name: string,
+    optionsForAction: { forceRelaunch?: boolean } = {},
+  ) => {
     if (!options.openDesktop) {
       state = {
         ...state,
@@ -1466,10 +1479,12 @@ export async function runAccountDashboardTui(
       return;
     }
 
-    busyMessage = `Opening Codex Desktop for "${name}"...`;
+    busyMessage = optionsForAction.forceRelaunch
+      ? `Relaunching Codex Desktop for "${name}"...`
+      : `Opening Codex Desktop for "${name}"...`;
     render();
 
-    const result = await options.openDesktop(name);
+    const result = await options.openDesktop(name, optionsForAction);
     state = {
       ...state,
       statusMessage: withOperationStatus(name, result),
@@ -1479,7 +1494,7 @@ export async function runAccountDashboardTui(
 
   const runSwitchAction = async (optionsForAction: {
     force: boolean;
-    after: ExitAction | "desktop" | null;
+    after: ExitAction | "desktop" | "desktop-force" | null;
   }) => {
     const filtered = getFilteredAccounts(snapshot, state.query);
     const selected = filtered[state.selected] ?? null;
@@ -1508,6 +1523,11 @@ export async function runAccountDashboardTui(
         requestRefresh(selected.name);
         return;
       }
+      if (optionsForAction.after === "desktop-force") {
+        await runDesktopAction(selected.name, { forceRelaunch: true });
+        requestRefresh(selected.name);
+        return;
+      }
 
       state = {
         ...state,
@@ -1528,6 +1548,8 @@ export async function runAccountDashboardTui(
           ? `opening isolated Codex TUI for "${selected.name}"`
         : optionsForAction.after === "desktop"
           ? `opening Codex Desktop for "${selected.name}"`
+        : optionsForAction.after === "desktop-force"
+          ? `relaunching Codex Desktop for "${selected.name}"`
           : `switching "${selected.name}"`,
     };
     busyMessage = reloadingCurrentAccount
@@ -1538,6 +1560,8 @@ export async function runAccountDashboardTui(
         ? `Switching to "${selected.name}" and opening isolated Codex TUI...`
       : optionsForAction.after === "desktop"
         ? `Switching to "${selected.name}" and opening Codex Desktop...`
+      : optionsForAction.after === "desktop-force"
+        ? `Switching to "${selected.name}" and relaunching Codex Desktop...`
         : optionsForAction.force
           ? `Force-switching to "${selected.name}"...`
           : `Switching to "${selected.name}"...`;
@@ -1579,12 +1603,17 @@ export async function runAccountDashboardTui(
         requestRefresh(selected.name);
         return;
       }
+      if (optionsForAction.after === "desktop-force") {
+        await runDesktopAction(selected.name, { forceRelaunch: true });
+        requestRefresh(selected.name);
+        return;
+      }
 
       requestRefresh(selected.name);
     } catch (error) {
       state = {
         ...state,
-        statusMessage: optionsForAction.after === "desktop"
+        statusMessage: optionsForAction.after === "desktop" || optionsForAction.after === "desktop-force"
           ? `Desktop open failed: ${(error as Error).message}`
           : optionsForAction.after === "open-codex"
             ? `Codex TUI open failed: ${(error as Error).message}`
@@ -1663,6 +1692,30 @@ export async function runAccountDashboardTui(
 
     confirmState = {
       kind: "delete",
+      accountName: selected.name,
+    };
+    detailOverride = null;
+    render();
+  };
+
+  const beginDesktopRelaunchConfirm = () => {
+    if (!options.openDesktop) {
+      state = {
+        ...state,
+        statusMessage: "Desktop open is unavailable in this session.",
+      };
+      render();
+      return;
+    }
+
+    const filtered = getFilteredAccounts(snapshot, state.query);
+    const selected = filtered[state.selected] ?? null;
+    if (!selected) {
+      return;
+    }
+
+    confirmState = {
+      kind: "desktop-relaunch",
       accountName: selected.name,
     };
     detailOverride = null;
@@ -1831,10 +1884,27 @@ export async function runAccountDashboardTui(
     }
 
     const accountName = confirmState.accountName;
+    const confirmKind = confirmState.kind;
     confirmState = null;
-    await runSimpleAction("Delete", async () =>
-      await options.deleteAccount!(accountName),
-    );
+    if (confirmKind === "delete") {
+      await runSimpleAction("Delete", async () =>
+        await options.deleteAccount!(accountName),
+      );
+      return;
+    }
+
+    const filtered = getFilteredAccounts(snapshot, state.query);
+    const selectedIndex = filtered.findIndex((account) => account.name === accountName);
+    if (selectedIndex >= 0) {
+      state = {
+        ...state,
+        selected: selectedIndex,
+      };
+    }
+    await runSwitchAction({
+      force: false,
+      after: "desktop-force",
+    });
   };
 
   const handleBrowseKeypress = async (event: InputEvent): Promise<void> => {
@@ -1977,6 +2047,10 @@ export async function runAccountDashboardTui(
         force: false,
         after: "desktop",
       });
+      return;
+    }
+    if (event.value === "D") {
+      beginDesktopRelaunchConfirm();
       return;
     }
     if (event.name === "enter") {

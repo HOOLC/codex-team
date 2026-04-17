@@ -305,9 +305,11 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("Fetched: 2026-04-16 13:20");
     expect(screen).toContain("Bottleneck: 5H");
     expect(screen).toContain("filter:");
-    expect(screen).toContain("Enter switch");
-    expect(screen).toContain("o codex");
-    expect(screen).toContain("e export");
+    expect(screen).toContain("Enter");
+    expect(screen).toContain("o run");
+    expect(screen).toContain("D relaunch");
+    expect(screen).toContain("e/E exp");
+    expect(screen).toContain("q quit");
   });
 
   test("renders a reload hint when the selected account is already current", () => {
@@ -609,6 +611,58 @@ describe("Account Dashboard TUI", () => {
     });
   });
 
+  test("confirms Shift+D and relaunches Desktop without leaving the dashboard", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const switchCalls: string[] = [];
+    const desktopCalls: Array<{ name: string; forceRelaunch?: boolean }> = [];
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async (name) => {
+        switchCalls.push(name);
+        return {
+          statusMessage: `Switched to "${name}".`,
+          warningMessages: [],
+        };
+      },
+      openDesktop: async (name, options) => {
+        desktopCalls.push({
+          name,
+          forceRelaunch: options?.forceRelaunch,
+        });
+        return {
+          statusMessage: `Relaunched Codex Desktop for "${name}".`,
+          warningMessages: [],
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("j");
+    await flushLoop();
+    stdin.emitInput("D");
+    await flushLoop();
+    expect(latestDashboardFrame(stdout.read())).toContain('confirm: Relaunch Desktop for "beta"?');
+
+    stdin.emitInput("y");
+    await flushLoop();
+    await flushLoop();
+
+    expect(desktopCalls).toEqual([{ name: "beta", forceRelaunch: true }]);
+    expect(switchCalls).toEqual(["beta"]);
+    expect(latestDashboardFrame(stdout.read())).toContain('Relaunched Codex Desktop for "beta".');
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+  });
+
   test("starts the foreground watch immediately after opening a managed Desktop from the dashboard", async () => {
     const homeDir = await createTempHome();
     const stdin = createInteractiveStdin();
@@ -685,6 +739,88 @@ describe("Account Dashboard TUI", () => {
 
       expect(result).toBe(0);
       expect(foregroundWatchStarts).toBe(1);
+    } finally {
+      restorePlatform();
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("force relaunches a non-managed Desktop instance from the dashboard", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    const restorePlatform = setPlatformForTesting("darwin");
+    const quitCalls: Array<{ force?: boolean }> = [];
+    const launchCalls: string[] = [];
+    let managedDesktopRunning = false;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const result = await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => managedDesktopRunning
+            ? [{ pid: 65432, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=9223" }]
+            : [{ pid: 12345, command: "/usr/local/bin/codex --remote-debugging-port=9223" }],
+          readManagedState: async () => null,
+          quitRunningApps: async (options) => {
+            quitCalls.push(options ?? {});
+            managedDesktopRunning = true;
+          },
+          launch: async (appPath) => {
+            launchCalls.push(appPath);
+            managedDesktopRunning = true;
+          },
+          writeManagedState: async () => undefined,
+          isManagedDesktopRunning: async () => managedDesktopRunning,
+          readManagedCurrentQuota: async () => null,
+          watchManagedQuotaSignals: async (options) => {
+            await new Promise<void>((resolve) => {
+              if (options?.signal?.aborted) {
+                resolve();
+                return;
+              }
+
+              options?.signal?.addEventListener("abort", () => {
+                resolve();
+              }, { once: true });
+            });
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        runDashboardTuiImpl: async (options) => {
+          if (!options.openDesktop) {
+            throw new Error("Expected openDesktop callback.");
+          }
+          await options.openDesktop("alpha", { forceRelaunch: true });
+          return {
+            code: 0,
+            action: "quit",
+          };
+        },
+      });
+
+      expect(result).toBe(0);
+      expect(quitCalls).toEqual([{ force: true }]);
+      expect(launchCalls).toEqual(["/Applications/Codex.app"]);
     } finally {
       restorePlatform();
       await cleanupTempHome(homeDir);
