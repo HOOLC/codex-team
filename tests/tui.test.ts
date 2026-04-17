@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
 
@@ -42,6 +43,94 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
     currentStatusLine: `Current managed account: ${currentName}`,
     summaryLine: "Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, pro x1",
     poolLine: "Available: bottleneck 0.55 | 5H->1W 0.82 | 1W 0.55 (plus 1W)",
+    usageSummary: {
+      generated_at: "2026-04-16T13:24:00.000Z",
+      timezone: "UTC",
+      windows: {
+        today: {
+          input_tokens: 18000,
+          cached_input_tokens: 3000,
+          output_tokens: 9000,
+          total_tokens: 27000,
+          estimated_input_cost_usd: 0.05,
+          estimated_output_cost_usd: 0.08,
+          estimated_total_cost_usd: 0.13,
+          priced_tokens: 27000,
+          unpriced_tokens: 0,
+        },
+        "7d": {
+          input_tokens: 182000,
+          cached_input_tokens: 30000,
+          output_tokens: 96000,
+          total_tokens: 278000,
+          estimated_input_cost_usd: 0.42,
+          estimated_output_cost_usd: 0.71,
+          estimated_total_cost_usd: 1.13,
+          priced_tokens: 278000,
+          unpriced_tokens: 0,
+        },
+        "30d": {
+          input_tokens: 420000,
+          cached_input_tokens: 90000,
+          output_tokens: 210000,
+          total_tokens: 630000,
+          estimated_input_cost_usd: 1.02,
+          estimated_output_cost_usd: 1.91,
+          estimated_total_cost_usd: 2.93,
+          priced_tokens: 630000,
+          unpriced_tokens: 0,
+        },
+        "all-time": {
+          input_tokens: 620000,
+          cached_input_tokens: 120000,
+          output_tokens: 310000,
+          total_tokens: 930000,
+          estimated_input_cost_usd: 1.52,
+          estimated_output_cost_usd: 2.81,
+          estimated_total_cost_usd: 4.33,
+          priced_tokens: 930000,
+          unpriced_tokens: 0,
+        },
+      },
+      daily: [
+        {
+          date: "2026-04-16",
+          input_tokens: 18000,
+          cached_input_tokens: 3000,
+          output_tokens: 9000,
+          total_tokens: 27000,
+          estimated_input_cost_usd: 0.05,
+          estimated_output_cost_usd: 0.08,
+          estimated_total_cost_usd: 0.13,
+          priced_tokens: 27000,
+          unpriced_tokens: 0,
+        },
+        {
+          date: "2026-04-15",
+          input_tokens: 22000,
+          cached_input_tokens: 4000,
+          output_tokens: 11000,
+          total_tokens: 33000,
+          estimated_input_cost_usd: 0.06,
+          estimated_output_cost_usd: 0.09,
+          estimated_total_cost_usd: 0.15,
+          priced_tokens: 33000,
+          unpriced_tokens: 0,
+        },
+        {
+          date: "2026-04-14",
+          input_tokens: 9000,
+          cached_input_tokens: 1000,
+          output_tokens: 5000,
+          total_tokens: 14000,
+          estimated_input_cost_usd: 0.03,
+          estimated_output_cost_usd: 0.05,
+          estimated_total_cost_usd: 0.08,
+          priced_tokens: 14000,
+          unpriced_tokens: 0,
+        },
+      ],
+    },
     warnings: ["beta using cached quota from 2026-04-15T08:00:00.000Z after refresh failed"],
     failures: [{ name: "gamma", error: "Failed to refresh quota for \"gamma\": 429" }],
     accounts: [
@@ -200,6 +289,8 @@ describe("Account Dashboard TUI", () => {
     );
 
     expect(screen).toContain("codexm | current beta | 2/3 usable | updated 13:24");
+    expect(screen).toContain("Usage: today");
+    expect(screen).toContain("Trend 30d:");
     expect(screen).toContain("NAME");
     expect(screen).toContain("IDENTITY");
     expect(screen).toContain("USED");
@@ -239,6 +330,7 @@ describe("Account Dashboard TUI", () => {
           currentStatusLine: "Current auth: missing",
           summaryLine: "Accounts: 0/0 usable | blocked: 1W 0, 5H 0",
           poolLine: "Available: bottleneck - | 5H->1W - | 1W - (plus 1W)",
+          usageSummary: null,
           warnings: [],
           failures: [],
           accounts: [],
@@ -272,6 +364,20 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("3.5h");
     expect(screen).toContain("36%");
     expect(screen).toContain("27%");
+  });
+
+  test("hides the trend line on shorter terminals while keeping the usage summary", () => {
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot: createSnapshot("alpha"),
+        state: createInitialAccountDashboardState(),
+        width: 120,
+        height: 20,
+      }),
+    );
+
+    expect(screen).toContain("Usage: today");
+    expect(screen).not.toContain("Trend 30d:");
   });
 
   test("hides the ETA list column when no account has ETA history", () => {
@@ -424,6 +530,82 @@ describe("Account Dashboard TUI", () => {
       action: "open-codex",
     });
     expect(switchedNames).toEqual(["beta"]);
+  });
+
+  test("returns an open-isolated-codex action after switching to the selected account", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const switchedNames: string[] = [];
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async (name) => {
+        switchedNames.push(name);
+        return {
+          statusMessage: `Switched to "${name}".`,
+          warningMessages: [],
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("j");
+    await flushLoop();
+    stdin.emitInput("O");
+
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "open-isolated-codex",
+    });
+    expect(switchedNames).toEqual(["beta"]);
+  });
+
+  test("keeps the dashboard open after opening Desktop", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const switchCalls: string[] = [];
+    const desktopCalls: string[] = [];
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async (name) => {
+        switchCalls.push(name);
+        return {
+          statusMessage: `Switched to "${name}".`,
+          warningMessages: [],
+        };
+      },
+      openDesktop: async (name) => {
+        desktopCalls.push(name);
+        return {
+          statusMessage: `Opened Codex Desktop for "${name}".`,
+          warningMessages: [],
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("j");
+    await flushLoop();
+    stdin.emitInput("d");
+    await flushLoop();
+    await flushLoop();
+
+    expect(desktopCalls).toEqual(["beta"]);
+    expect(switchCalls).toEqual(["beta"]);
+    expect(latestDashboardFrame(stdout.read())).toContain('Opened Codex Desktop for "beta".');
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
   });
 
   test("force-reloads the current account instead of short-circuiting", async () => {
@@ -1171,6 +1353,427 @@ describe("Account Dashboard TUI", () => {
       expect(foregroundWatchAborts).toBe(1);
       expect(authWatcherClosed).toBe(1);
       expect(stderr.read()).toBe("");
+    } finally {
+      if (!settled && tuiPromise) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("reopens the dashboard after running codex from the o shortcut", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    const runDashboardCalls: string[] = [];
+    const runCodexCalls: Array<{ accountId: string | null | undefined; authFilePath?: string }> = [];
+
+    try {
+      const store = createAccountStore(homeDir);
+      const result = await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub(),
+        watchProcessManager: createWatchProcessManagerStub(),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async (options) => {
+          runCodexCalls.push({
+            accountId: options.accountId,
+            authFilePath: options.authFilePath,
+          });
+          return {
+            exitCode: 0,
+            restartCount: 0,
+          };
+        },
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        runDashboardTuiImpl: async (options) => {
+          runDashboardCalls.push(options.initialQuery ?? "");
+          return runDashboardCalls.length === 1
+            ? {
+                code: 0,
+                action: "open-codex",
+                preferredName: "alpha",
+              }
+            : {
+                code: 0,
+                action: "quit",
+              };
+        },
+      });
+
+      expect(result).toBe(0);
+      expect(runCodexCalls).toHaveLength(1);
+      expect(runCodexCalls[0]?.authFilePath).toBeUndefined();
+      expect(runDashboardCalls).toHaveLength(2);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("reopens the dashboard after running isolated codex from the O shortcut", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    const overlayDir = join(homeDir, "overlay-home");
+    const runCodexCalls: Array<{ accountId: string | null | undefined; authFilePath?: string; disableAuthWatch?: boolean }> = [];
+    let cleanupCalls = 0;
+    let samplerStopped = 0;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const result = await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub(),
+        watchProcessManager: createWatchProcessManagerStub(),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async (options) => {
+          runCodexCalls.push({
+            accountId: options.accountId,
+            authFilePath: options.authFilePath,
+            disableAuthWatch: options.disableAuthWatch,
+          });
+          return {
+            exitCode: 0,
+            restartCount: 0,
+          };
+        },
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        runDashboardTuiImpl: async () => {
+          if (runCodexCalls.length === 0) {
+            return {
+              code: 0,
+              action: "open-isolated-codex",
+              preferredName: "beta",
+            };
+          }
+          return {
+            code: 0,
+            action: "quit",
+          };
+        },
+        prepareIsolatedRunImpl: async () => ({
+          account: {
+            name: "beta",
+            auth_mode: "chatgpt",
+            account_id: "acct-beta",
+            user_id: "user-beta",
+            identity: "acct-beta:user-beta",
+            email: "beta@example.com",
+            created_at: "2026-04-16T00:00:00.000Z",
+            updated_at: "2026-04-16T00:00:00.000Z",
+            last_switched_at: null,
+            quota: {
+              status: "ok",
+            },
+            authPath: `${overlayDir}/auth.json`,
+            metaPath: `${overlayDir}/meta.json`,
+            configPath: null,
+            duplicateAccountId: false,
+          },
+          authFilePath: `${overlayDir}/auth.json`,
+          codexHomePath: overlayDir,
+          env: {
+            ...process.env,
+            CODEX_HOME: overlayDir,
+          },
+          runId: "overlay-1",
+          sessionsDirPath: `${overlayDir}/sessions`,
+          cleanup: async () => {
+            cleanupCalls += 1;
+          },
+        }),
+        startIsolatedQuotaHistorySamplerImpl: () => ({
+          stop: async () => {
+            samplerStopped += 1;
+          },
+        }),
+      });
+
+      expect(result).toBe(0);
+      expect(runCodexCalls).toEqual([
+        expect.objectContaining({
+          accountId: "acct-beta",
+          authFilePath: `${overlayDir}/auth.json`,
+          disableAuthWatch: true,
+        }),
+      ]);
+      expect(cleanupCalls).toBe(1);
+      expect(samplerStopped).toBe(1);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("does not start a foreground watch when another foreground watch lease is active", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    let foregroundWatchStarts = 0;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const tuiPromise = handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => null,
+          watchManagedQuotaSignals: async () => {
+            foregroundWatchStarts += 1;
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }),
+        watchLeaseManager: {
+          getStatus: async () => ({
+            active: true,
+            state: {
+              owner_kind: "tui-foreground",
+              pid: 54321,
+              started_at: "2026-04-17T00:00:00.000Z",
+              auto_switch: true,
+              debug: false,
+            },
+          }),
+          claimForeground: async () => ({
+            acquired: false,
+            state: {
+              owner_kind: "tui-foreground",
+              pid: 54321,
+              started_at: "2026-04-17T00:00:00.000Z",
+              auto_switch: true,
+              debug: false,
+            },
+          }),
+          recordDetached: async () => undefined,
+          release: async () => undefined,
+        },
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+      });
+
+      await flushLoop();
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toBe(0);
+      expect(foregroundWatchStarts).toBe(0);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("hands foreground watch off to a detached watch on quit", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    let settled = false;
+    let foregroundWatchStarts = 0;
+    let foregroundWatchAborts = 0;
+    const detachedStarts: Array<{ autoSwitch: boolean; debug: boolean }> = [];
+    let tuiPromise: Promise<number> | null = null;
+    let resolveForegroundWatchStarted: (() => void) | null = null;
+    const foregroundWatchStarted = new Promise<void>((resolve) => {
+      resolveForegroundWatchStarted = resolve;
+    });
+
+    try {
+      const store = createAccountStore(homeDir);
+      tuiPromise = handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => null,
+          watchManagedQuotaSignals: async (options) => {
+            foregroundWatchStarts += 1;
+            resolveForegroundWatchStarted?.();
+            await new Promise<void>((resolve) => {
+              if (options?.signal?.aborted) {
+                foregroundWatchAborts += 1;
+                resolve();
+                return;
+              }
+
+              options?.signal?.addEventListener("abort", () => {
+                foregroundWatchAborts += 1;
+                resolve();
+              }, { once: true });
+            });
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+          startDetached: async (options) => {
+            detachedStarts.push(options);
+            return {
+              pid: 54321,
+              started_at: "2026-04-17T00:00:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: options.autoSwitch,
+              debug: options.debug,
+            };
+          },
+        }),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+      });
+      void tuiPromise.finally(() => {
+        settled = true;
+      });
+
+      await Promise.race([
+        foregroundWatchStarted,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => {
+            reject(new Error("Expected foreground watch to start."));
+          }, 250);
+        }),
+      ]);
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toBe(0);
+      expect(foregroundWatchStarts).toBe(1);
+      expect(foregroundWatchAborts).toBe(1);
+      expect(detachedStarts).toEqual([{ autoSwitch: true, debug: false }]);
+    } finally {
+      if (!settled && tuiPromise) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("stops the foreground watch after a detached watch appears", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    let settled = false;
+    let foregroundWatchStarts = 0;
+    let foregroundWatchAborts = 0;
+    let detachedRunning = false;
+    let tuiPromise: Promise<number> | null = null;
+    let resolveForegroundWatchStarted: (() => void) | null = null;
+    const foregroundWatchStarted = new Promise<void>((resolve) => {
+      resolveForegroundWatchStarted = resolve;
+    });
+
+    try {
+      const store = createAccountStore(homeDir);
+      tuiPromise = handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => null,
+          watchManagedQuotaSignals: async (options) => {
+            foregroundWatchStarts += 1;
+            resolveForegroundWatchStarted?.();
+            await new Promise<void>((resolve) => {
+              if (options?.signal?.aborted) {
+                foregroundWatchAborts += 1;
+                resolve();
+                return;
+              }
+
+              options?.signal?.addEventListener("abort", () => {
+                foregroundWatchAborts += 1;
+                resolve();
+              }, { once: true });
+            });
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: detachedRunning,
+            state: detachedRunning
+              ? {
+                  pid: 77777,
+                  started_at: "2026-04-17T00:00:00.000Z",
+                  log_path: "/tmp/watch.log",
+                  auto_switch: true,
+                  debug: false,
+                }
+              : null,
+          }),
+        }),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        foregroundWatchLeasePollIntervalMs: 10,
+      });
+      void tuiPromise.finally(() => {
+        settled = true;
+      });
+
+      await Promise.race([
+        foregroundWatchStarted,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => {
+            reject(new Error("Expected foreground watch to start."));
+          }, 250);
+        }),
+      ]);
+      detachedRunning = true;
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 80);
+      });
+      expect(foregroundWatchStarts).toBe(1);
+      expect(foregroundWatchAborts).toBe(1);
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toBe(0);
     } finally {
       if (!settled && tuiPromise) {
         stdin.emitInput("q");

@@ -51,6 +51,7 @@ import {
   handleDoctorCommand,
   handleListCommand,
 } from "./commands/inspection.js";
+import { handleUsageCommand } from "./commands/usage.js";
 import { performManualSwitch } from "./commands/switch.js";
 import { handleTuiCommand } from "./commands/tui.js";
 import {
@@ -231,7 +232,20 @@ export async function runCli(
           debug,
           json,
           targetName: parsed.positionals[0],
+          usageWindow: parsed.optionValues.get("--usage-window"),
           verbose: parsed.flags.has("--verbose"),
+        });
+      }
+
+      case "usage": {
+        return await handleUsageCommand({
+          positionals: parsed.positionals,
+          window: parsed.optionValues.get("--window"),
+          daily: parsed.flags.has("--daily"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
         });
       }
 

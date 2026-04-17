@@ -13,6 +13,7 @@
     { "flag": "--device-auth", "description": "add account with device-code login", "global": false },
     { "flag": "--dry-run", "description": "show the selected account without switching", "global": false, "aliases": ["-n"] },
     { "flag": "--force", "description": "skip confirmation and force the action", "global": false, "aliases": ["-f"] },
+    { "flag": "--daily", "description": "include per-day usage breakdown", "global": false },
     { "flag": "--json", "description": "print JSON output", "global": false, "aliases": ["-j"] },
     { "flag": "--name", "description": "set the local account name for import", "global": false, "takesValue": true },
     { "flag": "--no-auto-switch", "description": "watch without switching accounts automatically", "global": false },
@@ -20,8 +21,10 @@
     { "flag": "--refresh", "description": "refresh quota data before printing", "global": false },
     { "flag": "--status", "description": "show background watch status", "global": false },
     { "flag": "--stop", "description": "stop the background watch", "global": false },
+    { "flag": "--usage-window", "description": "select the embedded usage summary window", "global": false, "takesValue": true },
     { "flag": "--verbose", "description": "show expanded score inputs and diagnostics", "global": false, "aliases": ["-v"] },
     { "flag": "--watch", "description": "start a detached watch after launch", "global": false },
+    { "flag": "--window", "description": "select the usage summary window", "global": false, "takesValue": true },
     { "flag": "--with-api-key", "description": "add account by reading an API key from stdin", "global": false },
     { "flag": "--yes", "description": "skip removal confirmation", "global": false, "aliases": ["-y"] }
   ],
@@ -57,10 +60,10 @@
     {
       "name": "list",
       "aliases": ["ls"],
-      "flags": ["--json", "--verbose"],
-      "helpUsages": ["codexm list [name] [--verbose] [--json]"],
+      "flags": ["--json", "--usage-window", "--verbose"],
+      "helpUsages": ["codexm list [name] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"],
       "usageErrors": {
-        "default": "codexm list [name] [--verbose] [--json]"
+        "default": "codexm list [name] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"
       }
     },
     {
@@ -145,6 +148,14 @@
       "helpUsages": ["codexm tui [query]"],
       "usageErrors": {
         "default": "codexm tui [query]"
+      }
+    },
+    {
+      "name": "usage",
+      "flags": ["--window", "--daily", "--json"],
+      "helpUsages": ["codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]"],
+      "usageErrors": {
+        "default": "codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]"
       }
     },
     {
@@ -278,10 +289,10 @@
             }
           },
           {
-            "usage": "codexm list [--verbose]",
+            "usage": "codexm list [--usage-window <today|7d|30d|all-time>] [--verbose]",
             "description": {
-              "en": "show saved accounts, quota usage, score, ETA, and reset times",
-              "zh-CN": "查看所有保存账号、quota、score、ETA 和 reset 时间"
+              "en": "show saved accounts plus an embedded local usage summary",
+              "zh-CN": "查看所有保存账号，并附带一行本地 usage 摘要"
             }
           },
           {
@@ -303,6 +314,13 @@
             "description": {
               "en": "explicitly open the account dashboard, optionally with an initial filter",
               "zh-CN": "显式打开账号面板，可选带初始筛选词"
+            }
+          },
+          {
+            "usage": "codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]",
+            "description": {
+              "en": "summarize local token usage and estimated cost from session logs",
+              "zh-CN": "从本地 session 日志汇总 token usage 和 estimated cost"
             }
           }
         ]

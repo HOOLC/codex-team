@@ -22,9 +22,12 @@ async function writeShareBundle(
   filePath: string,
   options: {
     authSnapshot: ReturnType<typeof createAuthPayload>;
-    sourceType?: "current" | "managed";
-    sourceName?: string | null;
-    suggestedName?: string | null;
+    profile?: {
+      account_id?: string;
+      user_id?: string;
+      email?: string;
+      plan?: string;
+    } | null;
   },
 ): Promise<void> {
   await import("node:fs/promises").then(async ({ writeFile }) => {
@@ -32,13 +35,16 @@ async function writeShareBundle(
       filePath,
       `${JSON.stringify(
         {
-          schema_version: 1,
+          kind: "auth_bundle",
+          version: 1,
           exported_at: "2026-04-16T10:20:30.000Z",
-          source_type: options.sourceType ?? "managed",
-          source_name: options.sourceName ?? null,
-          suggested_name: options.suggestedName ?? null,
-          auth_snapshot: options.authSnapshot,
-          config_snapshot: null,
+          auth: {
+            kind: "chatgpt",
+            auth_json: options.authSnapshot,
+            ...(options.profile === null || options.profile === undefined
+              ? {}
+              : { profile: options.profile }),
+          },
         },
         null,
         2,
@@ -67,10 +73,13 @@ describe("TUI Share Actions", () => {
 
       expect(result.statusMessage).toBe(`Exported share bundle to ${bundlePath}.`);
       expect(JSON.parse(await readFile(bundlePath, "utf8"))).toMatchObject({
-        source_type: "current",
-        auth_snapshot: {
-          tokens: {
-            account_id: "acct-export-current",
+        kind: "auth_bundle",
+        auth: {
+          kind: "chatgpt",
+          auth_json: {
+            tokens: {
+              account_id: "acct-export-current",
+            },
           },
         },
       });
@@ -90,17 +99,21 @@ describe("TUI Share Actions", () => {
       const bundlePath = join(homeDir, "preview-share.codexm.json");
       await writeShareBundle(bundlePath, {
         authSnapshot: createAuthPayload("acct-preview", "chatgpt", "team", "user-preview"),
-        sourceType: "managed",
-        sourceName: "preview-main",
-        suggestedName: "preview-main",
+        profile: {
+          account_id: "acct-preview",
+          user_id: "user-preview",
+          email: "acct-preview@example.com",
+          plan: "team",
+        },
       });
 
       const preview = await previewShareBundleForTui(bundlePath);
 
       expect(preview.title).toBe("Import Bundle");
       expect(preview.bundlePath).toBe(bundlePath);
-      expect(preview.suggestedName).toBe("preview-main");
-      expect(preview.lines).toContain('Source: managed account "preview-main"');
+      expect(preview.suggestedName).toBeNull();
+      expect(preview.lines).toContain("Kind: auth_bundle");
+      expect(preview.lines).toContain("Auth kind: chatgpt");
       expect(preview.lines).toContain("Identity: acct-preview:user-preview");
     } finally {
       await cleanupTempHome(homeDir);
@@ -116,9 +129,12 @@ describe("TUI Share Actions", () => {
       await writeCurrentAuth(homeDir, "acct-before-import", "chatgpt", "plus", "user-before-import");
       await writeShareBundle(bundlePath, {
         authSnapshot: createAuthPayload("acct-import-tui", "chatgpt", "pro", "user-import-tui"),
-        sourceType: "managed",
-        sourceName: "source-main",
-        suggestedName: "source-main",
+        profile: {
+          account_id: "acct-import-tui",
+          user_id: "user-import-tui",
+          email: "acct-import-tui@example.com",
+          plan: "pro",
+        },
       });
 
       const result = await importShareBundleForTui({

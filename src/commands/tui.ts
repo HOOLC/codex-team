@@ -1,5 +1,4 @@
-import { watch, type FSWatcher } from "node:fs";
-import { basename, dirname } from "node:path";
+import { watch } from "node:fs";
 import { PassThrough } from "node:stream";
 
 import dayjs from "dayjs";
@@ -32,13 +31,18 @@ import { type CodexDesktopLauncher } from "../desktop/launcher.js";
 import { resolveManagedDesktopState } from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
 import type { WatchProcessManager } from "../watch/process.js";
+import type { WatchLeaseManager } from "../watch/lease.js";
 import {
   computeWatchHistoryEta,
   createWatchHistoryStore,
   filterWatchHistoryByScope,
   type WatchHistoryEtaContext,
 } from "../watch/history.js";
-import { runManagedDesktopWatchSession } from "../watch/session.js";
+import { LocalUsageService } from "../local-usage/service.js";
+import {
+  readLocalUsageSummaryCache,
+  writeLocalUsageSummaryCache,
+} from "../local-usage/summary-cache.js";
 import {
   runAccountDashboardTui,
   type AccountDashboardExternalUpdate,
@@ -53,300 +57,19 @@ import {
   importShareBundleForTui,
   previewShareBundleForTui,
 } from "./tui-share.js";
+import {
+  createAccountDashboardExternalUpdateFeed,
+  resolveCurrentManagedAccountLabel,
+  runDashboardCodexSession,
+  runDashboardIsolatedCodexSession,
+  startTuiExternalUpdateMonitors,
+  type CliStreams,
+  type DebugLogger,
+} from "./tui-runtime.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-type DebugLogger = (message: string) => void;
-
-interface CliStreams {
-  stdin: NodeJS.ReadStream;
-  stdout: NodeJS.WriteStream;
-  stderr: NodeJS.WriteStream;
-}
-
-interface AccountDashboardExternalUpdateFeed {
-  emit: (update: AccountDashboardExternalUpdate) => void;
-  subscribe: (
-    listener: (update: AccountDashboardExternalUpdate) => void,
-  ) => (() => void);
-}
-
-const DEFAULT_TUI_WATCH_QUOTA_MIN_READ_INTERVAL_MS = 30_000;
-const DEFAULT_TUI_WATCH_QUOTA_IDLE_READ_INTERVAL_MS = 120_000;
-const TUI_SWITCH_NOTICE_DEDUPE_MS = 1_500;
-
-function createAccountDashboardExternalUpdateFeed(): AccountDashboardExternalUpdateFeed {
-  let listener: ((update: AccountDashboardExternalUpdate) => void) | null = null;
-  const queued: AccountDashboardExternalUpdate[] = [];
-
-  return {
-    emit(update) {
-      if (listener) {
-        listener(update);
-        return;
-      }
-
-      queued.push(update);
-    },
-    subscribe(nextListener) {
-      listener = nextListener;
-      for (const update of queued.splice(0)) {
-        nextListener(update);
-      }
-
-      return () => {
-        if (listener === nextListener) {
-          listener = null;
-        }
-      };
-    },
-  };
-}
-
-async function resolveCurrentManagedAccountLabel(store: AccountStore): Promise<string | null> {
-  try {
-    const current = await store.getCurrentStatus();
-    return current.matched_accounts.length === 1 ? current.matched_accounts[0] : null;
-  } catch {
-    return null;
-  }
-}
-
-function createNullWriteStream(): NodeJS.WriteStream {
-  return {
-    write: () => true,
-  } as unknown as NodeJS.WriteStream;
-}
-
-function describeCurrentAccountSwitchMessage(
-  previousAccount: string | null,
-  nextAccount: string | null,
-): string {
-  if (previousAccount && nextAccount) {
-    return `Current account switched from "${previousAccount}" to "${nextAccount}".`;
-  }
-
-  if (nextAccount) {
-    return `Current account switched to "${nextAccount}".`;
-  }
-
-  return "Current managed account changed.";
-}
-
-function describeForegroundAutoSwitchMessage(
-  previousAccount: string,
-  nextAccount: string,
-  warnings: string[],
-): string {
-  const base = `Auto-switched from "${previousAccount}" to "${nextAccount}".`;
-  return warnings.length > 0 ? `${base} Warning: ${warnings[0]}` : base;
-}
-
-async function startTuiExternalUpdateMonitors(options: {
-  store: AccountStore;
-  desktopLauncher: CodexDesktopLauncher;
-  watchProcessManager: WatchProcessManager;
-  updateFeed: AccountDashboardExternalUpdateFeed;
-  currentManagedAccountRef: { value: string | null };
-  localSwitchInFlightRef: { value: boolean };
-  debugLog?: DebugLogger;
-  managedDesktopWaitStatusDelayMs: number;
-  managedDesktopWaitStatusIntervalMs: number;
-  authWatchImpl?: typeof watch;
-}): Promise<() => Promise<void>> {
-  const {
-    store,
-    desktopLauncher,
-    watchProcessManager,
-    updateFeed,
-    currentManagedAccountRef,
-    localSwitchInFlightRef,
-    debugLog,
-    managedDesktopWaitStatusDelayMs,
-    managedDesktopWaitStatusIntervalMs,
-    authWatchImpl,
-  } = options;
-  const authWatchDir = dirname(store.paths.currentAuthPath);
-  const authWatchFileName = basename(store.paths.currentAuthPath);
-  let stopped = false;
-  let authWatcher: FSWatcher | null = null;
-  let authDebounceTimer: NodeJS.Timeout | null = null;
-  let authWatcherRestartTimer: NodeJS.Timeout | null = null;
-  let foregroundWatchAbortController: AbortController | null = null;
-  let foregroundWatchPromise: Promise<number> | null = null;
-  let recentSwitchTarget: { value: string | null; recordedAt: number } | null = null;
-
-  const shouldSuppressSwitchNotice = (targetAccount: string | null): boolean =>
-    recentSwitchTarget !== null &&
-    recentSwitchTarget.value === targetAccount &&
-    Date.now() - recentSwitchTarget.recordedAt < TUI_SWITCH_NOTICE_DEDUPE_MS;
-
-  const recordSwitchNotice = (targetAccount: string | null) => {
-    recentSwitchTarget = {
-      value: targetAccount,
-      recordedAt: Date.now(),
-    };
-  };
-
-  const syncCurrentManagedAccount = async () => {
-    const nextAccount = await resolveCurrentManagedAccountLabel(store);
-    if (nextAccount === currentManagedAccountRef.value) {
-      return;
-    }
-
-    const previousAccount = currentManagedAccountRef.value;
-    currentManagedAccountRef.value = nextAccount;
-
-    if (localSwitchInFlightRef.value || shouldSuppressSwitchNotice(nextAccount)) {
-      return;
-    }
-
-    recordSwitchNotice(nextAccount);
-    updateFeed.emit({
-      statusMessage: describeCurrentAccountSwitchMessage(previousAccount, nextAccount),
-      preferredName: nextAccount,
-    });
-  };
-
-  const stopAuthWatcher = () => {
-    if (authDebounceTimer) {
-      clearTimeout(authDebounceTimer);
-      authDebounceTimer = null;
-    }
-    if (authWatcherRestartTimer) {
-      clearTimeout(authWatcherRestartTimer);
-      authWatcherRestartTimer = null;
-    }
-    if (authWatcher) {
-      authWatcher.close();
-      authWatcher = null;
-    }
-  };
-
-  const startAuthWatcher = () => {
-    try {
-      authWatcher = (authWatchImpl ?? watch)(
-        authWatchDir,
-        { persistent: false },
-        (_eventType, filename) => {
-          const normalizedName =
-            typeof filename === "string" || Buffer.isBuffer(filename)
-              ? String(filename)
-              : null;
-          if (normalizedName && normalizedName !== authWatchFileName) {
-            return;
-          }
-
-          if (authDebounceTimer) {
-            clearTimeout(authDebounceTimer);
-          }
-
-          authDebounceTimer = setTimeout(() => {
-            authDebounceTimer = null;
-            void syncCurrentManagedAccount().catch((error) => {
-              debugLog?.(`tui: failed to sync current account after auth change: ${(error as Error).message}`);
-            });
-          }, 150);
-        },
-      );
-
-      authWatcher.on("error", (error) => {
-        debugLog?.(`tui: auth watcher error: ${error.message}`);
-        authWatcherRestartTimer = setTimeout(() => {
-          if (stopped) {
-            return;
-          }
-
-          stopAuthWatcher();
-          startAuthWatcher();
-        }, 1_000);
-      });
-    } catch (error) {
-      debugLog?.(`tui: failed to start auth watcher: ${(error as Error).message}`);
-    }
-  };
-
-  startAuthWatcher();
-
-  const detachedWatchStatus = await watchProcessManager.getStatus().catch((error) => {
-    debugLog?.(`tui: failed to inspect detached watch status: ${(error as Error).message}`);
-    return {
-      running: false,
-      state: null,
-    };
-  });
-  const managedDesktopRunning = await desktopLauncher.isManagedDesktopRunning().catch((error) => {
-    debugLog?.(`tui: failed to inspect managed desktop status: ${(error as Error).message}`);
-    return false;
-  });
-
-  if (!detachedWatchStatus.running && managedDesktopRunning) {
-    foregroundWatchAbortController = new AbortController();
-    const silentStream = createNullWriteStream();
-
-    foregroundWatchPromise = runManagedDesktopWatchSession({
-      store,
-      desktopLauncher,
-      streams: {
-        stdout: silentStream,
-        stderr: silentStream,
-      },
-      interruptSignal: foregroundWatchAbortController.signal,
-      autoSwitch: true,
-      debug: false,
-      debugLog: debugLog ?? (() => undefined),
-      managedDesktopWaitStatusDelayMs,
-      managedDesktopWaitStatusIntervalMs,
-      watchQuotaMinReadIntervalMs: DEFAULT_TUI_WATCH_QUOTA_MIN_READ_INTERVAL_MS,
-      watchQuotaIdleReadIntervalMs: DEFAULT_TUI_WATCH_QUOTA_IDLE_READ_INTERVAL_MS,
-      onAutoSwitchEvent: async (event) => {
-        if (event.type !== "switched") {
-          return;
-        }
-
-        currentManagedAccountRef.value = event.toAccount;
-        if (shouldSuppressSwitchNotice(event.toAccount)) {
-          return;
-        }
-
-        recordSwitchNotice(event.toAccount);
-        updateFeed.emit({
-          statusMessage: describeForegroundAutoSwitchMessage(
-            event.fromAccount,
-            event.toAccount,
-            event.warnings,
-          ),
-          preferredName: event.toAccount,
-        });
-      },
-    }).then((exitCode) => {
-      if (!stopped && exitCode !== 0) {
-        updateFeed.emit({
-          statusMessage: "Foreground watch stopped after an error.",
-        });
-      }
-      return exitCode;
-    }).catch((error) => {
-      if (!stopped && !foregroundWatchAbortController?.signal.aborted) {
-        debugLog?.(`tui: foreground watch failed: ${(error as Error).message}`);
-        updateFeed.emit({
-          statusMessage: `Foreground watch failed: ${(error as Error).message}`,
-        });
-      }
-      return 1;
-    });
-  }
-
-  return async () => {
-    stopped = true;
-    stopAuthWatcher();
-    if (foregroundWatchAbortController) {
-      foregroundWatchAbortController.abort();
-    }
-    await foregroundWatchPromise?.catch(() => undefined);
-  };
-}
 
 function describeCurrentListStatus(
   status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
@@ -538,6 +261,24 @@ async function readWatchHistory(
   return filterWatchHistoryByScope(await watchHistoryStore.read(now), { kind: "global" });
 }
 
+async function loadFreshLocalUsageSummary(store: AccountStore) {
+  const summary = await new LocalUsageService({
+    homeDir: store.paths.homeDir,
+  }).load();
+  await writeLocalUsageSummaryCache(summary, store.paths.homeDir);
+  return summary;
+}
+
+async function loadCachedLocalUsageSummary(store: AccountStore) {
+  const cached = await readLocalUsageSummaryCache({
+    homeDir: store.paths.homeDir,
+  });
+  if (cached) {
+    return cached;
+  }
+  return await loadFreshLocalUsageSummary(store);
+}
+
 function buildAccountDetailLines(options: {
   account: AccountQuotaSummary;
   accountMeta: ManagedAccount | undefined;
@@ -611,6 +352,7 @@ function buildDashboardSnapshot(options: {
   failures: Array<{ name: string; error: string }>;
   warnings: string[];
   watchHistory: Awaited<ReturnType<ReturnType<typeof createWatchHistoryStore>["read"]>>;
+  usageSummary: Awaited<ReturnType<typeof loadFreshLocalUsageSummary>> | null;
   refreshedByName?: Map<string, AccountQuotaSummary>;
   debugLog?: DebugLogger;
 }): AccountDashboardSnapshot {
@@ -646,6 +388,7 @@ function buildDashboardSnapshot(options: {
     currentStatusLine: describeCurrentListStatus(options.current),
     summaryLine,
     poolLine,
+    usageSummary: options.usageSummary,
     showEtaColumn,
     warnings: options.warnings,
     failures: options.failures,
@@ -710,6 +453,7 @@ export async function buildAccountDashboardSnapshot(options: {
   const { accounts, warnings: accountWarnings } = await options.store.listAccounts();
   const current = await options.store.getCurrentStatus();
   const watchHistory = await readWatchHistory(options.store, new Date());
+  const usageSummary = await loadFreshLocalUsageSummary(options.store);
   const refreshedByName = new Map(result.successes.map((account) => [account.name, account] as const));
   return buildDashboardSnapshot({
     accounts,
@@ -718,6 +462,7 @@ export async function buildAccountDashboardSnapshot(options: {
     failures: result.failures,
     warnings: [...accountWarnings, ...result.warnings],
     watchHistory,
+    usageSummary,
     refreshedByName,
     debugLog: options.debugLog,
   });
@@ -730,6 +475,7 @@ export async function buildCachedAccountDashboardSnapshot(options: {
   const { accounts, warnings } = await options.store.listAccounts();
   const current = await options.store.getCurrentStatus();
   const watchHistory = await readWatchHistory(options.store, new Date());
+  const usageSummary = await loadCachedLocalUsageSummary(options.store);
 
   return buildDashboardSnapshot({
     accounts,
@@ -738,6 +484,7 @@ export async function buildCachedAccountDashboardSnapshot(options: {
     failures: [],
     warnings,
     watchHistory,
+    usageSummary,
     debugLog: options.debugLog,
   });
 }
@@ -747,13 +494,18 @@ export async function handleTuiCommand(options: {
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
   watchProcessManager: WatchProcessManager;
+  watchLeaseManager?: WatchLeaseManager;
   streams: CliStreams;
   runCodexCli: (options: RunnerOptions) => Promise<RunnerResult>;
   debugLog?: DebugLogger;
   interruptSignal?: AbortSignal;
   managedDesktopWaitStatusDelayMs: number;
   managedDesktopWaitStatusIntervalMs: number;
+  foregroundWatchLeasePollIntervalMs?: number;
   authWatchImpl?: typeof watch;
+  runDashboardTuiImpl?: typeof runAccountDashboardTui;
+  prepareIsolatedRunImpl?: Parameters<typeof runDashboardIsolatedCodexSession>[0]["prepareIsolatedRunImpl"];
+  startIsolatedQuotaHistorySamplerImpl?: Parameters<typeof runDashboardIsolatedCodexSession>[0]["startIsolatedQuotaHistorySamplerImpl"];
 }): Promise<number> {
   if (options.positionals.length > 1) {
     throw new Error(`Usage: ${getUsage("tui")}`);
@@ -766,147 +518,184 @@ export async function handleTuiCommand(options: {
     );
   }
 
-  const silentStatusStream = new PassThrough() as unknown as NodeJS.WriteStream;
-  const initialSnapshot = await buildCachedAccountDashboardSnapshot({
-    store: options.store,
-    debugLog: options.debugLog,
-  });
-  const externalUpdateFeed = createAccountDashboardExternalUpdateFeed();
-  const currentManagedAccountRef = {
-    value: await resolveCurrentManagedAccountLabel(options.store),
-  };
-  const localSwitchInFlightRef = {
-    value: false,
-  };
-  const stopExternalUpdateMonitors = await startTuiExternalUpdateMonitors({
-    store: options.store,
-    desktopLauncher: options.desktopLauncher,
-    watchProcessManager: options.watchProcessManager,
-    updateFeed: externalUpdateFeed,
-    currentManagedAccountRef,
-    localSwitchInFlightRef,
-    debugLog: options.debugLog,
-    managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
-    managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
-    authWatchImpl: options.authWatchImpl,
-  });
+  const runDashboardTuiImpl = options.runDashboardTuiImpl ?? runAccountDashboardTui;
+  let nextInitialQuery = initialQuery;
+  let queuedExternalUpdate: AccountDashboardExternalUpdate | null = null;
 
-  let exit;
-  try {
-    exit = await runAccountDashboardTui({
-      stdin: options.streams.stdin,
-      stdout: options.streams.stdout,
-      initialQuery,
-      initialSnapshot,
-      subscribeExternalUpdates: externalUpdateFeed.subscribe,
-      loadSnapshot: async () => await buildAccountDashboardSnapshot({
-        store: options.store,
-        debugLog: options.debugLog,
-      }),
-      switchAccount: async (name, switchOptions) => {
-        localSwitchInFlightRef.value = true;
-        try {
-          const { result, desktopForceWarning } = await performManualSwitch({
-            name,
-            force: switchOptions.force,
-            store: options.store,
-            desktopLauncher: options.desktopLauncher,
-            stderr: silentStatusStream,
-            debugLog: options.debugLog,
-            interruptSignal: switchOptions.signal ?? options.interruptSignal,
-            managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
-            managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
-          });
-          currentManagedAccountRef.value = result.account.name;
-
-          return {
-            statusMessage: `Switched to "${result.account.name}".`,
-            warningMessages: [
-              ...result.warnings,
-              ...(desktopForceWarning ? [desktopForceWarning] : []),
-            ],
-          };
-        } finally {
-          localSwitchInFlightRef.value = false;
-        }
-      },
-      openDesktop: async (name) => {
-        const appPath = await options.desktopLauncher.findInstalledApp();
-        if (!appPath) {
-          throw new Error("Codex Desktop not found at /Applications/Codex.app.");
-        }
-
-        const runningApps = await options.desktopLauncher.listRunningApps();
-        if (runningApps.length > 0) {
-          await options.desktopLauncher.activateApp(appPath);
-          const warnings = (await options.desktopLauncher.isManagedDesktopRunning())
-            ? []
-            : [
-                "Desktop is not codexm-managed; the focused app may still use its previous auth until relaunched.",
-              ];
-
-          return {
-            statusMessage: `Focused Codex Desktop for "${name}".`,
-            warningMessages: warnings,
-          };
-        }
-
-        await options.desktopLauncher.launch(appPath);
-        const platform = await getPlatform();
-        const managedState = await resolveManagedDesktopState(
-          options.desktopLauncher,
-          appPath,
-          runningApps,
-          platform,
-        );
-        if (!managedState) {
-          await options.desktopLauncher.clearManagedState().catch(() => undefined);
-          throw new Error(
-            "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
-          );
-        }
-
-        await options.desktopLauncher.writeManagedState(managedState);
-        return {
-          statusMessage: `Opened Codex Desktop for "${name}".`,
-          warningMessages: [],
-        };
-      },
-      exportAccount: async (source, outputPath) =>
-        await exportShareBundleForTui({
-          store: options.store,
-          source,
-          outputPath,
-        }),
-      inspectImportBundle: async (bundlePath) =>
-        await previewShareBundleForTui(bundlePath),
-      importBundle: async (bundlePath, localName) =>
-        await importShareBundleForTui({
-          store: options.store,
-          bundlePath,
-          localName,
-        }),
-      deleteAccount: async (name) =>
-        await deleteAccountForTui({
-          store: options.store,
-          name,
-        }),
-    });
-  } finally {
-    await stopExternalUpdateMonitors();
-  }
-
-  if (exit.action === "open-codex") {
-    const currentStatus = await options.store.getCurrentStatus();
-    return (await options.runCodexCli({
-      codexArgs: [],
-      accountId: currentStatus.account_id,
-      email: null,
+  while (true) {
+    const silentStatusStream = new PassThrough() as unknown as NodeJS.WriteStream;
+    const initialSnapshot = await buildCachedAccountDashboardSnapshot({
+      store: options.store,
       debugLog: options.debugLog,
-      stderr: options.streams.stderr,
-      signal: options.interruptSignal,
-    })).exitCode;
-  }
+    });
+    const externalUpdateFeed = createAccountDashboardExternalUpdateFeed();
+    if (queuedExternalUpdate) {
+      externalUpdateFeed.emit(queuedExternalUpdate);
+      queuedExternalUpdate = null;
+    }
+    const currentManagedAccountRef = {
+      value: await resolveCurrentManagedAccountLabel(options.store),
+    };
+    const localSwitchInFlightRef = {
+      value: false,
+    };
+    const stopExternalUpdateMonitors = await startTuiExternalUpdateMonitors({
+      store: options.store,
+      desktopLauncher: options.desktopLauncher,
+      watchProcessManager: options.watchProcessManager,
+      watchLeaseManager: options.watchLeaseManager,
+      updateFeed: externalUpdateFeed,
+      currentManagedAccountRef,
+      localSwitchInFlightRef,
+      debugLog: options.debugLog,
+      managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
+      managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+      foregroundWatchLeasePollIntervalMs: options.foregroundWatchLeasePollIntervalMs,
+      authWatchImpl: options.authWatchImpl,
+    });
 
-  return exit.code;
+    let exit;
+    try {
+      exit = await runDashboardTuiImpl({
+        stdin: options.streams.stdin,
+        stdout: options.streams.stdout,
+        initialQuery: nextInitialQuery,
+        initialSnapshot,
+        subscribeExternalUpdates: externalUpdateFeed.subscribe,
+        loadSnapshot: async () => await buildAccountDashboardSnapshot({
+          store: options.store,
+          debugLog: options.debugLog,
+        }),
+        switchAccount: async (name, switchOptions) => {
+          localSwitchInFlightRef.value = true;
+          try {
+            const { result, desktopForceWarning } = await performManualSwitch({
+              name,
+              force: switchOptions.force,
+              store: options.store,
+              desktopLauncher: options.desktopLauncher,
+              stderr: silentStatusStream,
+              debugLog: options.debugLog,
+              interruptSignal: switchOptions.signal ?? options.interruptSignal,
+              managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
+              managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+            });
+            currentManagedAccountRef.value = result.account.name;
+
+            return {
+              statusMessage: `Switched to "${result.account.name}".`,
+              warningMessages: [
+                ...result.warnings,
+                ...(desktopForceWarning ? [desktopForceWarning] : []),
+              ],
+            };
+          } finally {
+            localSwitchInFlightRef.value = false;
+          }
+        },
+        openDesktop: async (name) => {
+          const appPath = await options.desktopLauncher.findInstalledApp();
+          if (!appPath) {
+            throw new Error("Codex Desktop not found at /Applications/Codex.app.");
+          }
+
+          const runningApps = await options.desktopLauncher.listRunningApps();
+          if (runningApps.length > 0) {
+            await options.desktopLauncher.activateApp(appPath);
+            const warnings = (await options.desktopLauncher.isManagedDesktopRunning())
+              ? []
+              : [
+                  "Desktop is not codexm-managed; the focused app may still use its previous auth until relaunched.",
+                ];
+
+            return {
+              statusMessage: `Focused Codex Desktop for "${name}".`,
+              warningMessages: warnings,
+            };
+          }
+
+          await options.desktopLauncher.launch(appPath);
+          const platform = await getPlatform();
+          const managedState = await resolveManagedDesktopState(
+            options.desktopLauncher,
+            appPath,
+            runningApps,
+            platform,
+          );
+          if (!managedState) {
+            await options.desktopLauncher.clearManagedState().catch(() => undefined);
+            throw new Error(
+              "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+            );
+          }
+
+          await options.desktopLauncher.writeManagedState(managedState);
+          return {
+            statusMessage: `Opened Codex Desktop for "${name}".`,
+            warningMessages: [],
+          };
+        },
+        exportAccount: async (source, outputPath) =>
+          await exportShareBundleForTui({
+            store: options.store,
+            source,
+            outputPath,
+          }),
+        inspectImportBundle: async (bundlePath) =>
+          await previewShareBundleForTui(bundlePath),
+        importBundle: async (bundlePath, localName) =>
+          await importShareBundleForTui({
+            store: options.store,
+            bundlePath,
+            localName,
+          }),
+        deleteAccount: async (name) =>
+          await deleteAccountForTui({
+            store: options.store,
+            name,
+          }),
+      });
+    } finally {
+      await stopExternalUpdateMonitors();
+    }
+
+    nextInitialQuery = "";
+
+    if (exit.action === "quit") {
+      return exit.code;
+    }
+
+    try {
+      if (exit.action === "open-codex") {
+        await runDashboardCodexSession({
+          store: options.store,
+          runCodexCli: options.runCodexCli,
+          debugLog: options.debugLog,
+          stderr: options.streams.stderr,
+          signal: options.interruptSignal,
+        });
+        continue;
+      }
+
+      if (!exit.preferredName) {
+        throw new Error("The selected account was unavailable for isolated codex launch.");
+      }
+
+      await runDashboardIsolatedCodexSession({
+        accountName: exit.preferredName,
+        store: options.store,
+        runCodexCli: options.runCodexCli,
+        debugLog: options.debugLog,
+        stderr: options.streams.stderr,
+        signal: options.interruptSignal,
+        prepareIsolatedRunImpl: options.prepareIsolatedRunImpl,
+        startIsolatedQuotaHistorySamplerImpl: options.startIsolatedQuotaHistorySamplerImpl,
+      });
+    } catch (error) {
+      queuedExternalUpdate = {
+        statusMessage: `Codex open failed: ${(error as Error).message}`,
+        preferredName: exit.preferredName ?? null,
+      };
+    }
+  }
 }

@@ -225,10 +225,15 @@ function describeQuotaAccounts(
   options: {
     verbose?: boolean;
     etaByName?: Map<string, WatchHistoryEtaContext>;
+    usageLine?: string | null;
   } = {},
 ): string {
   if (accounts.length === 0) {
-    const lines = [describeCurrentListStatus(currentStatus), "No saved accounts."];
+    const lines = [
+      describeCurrentListStatus(currentStatus),
+      ...(options.usageLine ? [options.usageLine] : []),
+      "No saved accounts.",
+    ];
     for (const warning of warnings) {
       lines.push(`Warning: ${warning}`);
     }
@@ -376,6 +381,7 @@ function describeQuotaAccounts(
     describeCurrentListStatus(currentStatus),
     summaryLine,
     poolLine,
+    ...(options.usageLine ? [options.usageLine] : []),
     "Refreshed quotas:",
     table,
   ];
@@ -396,6 +402,7 @@ export function describeQuotaRefresh(
   options: {
     verbose?: boolean;
     etaByName?: Map<string, WatchHistoryEtaContext>;
+    usageLine?: string | null;
   } = {},
 ): string {
   const lines: string[] = [];

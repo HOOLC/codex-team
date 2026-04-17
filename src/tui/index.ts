@@ -1,3 +1,9 @@
+import type { LocalUsageSummary } from "../local-usage/types.js";
+import {
+  formatTuiUsageSummaryLine,
+  formatTuiUsageTrendLine,
+} from "../local-usage/format.js";
+
 const ANSI = {
   altOn: "\u001B[?1049h",
   altOff: "\u001B[?1049l",
@@ -32,7 +38,7 @@ type SignalSource = {
 };
 
 type LayoutMode = "wide" | "stacked" | "list";
-type ExitAction = "quit" | "open-codex";
+type ExitAction = "quit" | "open-codex" | "open-isolated-codex";
 
 export interface AccountDashboardDetailOverride {
   title: string;
@@ -95,6 +101,7 @@ export interface AccountDashboardSnapshot {
   currentStatusLine: string;
   summaryLine: string;
   poolLine: string;
+  usageSummary: LocalUsageSummary | null;
   showEtaColumn?: boolean;
   warnings: string[];
   failures: Array<{ name: string; error: string }>;
@@ -167,6 +174,7 @@ export interface RunAccountDashboardTuiOptions {
 export interface AccountDashboardExitResult {
   code: number;
   action: ExitAction;
+  preferredName?: string | null;
 }
 
 export interface AccountDashboardExternalUpdate {
@@ -294,6 +302,13 @@ function padStartVisible(value: string, width: number): string {
   return `${repeat(" ", Math.max(0, width - visibleWidth(value)))}${value}`;
 }
 
+function padVisibleCenter(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  const left = Math.floor(padding / 2);
+  const right = padding - left;
+  return `${repeat(" ", left)}${value}${repeat(" ", right)}`;
+}
+
 function color(value: string, tone: "green" | "yellow" | "red" | "cyan" | "dim"): string {
   const code =
     tone === "green"
@@ -347,11 +362,17 @@ function computePanelFrame(width: number, height: number): PanelFrame {
   };
 }
 
-function getLayout(width: number, height: number, accountCount: number): DashboardLayout {
+function getLayout(
+  width: number,
+  height: number,
+  accountCount: number,
+  headerLineCount: number,
+  bannerLineCount = 0,
+): DashboardLayout {
   const frame = computePanelFrame(width, height);
   const innerWidth = Math.max(1, frame.width - 2);
   const innerHeight = Math.max(1, frame.height - 2);
-  const bodyHeight = Math.max(4, innerHeight - 9);
+  const bodyHeight = Math.max(4, innerHeight - (headerLineCount + 5 + bannerLineCount));
 
   if (innerWidth >= WIDE_LAYOUT_MIN_WIDTH && bodyHeight >= 10) {
     const availableWidth = Math.max(1, innerWidth - PANE_GAP.length);
@@ -453,9 +474,11 @@ function normalizeStateForViewport(
   state: AccountDashboardState,
   width: number,
   height: number,
+  headerLineCount = 3,
+  bannerLineCount = 0,
 ): { state: AccountDashboardState; filtered: FilteredAccounts; layout: DashboardLayout } {
   const filteredAccounts = getFilteredAccounts(snapshot, state.query);
-  const layout = getLayout(width, height, filteredAccounts.length);
+  const layout = getLayout(width, height, filteredAccounts.length, headerLineCount, bannerLineCount);
   const visibleRows = layout.mode === "wide"
     ? Math.max(1, layout.listRows - 3)
     : Math.max(1, Math.floor(layout.listRows / 2));
@@ -510,7 +533,7 @@ function renderWideListHeader(width: number, showEtaColumn: boolean): string[] {
   const usedSpan = 4 + 1 + 4;
 
   return [
-    `${repeat(" ", groupPrefix)}${padEndVisible("USED", usedSpan)}`,
+    `${repeat(" ", groupPrefix)}${padVisibleCenter("USED", usedSpan)}`,
     [
       "  ",
       padEndVisible("NAME", nameWidth),
@@ -705,10 +728,19 @@ function renderBodyLines(
   state: AccountDashboardState,
   width: number,
   height: number,
+  headerLineCount: number,
+  bannerLineCount: number,
   detailOverride?: AccountDashboardDetailOverride | null,
   showEtaColumn = true,
 ): string[] {
-  const normalized = normalizeStateForViewport(snapshot, state, width, height + 9);
+  const normalized = normalizeStateForViewport(
+    snapshot,
+    state,
+    width,
+    height + headerLineCount + 5 + bannerLineCount,
+    headerLineCount,
+    bannerLineCount,
+  );
   const { layout } = normalized;
 
   if (layout.mode === "wide") {
@@ -833,8 +865,8 @@ function renderFilterLine(
 function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
   const forceLabel = selectedAccount?.current ? "f reload" : "f force";
   const hint = width < 88
-    ? `Enter switch | ${forceLabel} | o codex | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`
-    : `j/k move | / filter | Enter switch | ${forceLabel} | o codex | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`;
+    ? `Enter switch | ${forceLabel} | o codex | O isolated | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`
+    : `j/k move | / filter | Enter switch | ${forceLabel} | o codex | O isolated | d desktop | e export | E export-current | i import | x delete | u undo | r refresh | q quit`;
   return truncate(color(hint, "dim"), width);
 }
 
@@ -864,11 +896,24 @@ export function renderAccountDashboardScreen(
       .join("\n");
   }
 
+  const previewFrame = computePanelFrame(options.width, options.height);
+  const previewInnerWidth = Math.max(1, previewFrame.width - 2);
+  const previewInnerHeight = Math.max(1, previewFrame.height - 2);
+  const usageHeaderLines = options.snapshot.usageSummary
+    ? [
+        formatTuiUsageSummaryLine(options.snapshot.usageSummary, previewInnerWidth),
+        formatTuiUsageTrendLine(options.snapshot.usageSummary, previewInnerWidth, previewInnerHeight),
+      ].filter((line): line is string => typeof line === "string" && line !== "")
+    : [];
+  const headerLineCount = 3 + usageHeaderLines.length;
+  const bannerLineCount = options.bannerMessage ? 1 : 0;
   const normalized = normalizeStateForViewport(
     options.snapshot,
     options.state,
     options.width,
     options.height,
+    headerLineCount,
+    bannerLineCount,
   );
   const { layout } = normalized;
   const filteredCount = normalized.filtered.all.length;
@@ -880,12 +925,15 @@ export function renderAccountDashboardScreen(
     truncate(options.snapshot.headerLine, layout.innerWidth),
     truncate(options.snapshot.summaryLine, layout.innerWidth),
     truncate(options.snapshot.poolLine, layout.innerWidth),
+    ...usageHeaderLines.map((line) => truncate(line, layout.innerWidth)),
     renderDivider(layout.innerWidth),
     ...renderBodyLines(
       options.snapshot,
       normalized.state,
       layout.innerWidth,
       layout.bodyHeight,
+      headerLineCount,
+      bannerLineCount,
       options.detailOverride,
       showEtaColumn,
     ),
@@ -895,7 +943,7 @@ export function renderAccountDashboardScreen(
         ?? renderFilterLine(options.snapshot, normalized.state, filteredCount, layout.innerWidth),
       layout.innerWidth,
     ),
-    truncate(bannerLine, layout.innerWidth),
+    ...(bannerLine ? [truncate(bannerLine, layout.innerWidth)] : []),
     truncate(
       options.statusOverride
         ?? formatStatusLine({
@@ -1051,6 +1099,7 @@ function createPlaceholderSnapshot(): AccountDashboardSnapshot {
     currentStatusLine: "Current auth: missing",
     summaryLine: "Accounts: 0/0 usable | blocked: 1W 0, 5H 0",
     poolLine: "Available: bottleneck - | 5H->1W - | 1W - (plus 1W)",
+    usageSummary: null,
     warnings: [],
     failures: [],
     accounts: [],
@@ -1160,7 +1209,10 @@ export async function runAccountDashboardTui(
     stdout.write(`${ANSI.showCursor}${ANSI.altOff}`);
   };
 
-  const finish = (action: ExitAction) => {
+  const finish = (
+    action: ExitAction,
+    optionsForFinish: { preferredName?: string | null } = {},
+  ) => {
     if (resolved) {
       return;
     }
@@ -1169,6 +1221,7 @@ export async function runAccountDashboardTui(
     resolveExit?.({
       code: 0,
       action,
+      preferredName: optionsForFinish.preferredName,
     });
   };
 
@@ -1422,7 +1475,6 @@ export async function runAccountDashboardTui(
       statusMessage: withOperationStatus(name, result),
     };
     render();
-    finish("quit");
   };
 
   const runSwitchAction = async (optionsForAction: {
@@ -1440,11 +1492,20 @@ export async function runAccountDashboardTui(
 
     if (selected.current && !reloadingCurrentAccount) {
       if (optionsForAction.after === "open-codex") {
-        finish("open-codex");
+        finish("open-codex", {
+          preferredName: selected.name,
+        });
+        return;
+      }
+      if (optionsForAction.after === "open-isolated-codex") {
+        finish("open-isolated-codex", {
+          preferredName: selected.name,
+        });
         return;
       }
       if (optionsForAction.after === "desktop") {
         await runDesktopAction(selected.name);
+        requestRefresh(selected.name);
         return;
       }
 
@@ -1463,6 +1524,8 @@ export async function runAccountDashboardTui(
         ? `reloading "${selected.name}"`
         : optionsForAction.after === "open-codex"
         ? `opening Codex TUI for "${selected.name}"`
+        : optionsForAction.after === "open-isolated-codex"
+          ? `opening isolated Codex TUI for "${selected.name}"`
         : optionsForAction.after === "desktop"
           ? `opening Codex Desktop for "${selected.name}"`
           : `switching "${selected.name}"`,
@@ -1471,6 +1534,8 @@ export async function runAccountDashboardTui(
       ? `Reloading "${selected.name}"...`
       : optionsForAction.after === "open-codex"
       ? `Switching to "${selected.name}" and opening Codex TUI...`
+      : optionsForAction.after === "open-isolated-codex"
+        ? `Switching to "${selected.name}" and opening isolated Codex TUI...`
       : optionsForAction.after === "desktop"
         ? `Switching to "${selected.name}" and opening Codex Desktop...`
         : optionsForAction.force
@@ -1495,12 +1560,23 @@ export async function runAccountDashboardTui(
 
       if (optionsForAction.after === "open-codex") {
         render();
-        finish("open-codex");
+        finish("open-codex", {
+          preferredName: selected.name,
+        });
+        return;
+      }
+
+      if (optionsForAction.after === "open-isolated-codex") {
+        render();
+        finish("open-isolated-codex", {
+          preferredName: selected.name,
+        });
         return;
       }
 
       if (optionsForAction.after === "desktop") {
         await runDesktopAction(selected.name);
+        requestRefresh(selected.name);
         return;
       }
 
@@ -1512,6 +1588,8 @@ export async function runAccountDashboardTui(
           ? `Desktop open failed: ${(error as Error).message}`
           : optionsForAction.after === "open-codex"
             ? `Codex TUI open failed: ${(error as Error).message}`
+            : optionsForAction.after === "open-isolated-codex"
+              ? `Isolated Codex TUI open failed: ${(error as Error).message}`
             : reloadingCurrentAccount
               ? `Reload failed: ${(error as Error).message}`
             : `Switch failed: ${(error as Error).message}`,
@@ -1884,6 +1962,13 @@ export async function runAccountDashboardTui(
       await runSwitchAction({
         force: false,
         after: "open-codex",
+      });
+      return;
+    }
+    if (event.value === "O") {
+      await runSwitchAction({
+        force: false,
+        after: "open-isolated-codex",
       });
       return;
     }

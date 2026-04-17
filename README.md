@@ -30,25 +30,46 @@ After install, use the `codexm` command.
 
 ## Quick start
 
-### macOS with Codex Desktop
+### 1. Save a couple of accounts and inspect them
 
 ```bash
 codexm add plus1
 codexm add team1
+codexm list
+codexm usage
+```
+
+Use `codexm list` for the account overview and `codexm usage` for local token usage plus estimated cost from session logs.
+
+### 2. Open the dashboard
+
+```bash
+codexm
+```
+
+Inside the dashboard:
+
+- `Enter`: switch
+- `f`: reload the current account or force-switch
+- `o`: run `codex` in the current terminal, then return to the dashboard when it exits
+- `O`: run `codex` with an isolated managed snapshot, then return to the dashboard when it exits
+- `d`: open or focus Codex Desktop without leaving the dashboard
+
+### 3. Keep working automatically
+
+macOS + Codex Desktop:
+
+```bash
 codexm launch --watch
 ```
 
-This adds a couple of named snapshots, launches Codex Desktop, and keeps a watcher running in the background.
-
-### Linux / WSL with Codex CLI
+Linux / WSL + Codex CLI:
 
 ```bash
-codexm add plus1
-codexm add team1
 codexm watch
 ```
 
-In another terminal, start Codex through the wrapper:
+In another terminal:
 
 ```bash
 codexm run -- --model o3
@@ -64,7 +85,8 @@ Redacted `codexm list` example:
 $ codexm list
 Current managed account: plus-main
 Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
-Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
+Available: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
+Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
   NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
   -----------  --------  ----  -----  -----   5H   1W   ----------
@@ -94,10 +116,11 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm`: open the interactive account dashboard when running in a TTY
 - `codexm current [--refresh]`: show the current account and optionally refresh quota
 - `codexm doctor`: diagnose local auth, runtime probes, and managed Desktop consistency
-- `codexm list [--verbose]`: show saved accounts, quota usage, score, ETA, and reset times
+- `codexm list [--usage-window <today|7d|30d|all-time>] [--verbose]`: show saved accounts plus an embedded local usage summary
 - `codexm list --json`: machine-readable output
 - `codexm list --debug`: include diagnostic details about quota normalization and observed ratios
 - `codexm tui [query]`: explicitly open the account dashboard, optionally with an initial filter
+- `codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]`: summarize local token usage and estimated cost from session logs
 
 ### Switch and launch
 
@@ -111,16 +134,17 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm watch --detach`: run the watcher in the background
 - `codexm watch --status`: inspect detached watcher state
 - `codexm watch --stop`: stop the detached watcher
-- `codexm run [-- ...codexArgs]`: restart the codex CLI automatically after auth changes
+- `codexm run [--account <name>] [-- ...codexArgs]`: run codex with global auth follow-restart or an isolated managed account snapshot
 <!-- GENERATED:CORE_COMMANDS:END -->
 
 Use `codexm --help` for the full command reference. Share bundles are plain auth snapshots intended only for fully trusted recipients.
 
-In a TTY, plain `codexm` opens the dashboard directly. Inside the dashboard, use `Enter` to switch, `f` to force-switch or reload the current account, `o` to switch and open `codex`, `d` to switch and open or focus Codex Desktop, `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `Esc` backs out of prompts; `q` quits from the main dashboard. When no detached `codexm watch` is already running and the current Desktop session is codexm-managed, the dashboard also keeps a foreground watch active and shows account-switch notices without dismissing the current prompt.
+In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `f` / `o` / `O` / `d`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `Esc` backs out of prompts; `q` quits from the main dashboard. When no detached `codexm watch` is already running and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active, avoids duplicating other live watch owners, and hands that watch off to a detached watcher when you quit.
 
 ## When should I use each command?
 
 - `codexm list` is the best overview when choosing the next account.
+- `codexm usage` is the best view for local token volume and estimated cost.
 - `codexm watch` is the automation loop that reacts to quota exhaustion.
 - `codexm run` is useful in CLI workflows where the running `codex` process should follow account switches.
 - Use `--json` for scripting and `--debug` for diagnostics.

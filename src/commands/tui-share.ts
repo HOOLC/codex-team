@@ -53,14 +53,15 @@ export async function previewShareBundleForTui(
   const inspection = await inspectShareBundle(bundlePath);
   return {
     bundlePath,
-    suggestedName: inspection.suggested_name,
+    suggestedName: null,
     title: "Import Bundle",
     lines: [
-      `Source: ${inspection.source_type === "managed" && inspection.source_name ? `managed account "${inspection.source_name}"` : "current auth"}`,
-      `Suggested name: ${inspection.suggested_name ?? "-"}`,
+      `Kind: ${inspection.kind}`,
+      `Auth kind: ${inspection.auth_kind}`,
       `Auth mode: ${inspection.auth_mode}`,
       `Identity: ${inspection.identity}`,
-      `Contains config snapshot: ${inspection.contains_config_snapshot ? "yes" : "no"}`,
+      `Profile: ${inspection.profile_present ? "yes" : "no"}`,
+      `Contains config.toml: ${inspection.contains_config_toml ? "yes" : "no"}`,
     ],
   };
 }

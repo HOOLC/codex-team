@@ -2,37 +2,50 @@ import { readFile } from "node:fs/promises";
 
 import {
   type AuthSnapshot,
+  getSnapshotAccountId,
+  getSnapshotEmail,
+  getSnapshotIdentity,
+  getSnapshotUserId,
+  isApiKeyAuthMode,
+  isSupportedChatGPTAuthMode,
   parseAuthSnapshot,
 } from "./auth-snapshot.js";
 import {
   FILE_MODE,
   atomicWriteFile,
 } from "./account-store/storage.js";
+import {
+  extractChatGPTAuth,
+} from "./quota-client.js";
 
-export const SHARE_BUNDLE_SCHEMA_VERSION = 1;
+export const SHARE_BUNDLE_KIND = "auth_bundle";
+export const SHARE_BUNDLE_VERSION = 1;
+
+export type ShareBundleAuthKind = "chatgpt" | "apikey";
+
+export interface ShareBundleProfile {
+  account_id?: string;
+  user_id?: string;
+  email?: string;
+  plan?: string;
+}
+
+export interface ShareBundleAuth {
+  kind: ShareBundleAuthKind;
+  auth_json: AuthSnapshot;
+  config_toml?: string;
+  profile?: ShareBundleProfile;
+}
 
 export interface ShareBundle {
-  schema_version: number;
+  kind: typeof SHARE_BUNDLE_KIND;
+  version: number;
   exported_at: string;
-  source_type: "current" | "managed";
-  source_name: string | null;
-  suggested_name: string | null;
-  auth_snapshot: AuthSnapshot;
-  config_snapshot: string | null;
+  auth: ShareBundleAuth;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asStringOrNull(value: unknown, fieldName: string): string | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  if (typeof value !== "string") {
-    throw new Error(`Field "${fieldName}" must be a string or null.`);
-  }
-  return value;
 }
 
 function asNonEmptyString(value: unknown, fieldName: string): string {
@@ -42,22 +55,116 @@ function asNonEmptyString(value: unknown, fieldName: string): string {
   return value;
 }
 
+function asOptionalString(value: unknown, fieldName: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return asNonEmptyString(value, fieldName);
+}
+
+function normalizeShareBundleAuthKind(value: unknown, fieldName: string): ShareBundleAuthKind {
+  if (typeof value !== "string") {
+    throw new Error(`Field "${fieldName}" must be a string.`);
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "chatgpt" || normalized === "apikey") {
+    return normalized;
+  }
+
+  throw new Error(`Unsupported ${fieldName}: ${value}`);
+}
+
+function getShareBundleAuthKind(snapshot: AuthSnapshot): ShareBundleAuthKind {
+  if (isApiKeyAuthMode(snapshot.auth_mode)) {
+    return "apikey";
+  }
+  if (isSupportedChatGPTAuthMode(snapshot.auth_mode)) {
+    return "chatgpt";
+  }
+
+  throw new Error(`Unsupported auth snapshot mode for share bundle: ${snapshot.auth_mode}`);
+}
+
+function parseShareBundleProfile(raw: unknown): ShareBundleProfile | undefined {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+
+  if (!isRecord(raw)) {
+    throw new Error('Field "auth.profile" must be an object.');
+  }
+
+  const profile: ShareBundleProfile = {
+    account_id: asOptionalString(raw.account_id, "auth.profile.account_id"),
+    user_id: asOptionalString(raw.user_id, "auth.profile.user_id"),
+    email: asOptionalString(raw.email, "auth.profile.email"),
+    plan: asOptionalString(raw.plan, "auth.profile.plan"),
+  };
+
+  if (
+    profile.account_id === undefined &&
+    profile.user_id === undefined &&
+    profile.email === undefined &&
+    profile.plan === undefined
+  ) {
+    return undefined;
+  }
+
+  return profile;
+}
+
+export interface DerivedShareBundleFacts {
+  kind: ShareBundleAuthKind;
+  account_id: string;
+  user_id: string | null;
+  identity: string;
+  email: string | null;
+  plan: string | null;
+}
+
+export function deriveShareBundleFacts(snapshot: AuthSnapshot): DerivedShareBundleFacts {
+  const kind = getShareBundleAuthKind(snapshot);
+  const extractedAuth = kind === "chatgpt" ? extractChatGPTAuth(snapshot) : null;
+
+  return {
+    kind,
+    account_id: getSnapshotAccountId(snapshot),
+    user_id: kind === "chatgpt" ? getSnapshotUserId(snapshot) ?? null : null,
+    identity: getSnapshotIdentity(snapshot),
+    email: kind === "chatgpt" ? getSnapshotEmail(snapshot) ?? null : null,
+    plan: kind === "chatgpt" ? extractedAuth?.planType ?? null : null,
+  };
+}
+
 export function createShareBundle(options: {
-  sourceType: "current" | "managed";
-  sourceName?: string | null;
-  suggestedName?: string | null;
   authSnapshot: AuthSnapshot;
-  configSnapshot?: string | null;
+  configToml?: string | null;
   exportedAt?: Date;
 }): ShareBundle {
+  const authSnapshot = parseAuthSnapshot(JSON.stringify(options.authSnapshot));
+  const facts = deriveShareBundleFacts(authSnapshot);
+  const configToml = options.configToml ?? undefined;
+
   return {
-    schema_version: SHARE_BUNDLE_SCHEMA_VERSION,
+    kind: SHARE_BUNDLE_KIND,
+    version: SHARE_BUNDLE_VERSION,
     exported_at: (options.exportedAt ?? new Date()).toISOString(),
-    source_type: options.sourceType,
-    source_name: options.sourceName ?? null,
-    suggested_name: options.suggestedName ?? null,
-    auth_snapshot: parseAuthSnapshot(JSON.stringify(options.authSnapshot)),
-    config_snapshot: options.configSnapshot ?? null,
+    auth: {
+      kind: facts.kind,
+      auth_json: authSnapshot,
+      ...(configToml === undefined ? {} : { config_toml: configToml }),
+      ...(facts.kind === "chatgpt"
+        ? {
+            profile: {
+              account_id: facts.account_id,
+              ...(facts.user_id ? { user_id: facts.user_id } : {}),
+              ...(facts.email ? { email: facts.email } : {}),
+              ...(facts.plan ? { plan: facts.plan } : {}),
+            },
+          }
+        : {}),
+    },
   };
 }
 
@@ -73,28 +180,41 @@ export function parseShareBundle(raw: string): ShareBundle {
     throw new Error("Share bundle must be a JSON object.");
   }
 
-  const schemaVersion = parsed.schema_version;
-  if (schemaVersion !== SHARE_BUNDLE_SCHEMA_VERSION) {
-    throw new Error(`Unsupported share bundle schema version: ${String(schemaVersion)}`);
+  if (parsed.kind !== SHARE_BUNDLE_KIND) {
+    throw new Error(`Unsupported share bundle kind: ${String(parsed.kind)}`);
   }
 
-  const sourceType = parsed.source_type;
-  if (sourceType !== "current" && sourceType !== "managed") {
-    throw new Error(`Unsupported share bundle source_type: ${String(sourceType)}`);
+  if (parsed.version !== SHARE_BUNDLE_VERSION) {
+    throw new Error(`Unsupported share bundle version: ${String(parsed.version)}`);
   }
 
-  if (!("auth_snapshot" in parsed)) {
-    throw new Error("Share bundle is missing auth snapshot.");
+  if (!isRecord(parsed.auth)) {
+    throw new Error('Field "auth" must be an object.');
+  }
+
+  const authKind = normalizeShareBundleAuthKind(parsed.auth.kind, "auth.kind");
+  const authSnapshot = parseAuthSnapshot(JSON.stringify(parsed.auth.auth_json));
+  const derivedKind = getShareBundleAuthKind(authSnapshot);
+  if (derivedKind !== authKind) {
+    throw new Error(
+      `Share bundle auth kind "${authKind}" does not match auth snapshot mode "${authSnapshot.auth_mode}".`,
+    );
   }
 
   return {
-    schema_version: schemaVersion,
+    kind: SHARE_BUNDLE_KIND,
+    version: SHARE_BUNDLE_VERSION,
     exported_at: asNonEmptyString(parsed.exported_at, "exported_at"),
-    source_type: sourceType,
-    source_name: asStringOrNull(parsed.source_name, "source_name"),
-    suggested_name: asStringOrNull(parsed.suggested_name, "suggested_name"),
-    auth_snapshot: parseAuthSnapshot(JSON.stringify(parsed.auth_snapshot)),
-    config_snapshot: asStringOrNull(parsed.config_snapshot, "config_snapshot"),
+    auth: {
+      kind: authKind,
+      auth_json: authSnapshot,
+      ...(parsed.auth.config_toml === undefined
+        ? {}
+        : { config_toml: asNonEmptyString(parsed.auth.config_toml, "auth.config_toml") }),
+      ...(parsed.auth.profile === undefined
+        ? {}
+        : { profile: parseShareBundleProfile(parsed.auth.profile) }),
+    },
   };
 }
 

@@ -6,9 +6,6 @@ import {
   type AccountStore,
 } from "../account-store/index.js";
 import {
-  getSnapshotAccountId,
-  getSnapshotIdentity,
-  getSnapshotUserId,
   parseAuthSnapshot,
 } from "../auth-snapshot.js";
 import {
@@ -18,10 +15,15 @@ import { writeJson } from "../cli/output.js";
 import { pathExists } from "../account-store/storage.js";
 import {
   createShareBundle,
+  deriveShareBundleFacts,
   type ShareBundle,
+  type ShareBundleProfile,
   readShareBundleFile,
   writeShareBundleFile,
 } from "../share-bundle.js";
+import {
+  validateConfigSnapshot,
+} from "../account-store/config.js";
 
 type DebugLogger = (message: string) => void;
 
@@ -38,27 +40,51 @@ function formatImportExample(bundlePath: string): string {
   return `codexm import ${bundlePath} --name <local-name>`;
 }
 
-function describeBundleSource(bundle: {
-  source_type: "current" | "managed";
-  source_name: string | null;
-}): string {
-  return bundle.source_type === "managed" && bundle.source_name
-    ? `managed account "${bundle.source_name}"`
-    : "current auth";
+function describeBundleConfigPresence(hasConfigToml: boolean): string {
+  return hasConfigToml ? "yes" : "no";
+}
+
+function validateChatGPTBundleProfile(
+  bundleProfile: ShareBundleProfile | undefined,
+  facts: ReturnType<typeof deriveShareBundleFacts>,
+): void {
+  if (!bundleProfile) {
+    return;
+  }
+
+  const comparisons: Array<[keyof ShareBundleProfile, string | null | undefined]> = [
+    ["account_id", facts.account_id],
+    ["user_id", facts.user_id],
+    ["email", facts.email],
+    ["plan", facts.plan],
+  ];
+
+  for (const [fieldName, expectedValue] of comparisons) {
+    const actualValue = bundleProfile[fieldName];
+    if (actualValue === undefined) {
+      continue;
+    }
+    if ((expectedValue ?? null) !== actualValue) {
+      throw new Error(`Bundle profile field "${fieldName}" does not match auth snapshot.`);
+    }
+  }
 }
 
 export interface ShareBundleInspection {
   bundle_path: string;
-  schema_version: number;
+  kind: string;
+  version: number;
   exported_at: string;
-  source_type: "current" | "managed";
-  source_name: string | null;
-  suggested_name: string | null;
+  auth_kind: "chatgpt" | "apikey";
   auth_mode: string;
   account_id: string;
   user_id: string | null;
   identity: string;
-  contains_config_snapshot: boolean;
+  email: string | null;
+  plan: string | null;
+  profile_present: boolean;
+  profile_consistent: boolean | null;
+  contains_config_toml: boolean;
   bundle_file_name: string;
 }
 
@@ -86,8 +112,7 @@ export async function exportShareBundle(options: {
   }
 
   let authSnapshot;
-  let configSnapshot: string | null = null;
-  let suggestedName: string | null = null;
+  let configToml: string | null = null;
 
   if (sourceType === "current") {
     if (!(await pathExists(store.paths.currentAuthPath))) {
@@ -95,8 +120,9 @@ export async function exportShareBundle(options: {
     }
     authSnapshot = parseAuthSnapshot(await readFile(store.paths.currentAuthPath, "utf8"));
     if (authSnapshot.auth_mode === "apikey" && (await pathExists(store.paths.currentConfigPath))) {
-      configSnapshot = await readFile(store.paths.currentConfigPath, "utf8");
+      configToml = await readFile(store.paths.currentConfigPath, "utf8");
     }
+    validateConfigSnapshot("current-export", authSnapshot, configToml);
   } else {
     const managedName = sourceName;
     if (!managedName) {
@@ -104,18 +130,20 @@ export async function exportShareBundle(options: {
     }
     const account = await store.getManagedAccount(managedName);
     authSnapshot = parseAuthSnapshot(await readFile(account.authPath, "utf8"));
-    suggestedName = account.name;
     if (account.configPath) {
-      configSnapshot = await readFile(account.configPath, "utf8");
+      configToml = await readFile(account.configPath, "utf8");
+    }
+    if (authSnapshot.auth_mode === "apikey") {
+      if (!configToml) {
+        throw new Error(`Managed apikey account "${managedName}" is missing config.toml.`);
+      }
+      validateConfigSnapshot(managedName, authSnapshot, configToml);
     }
   }
 
   const bundle = createShareBundle({
-    sourceType,
-    sourceName,
-    suggestedName,
     authSnapshot,
-    configSnapshot,
+    configToml,
     exportedAt,
   });
   await writeShareBundleFile(resolvedOutputPath, bundle);
@@ -135,9 +163,19 @@ export async function importShareBundle(options: {
 }) {
   ensureAccountName(options.localName);
   const bundle = await readShareBundleFile(options.bundlePath);
-  const account = await options.store.addAccountSnapshot(options.localName, bundle.auth_snapshot, {
+  const facts = deriveShareBundleFacts(bundle.auth.auth_json);
+
+  if (bundle.auth.kind === "chatgpt") {
+    validateChatGPTBundleProfile(bundle.auth.profile, facts);
+  } else if (!bundle.auth.config_toml) {
+    throw new Error("apikey share bundle is missing config.toml.");
+  } else {
+    validateConfigSnapshot(options.localName, bundle.auth.auth_json, bundle.auth.config_toml);
+  }
+
+  const account = await options.store.addAccountSnapshot(options.localName, bundle.auth.auth_json, {
     force: options.force,
-    rawConfig: bundle.config_snapshot,
+    rawConfig: bundle.auth.config_toml ?? null,
   });
 
   return {
@@ -148,18 +186,33 @@ export async function importShareBundle(options: {
 
 export async function inspectShareBundle(bundlePath: string): Promise<ShareBundleInspection> {
   const bundle = await readShareBundleFile(bundlePath);
+  const facts = deriveShareBundleFacts(bundle.auth.auth_json);
+  let profileConsistent: boolean | null = null;
+
+  if (bundle.auth.kind === "chatgpt" && bundle.auth.profile) {
+    try {
+      validateChatGPTBundleProfile(bundle.auth.profile, facts);
+      profileConsistent = true;
+    } catch {
+      profileConsistent = false;
+    }
+  }
+
   return {
     bundle_path: bundlePath,
-    schema_version: bundle.schema_version,
+    kind: bundle.kind,
+    version: bundle.version,
     exported_at: bundle.exported_at,
-    source_type: bundle.source_type,
-    source_name: bundle.source_name,
-    suggested_name: bundle.suggested_name,
-    auth_mode: bundle.auth_snapshot.auth_mode,
-    account_id: getSnapshotAccountId(bundle.auth_snapshot),
-    user_id: getSnapshotUserId(bundle.auth_snapshot) ?? null,
-    identity: getSnapshotIdentity(bundle.auth_snapshot),
-    contains_config_snapshot: bundle.config_snapshot !== null,
+    auth_kind: bundle.auth.kind,
+    auth_mode: bundle.auth.auth_json.auth_mode,
+    account_id: facts.account_id,
+    user_id: facts.user_id,
+    identity: facts.identity,
+    email: facts.email,
+    plan: facts.plan,
+    profile_present: bundle.auth.profile !== undefined,
+    profile_consistent: profileConsistent,
+    contains_config_toml: bundle.auth.config_toml !== undefined,
     bundle_file_name: basename(bundlePath),
   };
 }
@@ -179,6 +232,7 @@ export async function handleExportCommand(options: {
   }
 
   const sourceName = positionals[0] ?? null;
+  const sourceType = sourceName ? "managed" : "current";
   const { bundlePath, bundle, importExample } = await exportShareBundle({
     store,
     sourceName,
@@ -186,16 +240,16 @@ export async function handleExportCommand(options: {
     force,
   });
 
-  debugLog?.(`export: source=${bundle.source_type}:${sourceName ?? "current"} path=${bundlePath}`);
+  debugLog?.(`export: source=${sourceType}:${sourceName ?? "current"} path=${bundlePath}`);
 
   const payload = {
     ok: true,
     action: "export",
     bundle_path: bundlePath,
-    source_type: bundle.source_type,
-    source_name: bundle.source_name,
-    auth_mode: bundle.auth_snapshot.auth_mode,
-    identity: getSnapshotIdentity(bundle.auth_snapshot),
+    source_type: sourceType,
+    source_name: sourceName,
+    auth_kind: bundle.auth.kind,
+    identity: deriveShareBundleFacts(bundle.auth.auth_json).identity,
     import_example: importExample,
   };
 
@@ -277,19 +331,25 @@ export async function handleInspectBundleCommand(options: {
     ...(await inspectShareBundle(bundlePath)),
   };
 
-  debugLog?.(`inspect: path=${bundlePath} source=${payload.source_type}`);
+  debugLog?.(`inspect: path=${bundlePath} kind=${payload.kind}`);
 
   if (json) {
     writeJson(stdout, payload);
   } else {
     stdout.write(`Bundle: ${bundlePath}\n`);
-    stdout.write(`Schema: ${payload.schema_version}\n`);
+    stdout.write(`Kind: ${payload.kind}\n`);
+    stdout.write(`Version: ${payload.version}\n`);
     stdout.write(`Exported at: ${payload.exported_at}\n`);
-    stdout.write(`Source: ${describeBundleSource(payload)}\n`);
-    stdout.write(`Suggested name: ${payload.suggested_name ?? "-"}\n`);
+    stdout.write(`Auth kind: ${payload.auth_kind}\n`);
     stdout.write(`Auth mode: ${payload.auth_mode}\n`);
     stdout.write(`Identity: ${payload.identity}\n`);
-    stdout.write(`Contains config snapshot: ${payload.contains_config_snapshot ? "yes" : "no"}\n`);
+    stdout.write(`Email: ${payload.email ?? "-"}\n`);
+    stdout.write(`Plan: ${payload.plan ?? "-"}\n`);
+    stdout.write(`Profile: ${payload.profile_present ? "yes" : "no"}\n`);
+    if (payload.profile_consistent !== null) {
+      stdout.write(`Profile consistent: ${payload.profile_consistent ? "yes" : "no"}\n`);
+    }
+    stdout.write(`Contains config.toml: ${describeBundleConfigPresence(payload.contains_config_toml)}\n`);
   }
 
   return 0;

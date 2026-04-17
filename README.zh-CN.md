@@ -30,21 +30,42 @@ npm install -g codex-team
 
 ## 快速开始
 
-### macOS + Codex Desktop
+### 1. 先保存几个账号并看概览
 
 ```bash
 codexm add plus1
 codexm add team1
+codexm list
+codexm usage
+```
+
+`codexm list` 用来看账号概览，`codexm usage` 用来看本地 session 日志里的 token usage 和 estimated cost。
+
+### 2. 打开 dashboard
+
+```bash
+codexm
+```
+
+dashboard 里常用按键：
+
+- `Enter`：切号
+- `f`：在当前账号上 reload，或强制切号
+- `o`：在当前终端运行 `codex`，退出后回到 dashboard
+- `O`：用隔离的托管快照运行 `codex`，退出后回到 dashboard
+- `d`：打开或聚焦 Codex Desktop，但不离开 dashboard
+
+### 3. 让它持续自动工作
+
+macOS + Codex Desktop：
+
+```bash
 codexm launch --watch
 ```
 
-这会新增几个命名快照、启动 Codex Desktop，并在后台保持 watcher 运行。
-
-### Linux / WSL + Codex CLI
+Linux / WSL + Codex CLI：
 
 ```bash
-codexm add plus1
-codexm add team1
 codexm watch
 ```
 
@@ -64,7 +85,8 @@ codexm run -- --model o3
 $ codexm list
 Current managed account: plus-main
 Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
-Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
+Available: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
+Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
   NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
   -----------  --------  ----  -----  -----   5H   1W   ----------
@@ -94,10 +116,11 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 - `codexm`: 在交互式终端里直接打开账号面板
 - `codexm current [--refresh]`: 查看当前账号；可选刷新 quota
 - `codexm doctor`: 诊断本地 auth、runtime 探测和托管 Desktop 一致性
-- `codexm list [--verbose]`: 查看所有保存账号、quota、score、ETA 和 reset 时间
+- `codexm list [--usage-window <today|7d|30d|all-time>] [--verbose]`: 查看所有保存账号，并附带一行本地 usage 摘要
 - `codexm list --json`: 输出机器可读 JSON
 - `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
 - `codexm tui [query]`: 显式打开账号面板，可选带初始筛选词
+- `codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]`: 从本地 session 日志汇总 token usage 和 estimated cost
 
 ### 切换与启动
 
@@ -111,16 +134,17 @@ Total: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 - `codexm watch --detach`: 后台运行 watcher
 - `codexm watch --status`: 查看后台 watcher 状态
 - `codexm watch --stop`: 停止后台 watcher
-- `codexm run [-- ...codexArgs]`: 在 auth 变化后自动重启 codex CLI
+- `codexm run [--account <name>] [-- ...codexArgs]`: 以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行
 <!-- GENERATED:CORE_COMMANDS:END -->
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。面板里 `Enter` 用来切号，`f` 用来强制切号或在当前账号上重新 reload，`o` 用来切号后打开 `codex`，`d` 用来切号后打开或聚焦 Codex Desktop，`e` / `E` 用来导出选中账号或当前 auth，`i` 用来导入 bundle，`x` 用来删除选中账号，`u` 用来撤销最近一次 import/export/delete。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板还会在前台挂一个 watch，并在不打断当前 prompt 的前提下提示账号切换事件。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `f` / `o` / `O` / `d`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch，同时避免和其他存活的 watch 重复；退出时则把这条 watch 交接给 detached watcher。
 
 ## 什么时候该用哪个命令？
 
 - 如果你想判断“接下来该用哪个账号”，优先看 `codexm list`
+- 如果你想看本地 token 量和 estimated cost，优先看 `codexm usage`
 - 如果你想自动切号，使用 `codexm watch`
 - 如果你在 CLI 场景里希望运行中的 `codex` 跟随切号自动重启，使用 `codexm run`
 - 脚本场景使用 `--json`，排查问题使用 `--debug`

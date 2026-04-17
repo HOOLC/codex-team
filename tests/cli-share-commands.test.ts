@@ -22,23 +22,33 @@ async function writeShareBundle(
   filePath: string,
   options: {
     authSnapshot: ReturnType<typeof createAuthPayload> | ReturnType<typeof createApiKeyPayload>;
-    sourceType?: "current" | "managed";
-    sourceName?: string | null;
-    suggestedName?: string | null;
-    configSnapshot?: string | null;
+    authKind?: "chatgpt" | "apikey";
+    configToml?: string | null;
+    profile?: {
+      account_id?: string;
+      user_id?: string;
+      email?: string;
+      plan?: string;
+    } | null;
   },
 ): Promise<void> {
   await writeFile(
     filePath,
     `${JSON.stringify(
       {
-        schema_version: 1,
+        kind: "auth_bundle",
+        version: 1,
         exported_at: "2026-04-16T10:20:30.000Z",
-        source_type: options.sourceType ?? "managed",
-        source_name: options.sourceName ?? null,
-        suggested_name: options.suggestedName ?? null,
-        auth_snapshot: options.authSnapshot,
-        config_snapshot: options.configSnapshot ?? null,
+        auth: {
+          kind: options.authKind ?? options.authSnapshot.auth_mode,
+          auth_json: options.authSnapshot,
+          ...(options.configToml === null || options.configToml === undefined
+            ? {}
+            : { config_toml: options.configToml }),
+          ...(options.profile === null || options.profile === undefined
+            ? {}
+            : { profile: options.profile }),
+        },
       },
       null,
       2,
@@ -80,20 +90,27 @@ describe("CLI Share Commands", () => {
         bundle_path: outputPath,
         source_type: "current",
         source_name: null,
-        auth_mode: "chatgpt",
+        auth_kind: "chatgpt",
         identity: "acct-share-current:user-share-current",
       });
       expect(stderr.read()).toBe("");
 
       expect(JSON.parse(await readFile(outputPath, "utf8"))).toMatchObject({
-        schema_version: 1,
-        source_type: "current",
-        source_name: null,
-        suggested_name: null,
-        auth_snapshot: {
-          auth_mode: "chatgpt",
-          tokens: {
+        kind: "auth_bundle",
+        version: 1,
+        auth: {
+          kind: "chatgpt",
+          auth_json: {
+            auth_mode: "chatgpt",
+            tokens: {
+              account_id: "acct-share-current",
+            },
+          },
+          profile: {
             account_id: "acct-share-current",
+            user_id: "user-share-current",
+            email: "acct-share-current@example.com",
+            plan: "plus",
           },
         },
       });
@@ -132,14 +149,16 @@ describe("CLI Share Commands", () => {
       expect(stderr.read()).toBe("");
 
       expect(JSON.parse(await readFile(outputPath, "utf8"))).toMatchObject({
-        source_type: "managed",
-        source_name: "api-main",
-        suggested_name: "api-main",
-        auth_snapshot: {
-          auth_mode: "apikey",
-          OPENAI_API_KEY: "sk-test-share-export",
+        kind: "auth_bundle",
+        version: 1,
+        auth: {
+          kind: "apikey",
+          auth_json: {
+            auth_mode: "apikey",
+            OPENAI_API_KEY: "sk-test-share-export",
+          },
+          config_toml: `${rawConfig}\n`,
         },
-        config_snapshot: `${rawConfig}\n`,
       });
     } finally {
       await cleanupTempHome(homeDir);
@@ -157,9 +176,12 @@ describe("CLI Share Commands", () => {
       await writeCurrentAuth(homeDir, "acct-before-import", "chatgpt", "plus", "user-before-import");
       await writeShareBundle(bundlePath, {
         authSnapshot: createAuthPayload("acct-imported", "chatgpt", "pro", "user-imported"),
-        sourceType: "managed",
-        sourceName: "source-main",
-        suggestedName: "source-main",
+        profile: {
+          account_id: "acct-imported",
+          user_id: "user-imported",
+          email: "acct-imported@example.com",
+          plan: "pro",
+        },
       });
 
       const exitCode = await runCli(["import", bundlePath, "--name", "friend-main", "--json"], {
@@ -208,9 +230,12 @@ describe("CLI Share Commands", () => {
       await store.saveCurrentAccount("existing-main");
       await writeShareBundle(bundlePath, {
         authSnapshot: createAuthPayload("acct-duplicate", "chatgpt", "plus", "user-duplicate"),
-        sourceType: "managed",
-        sourceName: "source-duplicate",
-        suggestedName: "source-duplicate",
+        profile: {
+          account_id: "acct-duplicate",
+          user_id: "user-duplicate",
+          email: "acct-duplicate@example.com",
+          plan: "plus",
+        },
       });
 
       const exitCode = await runCli(["import", bundlePath, "--name", "friend-main"], {
@@ -238,9 +263,12 @@ describe("CLI Share Commands", () => {
       const bundlePath = join(homeDir, "inspect-share.codexm.json");
       await writeShareBundle(bundlePath, {
         authSnapshot: createAuthPayload("acct-inspect", "chatgpt", "team", "user-inspect"),
-        sourceType: "managed",
-        sourceName: "inspect-main",
-        suggestedName: "inspect-main",
+        profile: {
+          account_id: "acct-inspect",
+          user_id: "user-inspect",
+          email: "acct-inspect@example.com",
+          plan: "team",
+        },
       });
 
       const exitCode = await runCli(["inspect", bundlePath], {
@@ -250,9 +278,10 @@ describe("CLI Share Commands", () => {
 
       expect(exitCode).toBe(0);
       expect(stdout.read()).toContain(`Bundle: ${bundlePath}`);
-      expect(stdout.read()).toContain('Source: managed account "inspect-main"');
-      expect(stdout.read()).toContain("Suggested name: inspect-main");
+      expect(stdout.read()).toContain("Kind: auth_bundle");
+      expect(stdout.read()).toContain("Auth kind: chatgpt");
       expect(stdout.read()).toContain("Identity: acct-inspect:user-inspect");
+      expect(stdout.read()).toContain("Profile: yes");
       expect(stdout.read()).not.toContain("refresh-acct-inspect");
       expect(stderr.read()).toBe("");
     } finally {
@@ -293,13 +322,117 @@ describe("CLI Share Commands", () => {
 
       expect(exitCode).toBe(0);
       expect(JSON.parse(await readFile(outputPath, "utf8"))).toMatchObject({
-        schema_version: 1,
-        auth_snapshot: {
-          tokens: {
-            account_id: "acct-force-share",
+        kind: "auth_bundle",
+        version: 1,
+        auth: {
+          auth_json: {
+            tokens: {
+              account_id: "acct-force-share",
+            },
           },
         },
       });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("refuses to export an apikey account without config.toml", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const outputPath = join(homeDir, "missing-config.codexm.json");
+      await store.addAccountSnapshot("api-main", createApiKeyPayload("sk-test-missing-config"));
+
+      const exitCode = await runCli(["export", "api-main", "--output", outputPath], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('Managed apikey account "api-main" is missing config.toml.');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("rejects a chatgpt bundle when profile conflicts with auth facts", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const bundlePath = join(homeDir, "profile-mismatch.codexm.json");
+
+      await writeShareBundle(bundlePath, {
+        authSnapshot: createAuthPayload("acct-mismatch", "chatgpt", "pro", "user-mismatch"),
+        profile: {
+          account_id: "acct-mismatch",
+          user_id: "user-mismatch",
+          email: "wrong@example.com",
+          plan: "team",
+        },
+      });
+
+      const exitCode = await runCli(["import", bundlePath, "--name", "friend-main"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('Bundle profile field "email" does not match auth snapshot.');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("ignores an apikey bundle profile while still requiring config.toml", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const bundlePath = join(homeDir, "apikey-profile.codexm.json");
+      const rawConfig = [
+        'model_provider = "openai"',
+        'base_url = "https://api.openai.com/v1"',
+      ].join("\n");
+
+      await writeShareBundle(bundlePath, {
+        authSnapshot: createApiKeyPayload("sk-test-import-profile"),
+        authKind: "apikey",
+        configToml: rawConfig,
+        profile: {
+          email: "ignored@example.com",
+          plan: "plus",
+        },
+      });
+
+      const exitCode = await runCli(["import", bundlePath, "--name", "api-main", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        ok: true,
+        action: "import",
+        account: {
+          name: "api-main",
+          auth_mode: "apikey",
+        },
+      });
+      expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
     }
