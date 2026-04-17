@@ -2232,6 +2232,7 @@ describe("Account Dashboard TUI", () => {
                 last_switched_at: null,
                 quota: {
                   status: "error",
+                  plan_type: "plus",
                   fetched_at: "2026-04-16T08:05:00.000Z",
                   error_message: "quota failed",
                 },
@@ -2292,7 +2293,7 @@ describe("Account Dashboard TUI", () => {
 
       expect(snapshot.headerLine).toContain("codexm | current alpha");
       expect(snapshot.currentStatusLine).toBe("Current managed account: alpha");
-      expect(snapshot.summaryLine).toContain("Accounts: 2/2 usable");
+      expect(snapshot.summaryLine).toBe("Accounts: 2/3 usable | blocked: 1W 0, 5H 0 | plus x2, pro x1");
       expect(snapshot.poolLine).toContain("Available: bottleneck");
       expect(snapshot.warnings).toEqual(["beta using cached quota"]);
       expect(snapshot.failures).toEqual([{ name: "gamma", error: "quota failed" }]);
@@ -2320,6 +2321,97 @@ describe("Account Dashboard TUI", () => {
         refreshStatusLabel: "error",
         reasonLabel: "quota failed",
       });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("builds dashboard summary totals from all managed accounts when every quota refresh fails", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const snapshot = await buildAccountDashboardSnapshot({
+        store: {
+          paths: {
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "plus-main",
+                auth_mode: "chatgpt",
+                account_id: "acct-plus-main",
+                user_id: "user-plus-main",
+                identity: "acct-plus-main:user-plus-main",
+                email: "plus@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "error",
+                  plan_type: "plus",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  error_message: "401",
+                },
+                authPath: `${homeDir}/plus-main/auth.json`,
+                metaPath: `${homeDir}/plus-main/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+              {
+                name: "team-main",
+                auth_mode: "chatgpt",
+                account_id: "acct-team-main",
+                user_id: "user-team-main",
+                identity: "acct-team-main:user-team-main",
+                email: "team@example.com",
+                created_at: "2026-03-19T01:00:00.000Z",
+                updated_at: "2026-04-16T05:20:00.000Z",
+                last_switched_at: null,
+                quota: {
+                  status: "error",
+                  plan_type: "team",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  error_message: "401",
+                },
+                authPath: `${homeDir}/team-main/auth.json`,
+                metaPath: `${homeDir}/team-main/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+            ],
+          }),
+          refreshAllQuotas: async () => ({
+            successes: [],
+            failures: [
+              { name: "plus-main", error: "401" },
+              { name: "team-main", error: "401" },
+            ],
+            warnings: [],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-team-main",
+            user_id: "user-team-main",
+            identity: "acct-team-main:user-team-main",
+            matched_accounts: ["team-main"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+        } as never,
+      });
+
+      expect(snapshot.headerLine).toContain("codexm | current team-main | 0/2 usable");
+      expect(snapshot.summaryLine).toBe("Accounts: 0/2 usable | blocked: 1W 0, 5H 0 | plus x1, team x1");
+      expect(snapshot.failures).toEqual([
+        { name: "plus-main", error: "401" },
+        { name: "team-main", error: "401" },
+      ]);
+      expect(snapshot.accounts.map((account) => account.name)).toEqual(["plus-main", "team-main"]);
+      expect(snapshot.accounts.every((account) => account.refreshStatusLabel === "error")).toBe(true);
     } finally {
       await cleanupTempHome(homeDir);
     }

@@ -351,7 +351,6 @@ function buildAccountDetailLines(options: {
 function buildDashboardSnapshot(options: {
   accounts: ManagedAccount[];
   current: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>;
-  summaryAccounts: AccountQuotaSummary[];
   failures: Array<{ name: string; error: string }>;
   warnings: string[];
   watchHistory: Awaited<ReturnType<ReturnType<typeof createWatchHistoryStore>["read"]>>;
@@ -374,7 +373,7 @@ function buildDashboardSnapshot(options: {
   ));
   const orderedAccounts = orderListAccounts(allAccounts);
   const currentAccounts = new Set(options.current.matched_accounts);
-  const { summaryLine, poolLine } = buildListSummary(options.summaryAccounts);
+  const { summaryLine, poolLine } = buildListSummary(allAccounts);
   const latestFetchedAt = allAccounts
     .map((account) => account.fetched_at)
     .filter((value): value is string => typeof value === "string")
@@ -462,7 +461,6 @@ export async function buildAccountDashboardSnapshot(options: {
   return buildDashboardSnapshot({
     accounts,
     current,
-    summaryAccounts: result.successes,
     failures: result.failures,
     warnings: [...accountWarnings, ...result.warnings],
     watchHistory,
@@ -484,7 +482,6 @@ export async function buildCachedAccountDashboardSnapshot(options: {
   return buildDashboardSnapshot({
     accounts,
     current,
-    summaryAccounts: accounts.map((account) => toQuotaSummary(account, null)),
     failures: [],
     warnings,
     watchHistory,

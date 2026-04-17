@@ -28,6 +28,21 @@ npm install -g codex-team
 
 安装完成后，使用 `codexm` 命令。
 
+## 可选 Agent Skill
+
+这个仓库还维护了一个可选的 agent skill，面向支持从 GitHub 安装 `SKILL.md` bundle 的 coding agent。它不是运行 `codexm` 的必需依赖；npm 包只分发 CLI runtime 和库入口。
+
+任何兼容的 coding agent 都可以从 GitHub 安装同一个 `skills/codexm-usage` 路径。如果你用的是 Codex 内置的 GitHub skill installer，可以把 skill 固定到与你安装的 CLI 对应的 release tag：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
+  --repo HOOLC/codex-team \
+  --path skills/codexm-usage \
+  --ref v0.0.20
+```
+
+请把 `--ref` 替换成与你安装的 CLI 版本对应的 release tag。如果你的 coding agent 会缓存已安装 skill，安装后请重启或重新加载它。
+
 ## 快速开始
 
 ### 1. 先保存几个账号并看概览

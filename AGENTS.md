@@ -56,6 +56,8 @@ Detailed design notes live in `docs/internal/`.
 ## User Docs
 
 - Treat `README.md` and `README.zh-CN.md` as user-facing onboarding guides, not internal reference manuals.
+- Treat `skills/*` as user-facing onboarding material for coding agents, not runtime requirements.
 - Keep README sections short and task-oriented; prefer a few high-signal commands and examples over exhaustive command listings.
+- If a change affects user-visible commands, flags, output, TUI interaction, or packaging expectations, update `README.md`, `README.zh-CN.md`, and any affected agent-skill files in the same change.
 - Treat `src/cli/spec.json` as the source of truth for spec-driven CLI usage/help text and generated README command sections; do not hand-edit generated copies first.
 - Run `pnpm docs:readme` after editing spec-backed README command entries.

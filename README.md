@@ -28,6 +28,21 @@ npm install -g codex-team
 
 After install, use the `codexm` command.
 
+## Optional Agent Skill
+
+This repo also maintains an optional agent skill for coding agents that can install `SKILL.md` bundles from GitHub. The skill is not required to run `codexm`; the npm package ships only the CLI runtime and library entrypoints.
+
+Any compatible coding agent can install the same `skills/codexm-usage` path from GitHub. If you are using Codex's built-in GitHub skill installer, pin the skill to the same release tag as the CLI you installed:
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
+  --repo HOOLC/codex-team \
+  --path skills/codexm-usage \
+  --ref v0.0.20
+```
+
+Replace `--ref` with the release tag that matches your installed CLI version. Restart or reload your coding agent after installing the skill if it caches available skills.
+
 ## Quick start
 
 ### 1. Save a couple of accounts and inspect them
