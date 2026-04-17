@@ -67,6 +67,7 @@ export function toCliQuotaSummaryFromRuntimeQuota(quota: RuntimeQuotaSnapshot): 
     account_id: "__current__",
     user_id: null,
     identity: "__current__",
+    auto_switch_eligible: true,
     plan_type: quota.plan_type,
     credits_balance: quota.credits_balance,
     status: "ok",

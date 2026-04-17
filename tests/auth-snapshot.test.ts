@@ -142,6 +142,41 @@ describe("auth snapshot parsing", () => {
     ).toThrow(/Unsupported auth_mode/);
   });
 
+  test("parses auto switch eligibility from account metadata and defaults missing values to true", () => {
+    const defaulted = parseSnapshotMeta(
+      JSON.stringify({
+        name: "main",
+        auth_mode: "chatgpt",
+        account_id: "acct-primary",
+        user_id: "user-primary",
+        created_at: "2026-03-18T00:00:00.000Z",
+        updated_at: "2026-03-18T00:00:00.000Z",
+        last_switched_at: null,
+        quota: {
+          status: "stale",
+        },
+      }),
+    );
+    expect(defaulted.auto_switch_eligible).toBe(true);
+
+    const explicitFalse = parseSnapshotMeta(
+      JSON.stringify({
+        name: "main",
+        auth_mode: "chatgpt",
+        account_id: "acct-primary",
+        user_id: "user-primary",
+        created_at: "2026-03-18T00:00:00.000Z",
+        updated_at: "2026-03-18T00:00:00.000Z",
+        last_switched_at: null,
+        auto_switch_eligible: false,
+        quota: {
+          status: "stale",
+        },
+      }),
+    );
+    expect(explicitFalse.auto_switch_eligible).toBe(false);
+  });
+
   test("masks long account identities with a shorter prefix and suffix", () => {
     expect(maskAccountId("acct-primary:user-primary")).toBe("acct...ary");
   });

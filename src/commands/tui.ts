@@ -408,6 +408,7 @@ function buildDashboardSnapshot(options: {
 
       return {
         name: account.name,
+        autoSwitchEligible: account.auto_switch_eligible ?? true,
         planLabel: account.plan_type ?? "-",
         identityLabel: maskAccountId(account.identity),
         availabilityLabel,
@@ -672,6 +673,15 @@ export async function handleTuiCommand(options: {
             store: options.store,
             name,
           }),
+        toggleAutoSwitchProtection: async (name, eligible) => {
+          const account = await options.store.setAutoSwitchEligibility(name, eligible);
+          return {
+            statusMessage: eligible
+              ? `Removed auto-switch protection from "${account.name}".`
+              : `Protected "${account.name}" from auto-switch target selection.`,
+            preferredName: account.name,
+          };
+        },
       });
     } finally {
       await externalUpdateMonitors.stop();

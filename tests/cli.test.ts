@@ -525,7 +525,7 @@ describe("CLI", () => {
             };
           },
           watchManagedQuotaSignals: async () => {
-            await new Promise((resolve) => setTimeout(resolve, 15));
+            await new Promise((resolve) => setTimeout(resolve, 30));
             interruptController.abort();
           },
         }),

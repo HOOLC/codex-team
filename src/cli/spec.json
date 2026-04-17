@@ -17,6 +17,7 @@
     { "flag": "--json", "description": "print JSON output", "global": false, "aliases": ["-j"] },
     { "flag": "--name", "description": "set the local account name for import", "global": false, "takesValue": true },
     { "flag": "--no-auto-switch", "description": "watch without switching accounts automatically", "global": false },
+    { "flag": "--owner-pid", "description": "set the owning process id for a created overlay", "global": false, "takesValue": true },
     { "flag": "--output", "description": "write output to the given file", "global": false, "takesValue": true },
     { "flag": "--refresh", "description": "refresh quota data before printing", "global": false },
     { "flag": "--status", "description": "show background watch status", "global": false },
@@ -28,7 +29,7 @@
     { "flag": "--with-api-key", "description": "add account by reading an API key from stdin", "global": false },
     { "flag": "--yes", "description": "skip removal confirmation", "global": false, "aliases": ["-y"] }
   ],
-  "completionAccountCommands": ["launch", "list", "remove", "rename", "switch"],
+  "completionAccountCommands": ["launch", "list", "protect", "remove", "rename", "switch", "unprotect"],
   "notes": [
     "In an interactive terminal, running plain codexm opens the account dashboard; use \"codexm tui [query]\" for an explicit entry or initial filter.",
     "codexm current shows live usage when a managed Codex Desktop session is available.",
@@ -116,6 +117,37 @@
       "helpUsages": ["codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"],
       "usageErrors": {
         "default": "codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"
+      }
+    },
+    {
+      "name": "protect",
+      "flags": ["--json"],
+      "helpUsages": ["codexm protect <name> [--json]"],
+      "usageErrors": {
+        "default": "codexm protect <name> [--json]"
+      }
+    },
+    {
+      "name": "unprotect",
+      "flags": ["--json"],
+      "helpUsages": ["codexm unprotect <name> [--json]"],
+      "usageErrors": {
+        "default": "codexm unprotect <name> [--json]"
+      }
+    },
+    {
+      "name": "overlay",
+      "flags": ["--json", "--owner-pid"],
+      "helpUsages": [
+        "codexm overlay <create|delete|gc> ...",
+        "codexm overlay create <name> [--owner-pid <pid>] [--json]",
+        "codexm overlay delete <run-id|path> [--json]",
+        "codexm overlay gc [--json]"
+      ],
+      "usageErrors": {
+        "default": "codexm overlay <create|delete|gc> ...",
+        "create": "codexm overlay create <name> [--owner-pid <pid>] [--json]",
+        "delete": "codexm overlay delete <run-id|path> [--json]"
       }
     },
     {
@@ -228,6 +260,20 @@
             "description": {
               "en": "rename a saved snapshot",
               "zh-CN": "重命名已保存快照"
+            }
+          },
+          {
+            "usage": "codexm protect <name>",
+            "description": {
+              "en": "exclude a saved snapshot from automatic switch target selection",
+              "zh-CN": "将已保存快照排除出自动切换候选"
+            }
+          },
+          {
+            "usage": "codexm unprotect <name>",
+            "description": {
+              "en": "restore a saved snapshot to automatic switch target selection",
+              "zh-CN": "恢复已保存快照进入自动切换候选"
             }
           },
           {
@@ -395,6 +441,13 @@
             "description": {
               "en": "run codex with global auth follow-restart or an isolated managed account snapshot",
               "zh-CN": "以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行"
+            }
+          },
+          {
+            "usage": "codexm overlay create <name>",
+            "description": {
+              "en": "create an isolated CODEX_HOME overlay for another tool to use",
+              "zh-CN": "为其他工具创建隔离的 CODEX_HOME overlay"
             }
           }
         ]

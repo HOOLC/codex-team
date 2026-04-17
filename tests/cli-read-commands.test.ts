@@ -182,6 +182,9 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
+    expect(output).toContain("codexm protect <name> [--json]");
+    expect(output).toContain("codexm unprotect <name> [--json]");
+    expect(output).toContain("codexm overlay <create|delete|gc> ...");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
     expect(output).toContain("codexm tui [query]");
     expect(output).toContain("codexm run [--account <name>] [-- ...codexArgs]");

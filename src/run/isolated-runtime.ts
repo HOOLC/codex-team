@@ -25,7 +25,17 @@ interface OverlayMetadata {
   accountName: string;
   createdAt: string;
   pid: number;
+  ownerPid?: number;
   runId: string;
+}
+
+export interface PreparedCodexOverlay {
+  account: ManagedAccount;
+  authFilePath: string;
+  codexHomePath: string;
+  runId: string;
+  ownerPid: number;
+  cleanup(): Promise<void>;
 }
 
 export interface PreparedIsolatedCodexRun {
@@ -106,9 +116,10 @@ async function removeDirectoryIfPresent(path: string): Promise<void> {
   }
 }
 
-async function pruneStaleRunOverlays(baseDir: string): Promise<void> {
+async function pruneStaleRunOverlays(baseDir: string): Promise<string[]> {
   const accountDirs = await readDirectoryEntries(baseDir);
   const now = Date.now();
+  const deletedPaths: string[] = [];
 
   for (const accountDir of accountDirs) {
     if (!accountDir.isDirectory()) {
@@ -141,15 +152,18 @@ async function pruneStaleRunOverlays(baseDir: string): Promise<void> {
         Number.isFinite(createdAtMs) && now - createdAtMs > OVERLAY_STALE_TTL_MS;
       const staleByPid =
         metadata !== null &&
-        typeof metadata.pid === "number" &&
-        Number.isInteger(metadata.pid) &&
-        !isProcessAlive(metadata.pid);
+        typeof (metadata.ownerPid ?? metadata.pid) === "number" &&
+        Number.isInteger(metadata.ownerPid ?? metadata.pid) &&
+        !isProcessAlive(metadata.ownerPid ?? metadata.pid);
 
       if (metadata === null || staleByAge || staleByPid) {
         await removeDirectoryIfPresent(overlayPath);
+        deletedPaths.push(overlayPath);
       }
     }
   }
+
+  return deletedPaths;
 }
 
 async function linkSharedEntries(sourceCodexHome: string, targetCodexHome: string): Promise<void> {
@@ -173,11 +187,60 @@ async function writeOverlayConfig(sourceConfigPath: string, targetConfigPath: st
   await atomicWriteFile(targetConfigPath, forceFileAuthStore(rawConfig), FILE_MODE);
 }
 
+async function resolveOverlayPath(store: AccountStore, ref: string): Promise<string | null> {
+  if (ref.includes("/") || ref.startsWith(".")) {
+    return ref;
+  }
+
+  const overlaysBaseDir = join(store.paths.codexTeamDir, RUN_OVERLAYS_DIR_NAME);
+  const accountDirs = await readDirectoryEntries(overlaysBaseDir);
+  for (const accountDir of accountDirs) {
+    if (!accountDir.isDirectory()) {
+      continue;
+    }
+
+    const overlayPath = join(overlaysBaseDir, accountDir.name, ref);
+    if (await pathExists(overlayPath)) {
+      return overlayPath;
+    }
+  }
+
+  return null;
+}
+
 export async function prepareIsolatedCodexRun(options: {
   accountName: string;
   baseEnv?: NodeJS.ProcessEnv;
   store: AccountStore;
 }): Promise<PreparedIsolatedCodexRun> {
+  const overlay = await prepareCodexOverlay({
+    accountName: options.accountName,
+    store: options.store,
+    ownerPid: process.pid,
+  });
+
+  const env: NodeJS.ProcessEnv = {
+    ...(options.baseEnv ?? process.env),
+    CODEX_HOME: overlay.codexHomePath,
+  };
+  delete env.CODEX_SQLITE_HOME;
+
+  return {
+    account: overlay.account,
+    authFilePath: overlay.authFilePath,
+    codexHomePath: overlay.codexHomePath,
+    env,
+    runId: overlay.runId,
+    sessionsDirPath: join(overlay.codexHomePath, "sessions"),
+    cleanup: overlay.cleanup,
+  };
+}
+
+export async function prepareCodexOverlay(options: {
+  accountName: string;
+  store: AccountStore;
+  ownerPid?: number;
+}): Promise<PreparedCodexOverlay> {
   const account = await options.store.getManagedAccount(options.accountName);
   if (account.auth_mode !== "chatgpt") {
     throw new Error(
@@ -206,6 +269,7 @@ export async function prepareIsolatedCodexRun(options: {
     accountName: account.name,
     createdAt: new Date().toISOString(),
     pid: process.pid,
+    ...(typeof options.ownerPid === "number" ? { ownerPid: options.ownerPid } : {}),
     runId,
   };
   await atomicWriteFile(
@@ -214,23 +278,37 @@ export async function prepareIsolatedCodexRun(options: {
     FILE_MODE,
   );
 
-  const env: NodeJS.ProcessEnv = {
-    ...(options.baseEnv ?? process.env),
-    CODEX_HOME: overlayDir,
-  };
-  delete env.CODEX_SQLITE_HOME;
-
   return {
     account,
     authFilePath,
     codexHomePath: overlayDir,
-    env,
     runId,
-    sessionsDirPath: join(overlayDir, "sessions"),
+    ownerPid: metadata.ownerPid ?? metadata.pid,
     async cleanup() {
       await removeDirectoryIfPresent(overlayDir);
     },
   };
+}
+
+export async function deleteCodexOverlay(options: {
+  store: AccountStore;
+  ref: string;
+}): Promise<string[]> {
+  const overlayPath = await resolveOverlayPath(options.store, options.ref);
+  if (!overlayPath) {
+    return [];
+  }
+
+  await removeDirectoryIfPresent(overlayPath);
+  return [overlayPath];
+}
+
+export async function garbageCollectCodexOverlays(options: {
+  store: AccountStore;
+}): Promise<string[]> {
+  const overlaysBaseDir = join(options.store.paths.codexTeamDir, RUN_OVERLAYS_DIR_NAME);
+  await ensureDirectory(overlaysBaseDir, DIRECTORY_MODE);
+  return await pruneStaleRunOverlays(overlaysBaseDir);
 }
 
 export function startIsolatedQuotaHistorySampler(options: {

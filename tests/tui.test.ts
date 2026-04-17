@@ -141,6 +141,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         identityLabel: "acct-alpha:user-alpha",
         availabilityLabel: "available",
         current: currentName === "alpha",
+        autoSwitchEligible: true,
         score: 88,
         scoreLabel: "88%",
         etaLabel: "8.2h",
@@ -185,6 +186,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         identityLabel: "acct-beta:user-beta",
         availabilityLabel: "available",
         current: currentName === "beta",
+        autoSwitchEligible: false,
         score: 64,
         scoreLabel: "64%",
         etaLabel: "3.5h",
@@ -229,6 +231,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         identityLabel: "acct-gamma:user-gamma",
         availabilityLabel: "blocked",
         current: currentName === "gamma",
+        autoSwitchEligible: true,
         score: 0,
         scoreLabel: "0%",
         etaLabel: "-",
@@ -298,18 +301,63 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("5H");
     expect(screen).toContain("1W");
     expect(screen).toContain("NEXT RESET");
-    expect(screen).toContain(">* beta");
+    expect(screen).toContain(">* beta [P]");
     expect(screen).toContain("alpha");
     expect(screen).toContain("Email: beta@example.com");
+    expect(screen).toContain("beta [current] [protected]");
     expect(screen).toContain("Joined: 2026-03-20 09:00");
     expect(screen).toContain("Fetched: 2026-04-16 13:20");
     expect(screen).toContain("Bottleneck: 5H");
     expect(screen).toContain("filter:");
     expect(screen).toContain("Enter");
     expect(screen).toContain("o run");
-    expect(screen).toContain("D relaunch");
+    expect(screen).toContain("D rel");
     expect(screen).toContain("e/E exp");
     expect(screen).toContain("q quit");
+  });
+
+  test("toggles auto-switch protection from the dashboard with p", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const toggleCalls: Array<{ name: string; eligible: boolean }> = [];
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async () => ({
+        statusMessage: 'Switched to "alpha".',
+        warningMessages: [],
+      }),
+      toggleAutoSwitchProtection: async (name, eligible) => {
+        toggleCalls.push({ name, eligible });
+        return {
+          statusMessage: eligible
+            ? `Removed auto-switch protection from "${name}".`
+            : `Protected "${name}" from auto-switch target selection.`,
+          preferredName: name,
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("j");
+    await flushLoop();
+    stdin.emitInput("p");
+    await flushLoop();
+    await flushLoop();
+
+    expect(toggleCalls).toEqual([{ name: "beta", eligible: true }]);
+    expect(latestDashboardFrame(stdout.read())).toContain(
+      'Removed auto-switch protection from "beta".',
+    );
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
   });
 
   test("renders a reload hint when the selected account is already current", () => {
@@ -1756,6 +1804,7 @@ describe("Account Dashboard TUI", () => {
             auth_mode: "chatgpt",
             account_id: "acct-beta",
             user_id: "user-beta",
+            auto_switch_eligible: true,
             identity: "acct-beta:user-beta",
             email: "beta@example.com",
             created_at: "2026-04-16T00:00:00.000Z",

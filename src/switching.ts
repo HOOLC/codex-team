@@ -235,7 +235,9 @@ export async function tryReadManagedDesktopQuota(
 
 export async function selectAutoSwitchAccount(store: AccountStore): Promise<AutoSwitchSelection> {
   const refreshResult = await store.refreshAllQuotas();
-  const candidates = rankAutoSwitchCandidates(refreshResult.successes);
+  const candidates = rankAutoSwitchCandidates(
+    refreshResult.successes.filter((account) => account.auto_switch_eligible ?? true),
+  );
   if (candidates.length === 0) {
     throw new Error("No auto-switch candidate has usable 5H or 1W quota data available.");
   }

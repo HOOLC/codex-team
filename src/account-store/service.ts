@@ -108,6 +108,7 @@ export class AccountStore {
       account_id: account.account_id,
       user_id: account.user_id ?? null,
       identity: account.identity,
+      auto_switch_eligible: account.auto_switch_eligible,
       plan_type: planType,
       credits_balance: quota.credits_balance ?? null,
       status: quota.status,
@@ -646,6 +647,16 @@ export class AccountStore {
     await atomicWriteFile(metaPath, stringifyJson(meta));
 
     return await this.repository.readManagedAccount(newName);
+  }
+
+  async setAutoSwitchEligibility(name: string, eligible: boolean): Promise<ManagedAccount> {
+    ensureAccountName(name);
+    const account = await this.repository.readManagedAccount(name);
+    const meta = parseSnapshotMeta(await readJsonFile(account.metaPath));
+    meta.auto_switch_eligible = eligible;
+    meta.updated_at = new Date().toISOString();
+    await this.repository.writeAccountMeta(name, meta);
+    return await this.repository.readManagedAccount(name);
   }
 
   async doctor(): Promise<DoctorReport> {

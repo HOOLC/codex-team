@@ -72,6 +72,7 @@ export interface AccountDashboardExportSource {
 
 export interface AccountDashboardAccount {
   name: string;
+  autoSwitchEligible: boolean;
   planLabel: string;
   identityLabel: string;
   availabilityLabel: string;
@@ -169,6 +170,10 @@ export interface RunAccountDashboardTuiOptions {
   ) => Promise<AccountDashboardActionResult>;
   deleteAccount?: (
     name: string,
+  ) => Promise<AccountDashboardActionResult>;
+  toggleAutoSwitchProtection?: (
+    name: string,
+    eligible: boolean,
   ) => Promise<AccountDashboardActionResult>;
 }
 
@@ -586,11 +591,12 @@ function renderWideListRow(
   const etaBlockWidth = showEtaColumn ? 1 + 6 : 0;
   const fixedWidth = 2 + 1 + 1 + 1 + identityWidth + 1 + 6 + 1 + 5 + etaBlockWidth + 1 + 4 + 1 + 4 + 1 + 11;
   const nameWidth = Math.max(8, width - fixedWidth);
+  const displayName = account.autoSwitchEligible ? account.name : `${account.name} [P]`;
   const line = [
     selected ? ">" : " ",
     account.current ? "*" : " ",
     " ",
-    padEndVisible(truncate(account.name, nameWidth), nameWidth),
+    padEndVisible(truncate(displayName, nameWidth), nameWidth),
     " ",
     padEndVisible(compactIdentity(account.identityLabel, identityWidth), identityWidth),
     " ",
@@ -620,11 +626,12 @@ function renderCompactListRow(
   const includeReset = width >= 58;
   const firstFixedWidth = 2 + 1 + 1 + 1 + (includePlan ? 1 + 6 : 0) + 1 + 5 + (showEtaColumn ? 1 + 6 : 0);
   const nameWidth = Math.max(8, width - firstFixedWidth);
+  const displayName = account.autoSwitchEligible ? account.name : `${account.name} [P]`;
   const firstLine = [
     selected ? ">" : " ",
     account.current ? "*" : " ",
     " ",
-    padEndVisible(truncate(account.name, nameWidth), nameWidth),
+    padEndVisible(truncate(displayName, nameWidth), nameWidth),
     includePlan ? ` ${padEndVisible(truncate(account.planLabel, 6), 6)}` : "",
     " ",
     padStartVisible(account.scoreLabel, 5),
@@ -717,9 +724,10 @@ function renderDetailLines(
     return fitLines(lines, height);
   }
 
+  const protectionTag = selectedAccount.autoSwitchEligible ? "" : " [protected]";
   const title = selectedAccount.current
-    ? `${selectedAccount.name} [current] [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`
-    : `${selectedAccount.name} [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`;
+    ? `${selectedAccount.name} [current]${protectionTag} [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`
+    : `${selectedAccount.name}${protectionTag} [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`;
 
   return fitLines(
     [emphasize(title), ...selectedAccount.detailLines].map((line) => truncate(line, width)),
@@ -869,10 +877,10 @@ function renderFilterLine(
 function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
   const forceLabel = selectedAccount?.current ? "f reload" : "f force";
   const hint = width < 92
-    ? `Enter | ${forceLabel} | o run | O iso | d desk | D relaunch | q quit`
+    ? `Enter | ${forceLabel} | p prot | o run | O iso | d desk | D rel | q quit`
     : width < 132
-      ? `/ filter | Enter | ${forceLabel} | o run | O iso | d desk | D relaunch | e/E exp | i imp | x del | u undo | q quit`
-      : `j/k move | / filter | Enter | ${forceLabel} | o run | O iso | d desk | D relaunch | e/E exp | i imp | x del | u undo | r refresh | q quit`;
+      ? `/ filter | Enter | ${forceLabel} | p prot | o run | O iso | d desk | D rel | e/E exp | i imp | x del | u undo | q quit`
+      : `j/k move | / filter | Enter | ${forceLabel} | p prot | o run | O iso | d desk | D relaunch | e/E exp | i imp | x del | u undo | r refresh | q quit`;
   return truncate(color(hint, "dim"), width);
 }
 
@@ -2056,6 +2064,29 @@ export async function runAccountDashboardTui(
       const currentUndo = undoAction;
       undoAction = null;
       await runSimpleAction("Undo", async () => await currentUndo.run());
+      return;
+    }
+    if (event.value === "p") {
+      if (!options.toggleAutoSwitchProtection) {
+        state = {
+          ...state,
+          statusMessage: "Protection toggle is unavailable in this session.",
+        };
+        render();
+        return;
+      }
+
+      const filtered = getFilteredAccounts(snapshot, state.query);
+      const selected = filtered[state.selected] ?? null;
+      if (!selected) {
+        return;
+      }
+
+      await runSimpleAction("Protection", async () =>
+        await options.toggleAutoSwitchProtection!(
+          selected.name,
+          !selected.autoSwitchEligible,
+        ));
       return;
     }
     if (event.value === "f") {

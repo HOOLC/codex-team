@@ -51,6 +51,7 @@ dashboard 里常用按键：
 
 - `Enter`：切号
 - `f`：在当前账号上 reload，或强制切号
+- `p`：切换“是否允许自动切号选中该账号”的保护状态
 - `o`：在当前终端运行 `codex`，退出后回到 dashboard
 - `O`：用隔离的托管快照运行 `codex`，退出后回到 dashboard
 - `d`：打开或聚焦 Codex Desktop，但不离开 dashboard
@@ -107,6 +108,8 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm save <name>`: 把当前生效的 auth 保存成命名快照
 - `codexm update`: 刷新当前托管账号对应的已保存快照
 - `codexm rename <old> <new>`: 重命名已保存快照
+- `codexm protect <name>`: 将已保存快照排除出自动切换候选
+- `codexm unprotect <name>`: 恢复已保存快照进入自动切换候选
 - `codexm remove <name> --yes`: 删除已保存快照
 - `codexm export [name] [--output <file>]`: 把当前 auth 或已保存快照导出成分享 bundle
 - `codexm import <file> --name <local-name>`: 把分享 bundle 导入成命名托管账号
@@ -136,11 +139,12 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm watch --status`: 查看后台 watcher 状态
 - `codexm watch --stop`: 停止后台 watcher
 - `codexm run [--account <name>] [-- ...codexArgs]`: 以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行
+- `codexm overlay create <name>`: 为其他工具创建隔离的 CODEX_HOME overlay
 <!-- GENERATED:CORE_COMMANDS:END -->
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `f` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch，同时避免和其他存活的 watch 重复；退出时则把这条 watch 交接给 detached watcher。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch，同时避免和其他存活的 watch 重复；退出时则把这条 watch 交接给 detached watcher。
 
 ## 什么时候该用哪个命令？
 

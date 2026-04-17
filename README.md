@@ -51,6 +51,7 @@ Inside the dashboard:
 
 - `Enter`: switch
 - `f`: reload the current account or force-switch
+- `p`: toggle whether the selected account can be chosen as an auto-switch target
 - `o`: run `codex` in the current terminal, then return to the dashboard when it exits
 - `O`: run `codex` with an isolated managed snapshot, then return to the dashboard when it exits
 - `d`: open or focus Codex Desktop without leaving the dashboard
@@ -107,6 +108,8 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm save <name>`: save the currently active auth as a named snapshot
 - `codexm update`: refresh the saved snapshot for the current managed account
 - `codexm rename <old> <new>`: rename a saved snapshot
+- `codexm protect <name>`: exclude a saved snapshot from automatic switch target selection
+- `codexm unprotect <name>`: restore a saved snapshot to automatic switch target selection
 - `codexm remove <name> --yes`: remove a saved snapshot
 - `codexm export [name] [--output <file>]`: export the current auth or a saved snapshot as a share bundle
 - `codexm import <file> --name <local-name>`: import a share bundle as a named managed account
@@ -136,11 +139,12 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm watch --status`: inspect detached watcher state
 - `codexm watch --stop`: stop the detached watcher
 - `codexm run [--account <name>] [-- ...codexArgs]`: run codex with global auth follow-restart or an isolated managed account snapshot
+- `codexm overlay create <name>`: create an isolated CODEX_HOME overlay for another tool to use
 <!-- GENERATED:CORE_COMMANDS:END -->
 
 Use `codexm --help` for the full command reference. Share bundles are plain auth snapshots intended only for fully trusted recipients.
 
-In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `f` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `Esc` backs out of prompts; `q` quits from the main dashboard. When no detached `codexm watch` is already running and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active, avoids duplicating other live watch owners, and hands that watch off to a detached watcher when you quit.
+In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `f` / `p` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `p` toggles whether the selected account can be picked as an auto-switch target; it does not stop the current in-use account from being switched away later. `Esc` backs out of prompts; `q` quits from the main dashboard. When no detached `codexm watch` is already running and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active, avoids duplicating other live watch owners, and hands that watch off to a detached watcher when you quit.
 
 ## When should I use each command?
 

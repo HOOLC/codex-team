@@ -35,9 +35,11 @@ import {
 import { writeJson } from "./cli/output.js";
 import {
   handleAddCommand,
+  handleProtectCommand,
   handleRemoveCommand,
   handleRenameCommand,
   handleSaveCommand,
+  handleUnprotectCommand,
   handleUpdateCommand,
 } from "./commands/account-management.js";
 import {
@@ -58,6 +60,7 @@ import {
   handleLaunchCommand,
   handleWatchCommand,
 } from "./commands/desktop.js";
+import { handleOverlayCommand } from "./commands/overlay.js";
 import {
   describeBusySwitchLock,
   performAutoSwitch,
@@ -494,6 +497,37 @@ export async function runCli(
           managedDesktopWaitStatusIntervalMs,
           watchQuotaMinReadIntervalMs,
           watchQuotaIdleReadIntervalMs,
+        });
+      }
+
+      case "protect": {
+        return await handleProtectCommand({
+          name: parsed.positionals[0],
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "unprotect": {
+        return await handleUnprotectCommand({
+          name: parsed.positionals[0],
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "overlay": {
+        return await handleOverlayCommand({
+          positionals: parsed.positionals,
+          ownerPid: parsed.optionValues.get("--owner-pid"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
         });
       }
 
