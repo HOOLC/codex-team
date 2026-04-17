@@ -144,7 +144,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch，同时避免和其他存活的 watch 重复；退出时则把这条 watch 交接给 detached watcher。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch，同时避免和其他存活的 watch 重复；退出时则把这条 watch 交接给 detached watcher。
 
 ## 什么时候该用哪个命令？
 

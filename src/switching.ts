@@ -69,8 +69,9 @@ export function stripManagedDesktopWarning(warnings: string[]): string[] {
 }
 
 function startManagedDesktopWaitReporter(
-  stream: NodeJS.WriteStream,
   options: {
+    stream?: NodeJS.WriteStream;
+    onStatusMessage?: (message: string) => void;
     delayMs?: number;
     intervalMs?: number;
   } = {},
@@ -82,17 +83,19 @@ function startManagedDesktopWaitReporter(
   const startedAt = Date.now();
   let started = false;
   let intervalHandle: NodeJS.Timeout | null = null;
+  const emitStatusMessage = (message: string) => {
+    options.stream?.write(`${message}\n`);
+    options.onStatusMessage?.(message);
+  };
 
   const timeoutHandle = setTimeout(() => {
     started = true;
-    stream.write(
-      "Waiting for the current Codex Desktop thread to finish before applying the switch...\n",
-    );
+    emitStatusMessage("Waiting for the current Codex Desktop thread to finish before applying the switch...");
 
     intervalHandle = setInterval(() => {
       const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
-      stream.write(
-        `Still waiting for the current Codex Desktop thread to finish (${elapsedSeconds}s elapsed)...\n`,
+      emitStatusMessage(
+        `Still waiting for the current Codex Desktop thread to finish (${elapsedSeconds}s elapsed)...`,
       );
     }, intervalMs);
     intervalHandle.unref?.();
@@ -107,7 +110,7 @@ function startManagedDesktopWaitReporter(
       }
 
       if (started && result === "success") {
-        stream.write("Applied the switch to the managed Codex Desktop session.\n");
+        emitStatusMessage("Applied the switch to the managed Codex Desktop session.");
       }
     },
   };
@@ -120,16 +123,19 @@ export async function refreshManagedDesktopAfterSwitch(
     force?: boolean;
     signal?: AbortSignal;
     statusStream?: NodeJS.WriteStream;
+    onStatusMessage?: (message: string) => void;
     statusDelayMs?: number;
     statusIntervalMs?: number;
     timeoutMs?: number;
   } = {},
 ): Promise<"applied" | "killed" | "none" | "other-running" | "failed"> {
   let reporter: ReturnType<typeof startManagedDesktopWaitReporter> | null = null;
-  if (options.force !== true && options.statusStream) {
+  if (options.force !== true && (options.statusStream || options.onStatusMessage)) {
     try {
       if (await desktopLauncher.isManagedDesktopRunning()) {
-        reporter = startManagedDesktopWaitReporter(options.statusStream, {
+        reporter = startManagedDesktopWaitReporter({
+          stream: options.statusStream,
+          onStatusMessage: options.onStatusMessage,
           delayMs: options.statusDelayMs,
           intervalMs: options.statusIntervalMs,
         });

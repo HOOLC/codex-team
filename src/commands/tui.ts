@@ -579,6 +579,7 @@ export async function handleTuiCommand(options: {
               store: options.store,
               desktopLauncher: options.desktopLauncher,
               stderr: silentStatusStream,
+              onStatusMessage: switchOptions.onStatusMessage,
               debugLog: options.debugLog,
               interruptSignal: switchOptions.signal ?? options.interruptSignal,
               managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,

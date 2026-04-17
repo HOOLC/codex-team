@@ -17,6 +17,7 @@ export interface PerformManualSwitchOptions {
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
   stderr: NodeJS.WriteStream;
+  onStatusMessage?: (message: string) => void;
   debugLog?: DebugLogger;
   interruptSignal?: AbortSignal;
   managedDesktopWaitStatusDelayMs: number;
@@ -57,6 +58,7 @@ export async function performManualSwitch(
             force: options.force,
             signal: options.interruptSignal,
             statusStream: options.stderr,
+            onStatusMessage: options.onStatusMessage,
             statusDelayMs: options.managedDesktopWaitStatusDelayMs,
             statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
           },

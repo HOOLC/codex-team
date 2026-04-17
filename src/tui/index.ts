@@ -145,7 +145,11 @@ export interface RunAccountDashboardTuiOptions {
   loadSnapshot: () => Promise<AccountDashboardSnapshot>;
   switchAccount: (
     name: string,
-    options: { force: boolean; signal?: AbortSignal },
+    options: {
+      force: boolean;
+      signal?: AbortSignal;
+      onStatusMessage?: (message: string) => void;
+    },
   ) => Promise<{
     statusMessage?: string;
     warningMessages?: string[];
@@ -1614,6 +1618,10 @@ export async function runAccountDashboardTui(
       const result = await options.switchAccount(selected.name, {
         force: optionsForAction.force,
         signal: controller.signal,
+        onStatusMessage: (message) => {
+          busyMessage = message;
+          render();
+        },
       });
 
       state = {

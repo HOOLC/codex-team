@@ -360,6 +360,59 @@ describe("Account Dashboard TUI", () => {
     });
   });
 
+  test("shows managed Desktop switch wait progress in the dashboard while switching", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let currentName = "alpha";
+    let releaseSwitch!: () => void;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot(currentName),
+      switchAccount: async (name, switchOptions) => {
+        switchOptions.onStatusMessage?.(
+          "Waiting for the current Codex Desktop thread to finish before applying the switch...",
+        );
+        switchOptions.onStatusMessage?.(
+          "Still waiting for the current Codex Desktop thread to finish (3s elapsed)...",
+        );
+        await new Promise<void>((resolve) => {
+          releaseSwitch = resolve;
+        });
+        currentName = name;
+        return {
+          statusMessage: `Switched to "${name}".`,
+          warningMessages: [],
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("j");
+    await flushLoop();
+    stdin.emitInput("\r");
+    await flushLoop();
+    await flushLoop();
+
+    expect(latestDashboardFrame(stdout.read())).toContain(
+      "Still waiting for the current Codex Desktop thread to finish (3s elapsed)...",
+    );
+
+    releaseSwitch();
+    await flushLoop();
+    await flushLoop();
+
+    expect(latestDashboardFrame(stdout.read())).toContain('Switched to "beta".');
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+  });
+
   test("renders a reload hint when the selected account is already current", () => {
     const screen = stripAnsi(
       renderAccountDashboardScreen({
