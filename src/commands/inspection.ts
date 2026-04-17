@@ -21,9 +21,16 @@ import {
 } from "../cli/quota.js";
 import { writeJson } from "../cli/output.js";
 import {
+  LOCAL_USAGE_WINDOWS,
+  formatLocalUsageWindowLine,
+  type LocalUsageWindowName,
+} from "../local-usage/format.js";
+import { LocalUsageService } from "../local-usage/service.js";
+import {
   computeWatchHistoryEta,
   computeWatchObservedRatioDiagnostics,
   createWatchHistoryStore,
+  filterWatchHistoryByScope,
   type WatchHistoryEtaContext,
 } from "../watch/history.js";
 
@@ -643,8 +650,13 @@ export async function handleListCommand(options: {
   debug: boolean;
   json: boolean;
   targetName?: string;
+  usageWindow?: string;
   verbose: boolean;
 }): Promise<number> {
+  const usageWindow = options.usageWindow ?? "7d";
+  if (!LOCAL_USAGE_WINDOWS.includes(usageWindow as LocalUsageWindowName)) {
+    throw new Error(`Usage window must be one of: ${LOCAL_USAGE_WINDOWS.join(", ")}.`);
+  }
   if (options.targetName) {
     ensureAccountName(options.targetName);
   }
@@ -657,7 +669,10 @@ export async function handleListCommand(options: {
   const currentAccounts = new Set(current.matched_accounts);
   const now = new Date();
   const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
-  const watchHistory = await watchHistoryStore.read(now);
+  const watchHistory = filterWatchHistoryByScope(
+    await watchHistoryStore.read(now),
+    { kind: "global" },
+  );
   const etaByName = new Map(
     result.successes.map((account) => [
       account.name,
@@ -665,7 +680,20 @@ export async function handleListCommand(options: {
     ] as const),
   );
   options.debugLog(
-    `list: target=${options.targetName ?? "all"} successes=${result.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
+    `list: target=${options.targetName ?? "all"} usage_window=${usageWindow} successes=${result.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
+  );
+  const usageSummary = await new LocalUsageService({
+    homeDir: options.store.paths.homeDir,
+  }).load();
+  const usageBlock = {
+    selected_window: usageWindow,
+    windows: {
+      [usageWindow]: usageSummary.windows[usageWindow as LocalUsageWindowName],
+    },
+  };
+  const usageLine = formatLocalUsageWindowLine(
+    usageWindow,
+    usageSummary.windows[usageWindow as LocalUsageWindowName],
   );
   if (options.debug) {
     const ratioDiagnostics = computeWatchObservedRatioDiagnostics(watchHistory, now);
@@ -688,6 +716,7 @@ export async function handleListCommand(options: {
     writeJson(options.stdout, {
       ...toCliQuotaRefreshResult(result),
       current,
+      usage: usageBlock,
       successes: result.successes.map((account) => ({
         ...toCliQuotaSummary(account),
         is_current: currentAccounts.has(account.name),
@@ -699,7 +728,7 @@ export async function handleListCommand(options: {
     });
   } else {
     options.stdout.write(
-      `${describeQuotaRefresh(result, current, { verbose: options.verbose, etaByName })}\n`,
+      `${describeQuotaRefresh(result, current, { verbose: options.verbose, etaByName, usageLine })}\n`,
     );
   }
   return result.failures.length === 0 ? 0 : 1;

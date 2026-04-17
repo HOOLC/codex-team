@@ -19,6 +19,7 @@ export interface StoreState {
 
 export interface ManagedAccount extends SnapshotMeta {
   identity: string;
+  email: string | null;
   authPath: string;
   metaPath: string;
   configPath: string | null;
@@ -30,6 +31,7 @@ export interface AccountQuotaSummary {
   account_id: string;
   user_id: string | null;
   identity: string;
+  auto_switch_eligible?: boolean;
   plan_type: string | null;
   credits_balance: number | null;
   status: QuotaStatus;

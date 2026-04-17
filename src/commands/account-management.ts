@@ -55,6 +55,7 @@ function toCliAccount(account: {
   user_id?: string | null;
   identity: string | null;
   auth_mode: string;
+  auto_switch_eligible?: boolean;
 }) {
   return {
     name: account.name,
@@ -62,6 +63,7 @@ function toCliAccount(account: {
     user_id: account.user_id ?? null,
     identity: account.identity,
     auth_mode: account.auth_mode,
+    auto_switch_eligible: account.auto_switch_eligible ?? true,
   };
 }
 
@@ -285,6 +287,66 @@ export async function handleRenameCommand(options: {
     });
   } else {
     stdout.write(`Renamed "${oldName}" to "${newName}".\n`);
+  }
+
+  return 0;
+}
+
+export async function handleProtectCommand(options: {
+  name: string | undefined;
+  json: boolean;
+  store: AccountStore;
+  stdout: NodeJS.WriteStream;
+  debugLog?: DebugLogger;
+}): Promise<number> {
+  const { name, json, store, stdout, debugLog } = options;
+
+  if (!name) {
+    throw new Error(`Usage: ${getUsage("protect")}`);
+  }
+  ensureAccountName(name);
+
+  const account = await store.setAutoSwitchEligibility(name, false);
+  debugLog?.(`protect: name=${account.name} auto_switch_eligible=${account.auto_switch_eligible}`);
+
+  if (json) {
+    writeJson(stdout, {
+      ok: true,
+      action: "protect",
+      account: toCliAccount(account),
+    });
+  } else {
+    stdout.write(`Protected "${account.name}" from auto-switch target selection.\n`);
+  }
+
+  return 0;
+}
+
+export async function handleUnprotectCommand(options: {
+  name: string | undefined;
+  json: boolean;
+  store: AccountStore;
+  stdout: NodeJS.WriteStream;
+  debugLog?: DebugLogger;
+}): Promise<number> {
+  const { name, json, store, stdout, debugLog } = options;
+
+  if (!name) {
+    throw new Error(`Usage: ${getUsage("unprotect")}`);
+  }
+  ensureAccountName(name);
+
+  const account = await store.setAutoSwitchEligibility(name, true);
+  debugLog?.(`unprotect: name=${account.name} auto_switch_eligible=${account.auto_switch_eligible}`);
+
+  if (json) {
+    writeJson(stdout, {
+      ok: true,
+      action: "unprotect",
+      account: toCliAccount(account),
+    });
+  } else {
+    stdout.write(`Removed auto-switch protection from "${account.name}".\n`);
   }
 
   return 0;

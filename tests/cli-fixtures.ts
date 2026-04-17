@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 import type {
@@ -33,6 +34,7 @@ export function createDesktopLauncherStub(overrides: Partial<{
   listRunningApps: () => Promise<RunningCodexDesktop[]>;
   quitRunningApps: (options?: { force?: boolean }) => Promise<void>;
   launch: (appPath: string) => Promise<void>;
+  activateApp: (appPath: string) => Promise<void>;
   writeManagedState: (state: ManagedCodexDesktopState) => Promise<void>;
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
@@ -98,6 +100,9 @@ export function createDesktopLauncherStub(overrides: Partial<{
     launch:
       overrides.launch ??
       (async () => undefined),
+    activateApp:
+      overrides.activateApp ??
+      (async () => undefined),
     writeManagedState: overrides.writeManagedState ?? (async () => undefined),
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
@@ -156,33 +161,81 @@ export function createDesktopLauncherStub(overrides: Partial<{
 
 export function createInteractiveStdin(): NodeJS.ReadStream & {
   emitInput: (value: string) => void;
+  emitKeypress: (value: string, key?: Record<string, unknown>) => void;
   pauseCalls: number;
   resumeCalls: number;
+  rawModeCalls: boolean[];
+  isRaw: boolean;
+  setRawMode: (raw: boolean) => NodeJS.ReadStream;
 } {
   const stream = new PassThrough() as unknown as NodeJS.ReadStream & {
     emitInput: (value: string) => void;
+    emitKeypress: (value: string, key?: Record<string, unknown>) => void;
     pauseCalls: number;
     resumeCalls: number;
+    rawModeCalls: boolean[];
+    isRaw: boolean;
+    setRawMode: (raw: boolean) => NodeJS.ReadStream;
   };
 
   stream.isTTY = true;
   stream.pauseCalls = 0;
   stream.resumeCalls = 0;
-
+  stream.rawModeCalls = [];
+  stream.isRaw = false;
   const originalPause = stream.pause.bind(stream);
+  const originalResume = stream.resume.bind(stream);
+
   stream.pause = (() => {
     stream.pauseCalls += 1;
     return originalPause();
   }) as typeof stream.pause;
-
-  const originalResume = stream.resume.bind(stream);
   stream.resume = (() => {
     stream.resumeCalls += 1;
     return originalResume();
   }) as typeof stream.resume;
 
+  stream.setRawMode = ((raw: boolean) => {
+    stream.rawModeCalls.push(raw);
+    stream.isRaw = raw;
+    return stream;
+  }) as typeof stream.setRawMode;
+
   stream.emitInput = (value: string) => {
     stream.write(value);
+  };
+  stream.emitKeypress = (value: string, key?: Record<string, unknown>) => {
+    stream.emit("keypress", value, key);
+  };
+
+  return stream;
+}
+
+export function createInteractiveStdout(
+  columns = 120,
+  rows = 32,
+): NodeJS.WriteStream & {
+  read: () => string;
+  emitResize: (nextColumns: number, nextRows: number) => void;
+} {
+  const stream = new EventEmitter() as NodeJS.WriteStream & {
+    read: () => string;
+    emitResize: (nextColumns: number, nextRows: number) => void;
+  };
+  let output = "";
+
+  stream.isTTY = true;
+  stream.columns = columns;
+  stream.rows = rows;
+  stream.write = ((chunk: string | Uint8Array) => {
+    output += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    return true;
+  }) as typeof stream.write;
+  stream.read = (() => output) as typeof stream.read;
+  stream.emitResize = (nextColumns: number, nextRows: number) => {
+    stream.columns = nextColumns;
+    stream.rows = nextRows;
+    stream.emit("resize");
   };
 
   return stream;

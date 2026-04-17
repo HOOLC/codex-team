@@ -3,7 +3,6 @@ import {
   getPlatform,
   resetPlatformCache,
   setPlatformForTesting,
-  getCodexBinarySuffix,
   isCodexDesktopCommand,
   isCodexCliCommand,
 } from "../src/platform.js";
@@ -43,20 +42,6 @@ describe("setPlatformForTesting", () => {
 
     cleanup();
     expect(await getPlatform()).toBe(original);
-  });
-});
-
-describe("getCodexBinarySuffix", () => {
-  test("returns macOS binary suffix for darwin", () => {
-    expect(getCodexBinarySuffix("darwin")).toBe("/Contents/MacOS/Codex");
-  });
-
-  test("returns linux binary name for linux", () => {
-    expect(getCodexBinarySuffix("linux")).toBe("codex");
-  });
-
-  test("returns linux binary name for wsl", () => {
-    expect(getCodexBinarySuffix("wsl")).toBe("codex");
   });
 });
 

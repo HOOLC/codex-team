@@ -1,11 +1,22 @@
-import dayjs from "dayjs";
-import timezone from "dayjs/plugin/timezone.js";
-import utc from "dayjs/plugin/utc.js";
-
 import { maskAccountId } from "../auth-snapshot.js";
 import type { AccountQuotaSummary } from "../account-store/index.js";
-import { normalizeDisplayedScore } from "../plan-quota-profile.js";
 import type { WatchHistoryEtaContext } from "../watch/history.js";
+import {
+  colorizeBlockedRow,
+  colorizeRecovery,
+  colorizeScore,
+  compactIdentity,
+  formatEtaSummary,
+  formatRawScore,
+  formatRemainingPercent,
+  formatResetAt,
+  formatUsagePercent,
+  isWindowUnavailable,
+  normalizePlusScore,
+  stripAnsi,
+  toQuotaEtaSummary,
+  visibleWidth,
+} from "./quota-display.js";
 import { buildListSummary } from "./quota-summary.js";
 import { rankListCandidates, selectCurrentNextResetWindow, toAutoSwitchCandidate } from "./quota-ranking.js";
 import type {
@@ -14,111 +25,50 @@ import type {
   QuotaEtaSummary,
 } from "./quota-types.js";
 
-dayjs.extend(utc);
-dayjs.extend(timezone);
-
-const ANSI_RESET = "\u001b[0m";
-const ANSI_BOLD = "\u001b[1m";
-const ANSI_RED = "\u001b[31m";
-const ANSI_GREEN = "\u001b[32m";
-const ANSI_BRIGHT_YELLOW = "\u001b[93m";
-const ANSI_CYAN = "\u001b[36m";
-const ANSI_BLACK = "\u001b[30m";
-const ANSI_BG_RED = "\u001b[41m";
-
-function stripAnsi(value: string): string {
-  return value.replace(/\u001b\[[0-9;]*m/g, "");
-}
-
-function visibleWidth(value: string): number {
-  return stripAnsi(value).length;
-}
-
 function padVisibleEnd(value: string, width: number): string {
   const padding = Math.max(0, width - visibleWidth(value));
   return `${value}${" ".repeat(padding)}`;
 }
 
-function styleText(
+function padVisibleStart(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  return `${" ".repeat(padding)}${value}`;
+}
+
+function padVisibleCenter(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  const left = Math.floor(padding / 2);
+  const right = padding - left;
+  return `${" ".repeat(left)}${value}${" ".repeat(right)}`;
+}
+
+interface TableColumn {
+  key: string;
+  label: string;
+  groupLabel?: string;
+  align?: "left" | "right" | "center";
+  headerAlign?: "left" | "right" | "center";
+}
+
+function padAligned(
   value: string,
-  ...codes: Array<
-    | typeof ANSI_BOLD
-    | typeof ANSI_RED
-    | typeof ANSI_GREEN
-    | typeof ANSI_BRIGHT_YELLOW
-    | typeof ANSI_CYAN
-    | typeof ANSI_BLACK
-    | typeof ANSI_BG_RED
-  >
+  width: number,
+  align: "left" | "right" | "center" = "left",
 ): string {
-  return `${codes.join("")}${value}${ANSI_RESET}`;
-}
-
-function colorizeRow(value: string, background: typeof ANSI_BG_RED): string {
-  return styleText(value, ANSI_BLACK, background);
-}
-
-function colorize(
-  value: string,
-  color: typeof ANSI_RED | typeof ANSI_GREEN | typeof ANSI_BRIGHT_YELLOW,
-): string {
-  return styleText(value, color);
-}
-
-function colorizeWarning(
-  value: string,
-  color: typeof ANSI_RED | typeof ANSI_GREEN | typeof ANSI_BRIGHT_YELLOW,
-): string {
-  return styleText(value, ANSI_BOLD, color);
-}
-
-function colorizeRecovery(value: string, bold = false): string {
-  return bold ? styleText(value, ANSI_BOLD, ANSI_CYAN) : styleText(value, ANSI_CYAN);
-}
-
-function colorizeScore(value: string, remainingPercent: number | null): string {
-  if (remainingPercent === null) {
-    return value;
+  if (align === "right") {
+    return padVisibleStart(value, width);
   }
 
-  if (remainingPercent === 0) {
-    return colorizeWarning(value, ANSI_RED);
+  if (align === "center") {
+    return padVisibleCenter(value, width);
   }
 
-  if (remainingPercent < 20) {
-    return colorizeWarning(value, ANSI_BRIGHT_YELLOW);
-  }
-
-  if (remainingPercent >= 100) {
-    return colorizeWarning(value, ANSI_GREEN);
-  }
-
-  if (remainingPercent >= 80) {
-    return colorize(value, ANSI_GREEN);
-  }
-
-  return value;
-}
-
-function colorizeUsagePercent(value: string, usedPercent: number | null): string {
-  if (usedPercent === null) {
-    return value;
-  }
-
-  if (usedPercent >= 100) {
-    return colorizeWarning(value, ANSI_RED);
-  }
-
-  if (usedPercent >= 80) {
-    return colorizeWarning(value, ANSI_BRIGHT_YELLOW);
-  }
-
-  return value;
+  return padVisibleEnd(value, width);
 }
 
 function formatTable(
   rows: Array<Record<string, string>>,
-  columns: Array<{ key: string; label: string }>,
+  columns: TableColumn[],
 ): string {
   if (rows.length === 0) {
     return "";
@@ -128,21 +78,78 @@ function formatTable(
     Math.max(visibleWidth(label), ...rows.map((row) => visibleWidth(row[key]))),
   );
 
-  const renderRow = (row: Record<string, string>) => {
+  const renderRow = (row: Record<string, string>, kind: "header" | "body") => {
     const rendered = columns
-      .map(({ key }, index) => padVisibleEnd(row[key], widths[index]))
+      .map(({ key, align, headerAlign }, index) =>
+        padAligned(
+          row[key],
+          widths[index] ?? 0,
+          kind === "header" ? (headerAlign ?? align ?? "left") : (align ?? "left"),
+        ),
+      )
       .join("  ")
       .trimEnd();
 
-    return row.__row_style === "red-bg" ? colorizeRow(rendered, ANSI_BG_RED) : rendered;
+    return row.__row_style === "red-bg" ? colorizeBlockedRow(rendered) : rendered;
   };
 
   const header = renderRow(
     Object.fromEntries(columns.map(({ key, label }) => [key, label])),
+    "header",
   );
   const separator = widths.map((width) => "-".repeat(width)).join("  ");
+  const groupHeader = renderGroupedHeader(columns, widths);
 
-  return [header, separator, ...rows.map(renderRow)].join("\n");
+  return [
+    ...(groupHeader ? [groupHeader] : []),
+    header,
+    separator,
+    ...rows.map((row) => renderRow(row, "body")),
+  ].join("\n");
+}
+
+function renderGroupedHeader(
+  columns: TableColumn[],
+  widths: number[],
+): string | null {
+  const groups = new Map<string, { start: number; end: number }>();
+  const starts: number[] = [];
+  let cursor = 0;
+
+  for (let index = 0; index < columns.length; index += 1) {
+    starts.push(cursor);
+    const groupLabel = columns[index]?.groupLabel;
+    if (groupLabel) {
+      const existing = groups.get(groupLabel);
+      const start = starts[index] ?? 0;
+      const end = start + (widths[index] ?? 0);
+      if (existing) {
+        existing.end = end;
+      } else {
+        groups.set(groupLabel, { start, end });
+      }
+    }
+    cursor += (widths[index] ?? 0) + 2;
+  }
+
+  if (groups.size === 0) {
+    return null;
+  }
+
+  const row = Array.from({ length: Math.max(0, cursor - 2) }, () => " ");
+  for (const [label, span] of groups.entries()) {
+    const spanWidth = span.end - span.start;
+    const offset = span.start + Math.max(0, Math.floor((spanWidth - label.length) / 2));
+    for (let index = 0; index < label.length; index += 1) {
+      row[offset + index] = label[index] ?? " ";
+    }
+  }
+
+  return row.join("").trimEnd();
+}
+
+function compactTableIdentity(value: string, width: number): string {
+  return compactIdentity(value, width);
 }
 
 function describeCurrentListStatus(status: CurrentListStatusLike): string {
@@ -159,121 +166,6 @@ function describeCurrentListStatus(status: CurrentListStatusLike): string {
   }
 
   return `Current managed account: multiple (${status.matched_accounts.join(", ")})`;
-}
-
-function formatUsagePercent(
-  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
-): string {
-  if (!window) {
-    return "-";
-  }
-
-  const raw = `${window.used_percent}%`;
-  return colorizeUsagePercent(raw, window.used_percent);
-}
-
-function formatResetCountdown(
-  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
-): string {
-  const resetAfterSeconds = window?.reset_after_seconds;
-  if (typeof resetAfterSeconds !== "number" || resetAfterSeconds < 0 || resetAfterSeconds > 3_600) {
-    return "";
-  }
-
-  const remainingMinutes = Math.max(1, Math.ceil(resetAfterSeconds / 60));
-  const suffix = ` (${remainingMinutes}m)`;
-  return colorizeRecovery(suffix, resetAfterSeconds <= 900);
-}
-
-function formatResetAt(
-  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
-): string {
-  if (!window?.reset_at) {
-    return "-";
-  }
-
-  const absolute = dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
-  return `${absolute}${formatResetCountdown(window)}`;
-}
-
-function isWindowUnavailable(
-  window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
-): boolean {
-  return typeof window?.used_percent === "number" && window.used_percent >= 100;
-}
-
-function formatRemainingPercent(value: number | null): string {
-  return value === null ? "-" : `${value}%`;
-}
-
-function formatRawScore(value: number | null): string {
-  return value === null ? "-" : String(value);
-}
-
-function normalizePlusScore(value: number | null): number | null {
-  return normalizeDisplayedScore(value, "plus", { clamp: false });
-}
-
-function roundToTwo(value: number): number {
-  return Number(value.toFixed(2));
-}
-
-function toQuotaEtaSummary(eta: WatchHistoryEtaContext | undefined): QuotaEtaSummary | null {
-  if (!eta) {
-    return null;
-  }
-
-  const rate = eta.rate_1w_units_per_hour;
-  const eta5hEq1wHours =
-    eta.status === "ok" && rate !== null && rate > 0 && eta.remaining_5h_eq_1w !== null
-      ? roundToTwo(eta.remaining_5h_eq_1w / rate)
-      : null;
-  const eta1wHours =
-    eta.status === "ok" && rate !== null && rate > 0 && eta.remaining_1w !== null
-      ? roundToTwo(eta.remaining_1w / rate)
-      : null;
-
-  return {
-    status: eta.status,
-    hours: eta.etaHours,
-    bottleneck: eta.bottleneck,
-    eta_5h_eq_1w_hours: eta5hEq1wHours,
-    eta_1w_hours: eta1wHours,
-    rate_1w_units_per_hour: eta.rate_1w_units_per_hour,
-    remaining_5h_eq_1w: eta.remaining_5h_eq_1w,
-    remaining_1w: eta.remaining_1w,
-  };
-}
-
-function formatEtaHours(hours: number | null): string {
-  if (hours === null) {
-    return "-";
-  }
-  if (hours < 1) {
-    return `${Math.round(hours * 60)}m`;
-  }
-  if (hours < 24) {
-    return `${hours.toFixed(1)}h`;
-  }
-  return `${(hours / 24).toFixed(1)}d`;
-}
-
-function formatEtaSummary(eta: QuotaEtaSummary | null): string {
-  if (!eta) {
-    return "-";
-  }
-
-  switch (eta.status) {
-    case "ok":
-      return formatEtaHours(eta.hours);
-    case "idle":
-      return "idle";
-    case "unavailable":
-      return "-";
-    case "insufficient_history":
-    default:
-      return "-";
-  }
 }
 
 export function describeAutoSwitchSelection(
@@ -333,10 +225,15 @@ function describeQuotaAccounts(
   options: {
     verbose?: boolean;
     etaByName?: Map<string, WatchHistoryEtaContext>;
+    usageLine?: string | null;
   } = {},
 ): string {
   if (accounts.length === 0) {
-    const lines = [describeCurrentListStatus(currentStatus), "No saved accounts."];
+    const lines = [
+      describeCurrentListStatus(currentStatus),
+      ...(options.usageLine ? [options.usageLine] : []),
+      "No saved accounts.",
+    ];
     for (const warning of warnings) {
       lines.push(`Warning: ${warning}`);
     }
@@ -384,7 +281,7 @@ function describeQuotaAccounts(
       : "-";
     const row: Record<string, string> = {
       name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
-      account_id: maskAccountId(account.identity),
+      account_id: compactTableIdentity(maskAccountId(account.identity), "IDENTITY".length),
       plan_type: account.plan_type ?? "-",
       eta: formatEtaSummary(eta),
       score: colorizeScore(formatRemainingPercent(currentScore), currentScore),
@@ -430,30 +327,47 @@ function describeQuotaAccounts(
     return row;
   });
 
-  const columns = [
+  const showEtaColumn = rows.some((row) => row.eta !== "-");
+  const showVerboseEtaColumns = options.verbose
+    ? rows.some((row) => row.eta_5h_eq_1w !== "-" || row.eta_1w !== "-")
+    : false;
+
+  const columns: TableColumn[] = [
     { key: "name", label: "  NAME" },
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN" },
-    { key: "score", label: "SCORE" },
-    { key: "eta", label: "ETA" },
-    { key: "five_hour", label: "5H USED" },
-    { key: "one_week", label: "1W USED" },
+    { key: "score", label: "SCORE", align: "right", headerAlign: "right" },
+    { key: "five_hour", label: "5H", groupLabel: "USED", align: "right", headerAlign: "center" },
+    { key: "one_week", label: "1W", groupLabel: "USED", align: "right", headerAlign: "center" },
     { key: "next_reset", label: "NEXT RESET" },
   ];
 
+  if (showEtaColumn) {
+    columns.splice(4, 0, {
+      key: "eta",
+      label: "ETA",
+      align: "right",
+      headerAlign: "right",
+    });
+  }
+
   if (options.verbose) {
-    columns.splice(
-      5,
-      0,
-      { key: "eta_5h_eq_1w", label: "ETA 5H->1W" },
-      { key: "eta_1w", label: "ETA 1W" },
-      { key: "rate_1w_units", label: "RATE 1W UNITS" },
-      { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W" },
-      { key: "score_1h", label: "1H SCORE" },
-      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H" },
-      { key: "projected_1w_1h", label: "1W 1H" },
-      { key: "five_hour_to_one_week_ratio", label: "5H:1W" },
+    const verboseInsertColumns: TableColumn[] = [];
+    if (showVerboseEtaColumns) {
+      verboseInsertColumns.push(
+        { key: "eta_5h_eq_1w", label: "ETA 5H->1W", align: "right", headerAlign: "right" },
+        { key: "eta_1w", label: "ETA 1W", align: "right", headerAlign: "right" },
+      );
+    }
+    verboseInsertColumns.push(
+      { key: "rate_1w_units", label: "RATE 1W UNITS", align: "right", headerAlign: "right" },
+      { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W", align: "right", headerAlign: "right" },
+      { key: "score_1h", label: "1H SCORE", align: "right", headerAlign: "right" },
+      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H", align: "right", headerAlign: "right" },
+      { key: "projected_1w_1h", label: "1W 1H", align: "right", headerAlign: "right" },
+      { key: "five_hour_to_one_week_ratio", label: "5H:1W", align: "right", headerAlign: "right" },
     );
+    columns.splice(showEtaColumn ? 5 : 4, 0, ...verboseInsertColumns);
     columns.push(
       { key: "five_hour_reset", label: "5H RESET AT" },
       { key: "one_week_reset", label: "1W RESET AT" },
@@ -467,6 +381,7 @@ function describeQuotaAccounts(
     describeCurrentListStatus(currentStatus),
     summaryLine,
     poolLine,
+    ...(options.usageLine ? [options.usageLine] : []),
     "Refreshed quotas:",
     table,
   ];
@@ -487,6 +402,7 @@ export function describeQuotaRefresh(
   options: {
     verbose?: boolean;
     etaByName?: Map<string, WatchHistoryEtaContext>;
+    usageLine?: string | null;
   } = {},
 ): string {
   const lines: string[] = [];

@@ -106,6 +106,22 @@ describe("AccountStore", () => {
     }
   });
 
+  test("derives account email from the saved auth snapshot at read time", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-email", "chatgpt", "plus", "user-email");
+      await store.saveCurrentAccount("main");
+
+      const listed = await store.listAccounts();
+      expect(listed.accounts).toHaveLength(1);
+      expect(listed.accounts[0]?.email).toBe("acct-email@example.com");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("auto-migrates legacy chatgpt metadata to composite identity", async () => {
     const homeDir = await createTempHome();
 

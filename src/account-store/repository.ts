@@ -6,6 +6,7 @@ import {
   createSnapshotMeta,
   getMetaIdentity,
   getSnapshotAccountId,
+  getSnapshotEmail,
   getSnapshotIdentity,
   getSnapshotUserId,
   isSupportedChatGPTAuthMode,
@@ -167,6 +168,7 @@ export class AccountStoreRepository {
     return {
       ...meta,
       identity: getMetaIdentity(meta),
+      email: getSnapshotEmail(snapshot) ?? null,
       authPath,
       metaPath,
       configPath: (await pathExists(this.accountConfigPath(name))) ? this.accountConfigPath(name) : null,

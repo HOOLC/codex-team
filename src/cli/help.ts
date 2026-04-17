@@ -132,6 +132,14 @@ ${completionTargets.map((target) => `      '${target}:${target} completion scrip
     return 0
   fi
 
+  if [[ \${words[CURRENT-1]} == --account ]]; then
+    accounts=(\${(@f)\$(${PROGRAM_NAME} completion --accounts 2>/dev/null)})
+    if (( \${#accounts[@]} > 0 )); then
+      _describe -t accounts 'account' accounts
+      return 0
+    fi
+  fi
+
   if (( CURRENT == 3 )) && [[ \${words[CURRENT]} != -* ]]; then
     case \$command in
       ${accountCommandPattern}) ;;
@@ -192,6 +200,12 @@ export function buildCompletionBashScript(): string {
 
   if [[ "\${command}" == "completion" ]]; then
     COMPREPLY=( $(compgen -W "${completionTargets} --accounts" -- "\${cur}") )
+    return 0
+  fi
+
+  if [[ "\${prev}" == "--account" ]]; then
+    accounts="$(${PROGRAM_NAME} completion --accounts 2>/dev/null)"
+    COMPREPLY=( $(compgen -W "\${accounts}" -- "\${cur}") )
     return 0
   fi
 

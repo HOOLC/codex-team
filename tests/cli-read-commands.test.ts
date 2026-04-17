@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -137,6 +137,19 @@ async function seedRecentRatioWatchHistory(homeDir: string, accountName = "plus-
   );
 }
 
+function labelCenter(line: string, label: string, fromIndex = 0): number {
+  const start = line.indexOf(label, fromIndex);
+  expect(start).toBeGreaterThanOrEqual(0);
+  return start + (label.length - 1) / 2;
+}
+
+function labelEnd(line: string, label: string, fromIndex = 0): number {
+  const start = line.indexOf(label, fromIndex);
+  const resolvedStart = start >= 0 ? start : line.lastIndexOf(label);
+  expect(resolvedStart).toBeGreaterThanOrEqual(0);
+  return resolvedStart + label.length - 1;
+}
+
 describe("CLI Read Commands", () => {
   test("prints version from --version", async () => {
     const stdout = captureWritable();
@@ -169,8 +182,12 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
+    expect(output).toContain("codexm protect <name> [--json]");
+    expect(output).toContain("codexm unprotect <name> [--json]");
+    expect(output).toContain("codexm overlay <create|delete|gc> ...");
     expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
-    expect(output).toContain("codexm run [-- ...codexArgs]");
+    expect(output).toContain("codexm tui [query]");
+    expect(output).toContain("codexm run [--account <name>] [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(output).toContain("Command aliases: ls=list");
@@ -178,6 +195,23 @@ describe("CLI Read Commands", () => {
       "Flag aliases: -a=--auto, -d=--debug, -f=--force, -j=--json, -n=--dry-run, -v=--verbose, -y=--yes",
     );
     expect(stderr.read()).toBe("");
+  });
+
+  test("tui rejects non-interactive terminals", async () => {
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+
+    const exitCode = await runCli(["tui"], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      desktopLauncher: createDesktopLauncherStub(),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.read()).toBe("");
+    expect(stderr.read()).toContain(
+      'Error: codexm tui requires an interactive terminal. Use "codexm list" or "codexm list --json" instead.\n',
+    );
   });
 
   test("run accepts passthrough codex args and delegates to the runner", async () => {
@@ -213,6 +247,65 @@ describe("CLI Read Commands", () => {
       });
       expect(stdout.read()).toBe("");
       expect(stderr.read()).toContain("[codexm run] codex args: --model o3");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("run --account starts codex in an isolated runtime without global auth watching", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-isolated");
+      await writeCurrentConfig(homeDir, 'cli_auth_credentials_store = "keyring"');
+      const store = createAccountStore(homeDir);
+      await store.saveCurrentAccount("isolated-main");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let runnerOptions: Record<string, unknown> | null = null;
+      let overlayConfig = "";
+      let overlayAuth = "";
+      let isolatedCodexHome = "";
+
+      const exitCode = await runCli(["run", "--account", "isolated-main", "--", "--model", "o3"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runCodexCli: async (options) => {
+          isolatedCodexHome = options.env?.CODEX_HOME ?? "";
+          runnerOptions = {
+            codexArgs: options.codexArgs,
+            accountId: options.accountId,
+            disableAuthWatch: options.disableAuthWatch,
+            registerProcess: options.registerProcess,
+            codexHome: isolatedCodexHome,
+          };
+          overlayConfig = await readFile(join(isolatedCodexHome, "config.toml"), "utf8");
+          overlayAuth = await readFile(options.authFilePath ?? "", "utf8");
+          return {
+            exitCode: 0,
+            restartCount: 0,
+          };
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(runnerOptions).toEqual({
+        codexArgs: ["--model", "o3"],
+        accountId: "acct-isolated",
+        disableAuthWatch: true,
+        registerProcess: false,
+        codexHome: isolatedCodexHome,
+      });
+      expect(isolatedCodexHome).toContain(`${homeDir}/.codex-team/run-overlays/isolated-main/`);
+      expect(overlayConfig).toContain('cli_auth_credentials_store = "file"');
+      expect(overlayAuth).toContain('"account_id": "acct-isolated"');
+      await expect(access(isolatedCodexHome)).rejects.toBeTruthy();
+      expect(stdout.read()).toBe("");
+      const stderrOutput = stderr.read();
+      expect(stderrOutput).toContain('Starting codex in isolated mode with saved snapshot "isolated-main"');
+      expect(stderrOutput).toContain("will not follow codexm switch/watch restarts");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1160,7 +1253,11 @@ wire_api = "responses"
       const output = listStdout.read();
       const lines = output.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
+      const headerTopIndex =
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+          ? tableStartIndex - 1
+          : tableStartIndex;
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 5);
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
@@ -1177,18 +1274,28 @@ wire_api = "responses"
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
-      expect(tableLines).toHaveLength(4);
+      expect(tableLines).toHaveLength(5);
       expect(currentRow).toBeDefined();
-      expect(tableLines[0]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
-      expect(tableLines[0]?.indexOf("IDENTITY")).toBe(
-        currentRow?.indexOf(maskAccountId("acct-cli-quota-text-a")),
+      expect(tableLines[1]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
+      expect(tableLines[0]).toContain("USED");
+      expect(tableLines[1]).toContain("5H");
+      expect(tableLines[1]).toContain("1W");
+      const usedCenter = labelCenter(tableLines[0] ?? "", "USED");
+      const fiveHourCenter = labelCenter(tableLines[1] ?? "", "5H");
+      const oneWeekCenter = labelCenter(tableLines[1] ?? "", "1W", (tableLines[1]?.indexOf("5H") ?? 0) + 1);
+      expect(Math.abs(usedCenter - (fiveHourCenter + oneWeekCenter) / 2)).toBeLessThanOrEqual(1);
+
+      const identityColumn = tableLines[1]?.indexOf("IDENTITY") ?? -1;
+      const identityCell = currentRow?.slice(identityColumn, identityColumn + "IDENTITY".length).trim();
+      expect(identityCell).toMatch(/^[^\s.]{3}\.\.[^\s.]{3}$/);
+      expect(currentRow).toContain("15%");
+      expect(currentRow).toContain("45%");
+      expect(tableLines[1]?.indexOf("PLAN")).toBe(tableLines[4]?.indexOf("plus"));
+      expect((tableLines[1]?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
+        tableLines[1]?.indexOf("PLAN") ?? -1,
       );
-      expect(tableLines[0]?.indexOf("PLAN")).toBe(tableLines[3]?.indexOf("plus"));
-      expect((tableLines[0]?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("PLAN") ?? -1,
-      );
-      expect((tableLines[0]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
-        tableLines[0]?.indexOf("SCORE") ?? -1,
+      expect((tableLines[1]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
+        tableLines[1]?.indexOf("SCORE") ?? -1,
       );
     } finally {
       await cleanupTempHome(homeDir);
@@ -1498,7 +1605,11 @@ wire_api = "responses"
       const plainOutput = output.replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 8);
+      const headerTopIndex =
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+          ? tableStartIndex - 1
+          : tableStartIndex;
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 9);
       const weeklyBlockedRow = tableLines.find((line) => line.includes("quota-weekly-blocked"));
       const fiveHourBlockedRow = tableLines.find((line) => line.includes("quota-five-hour-blocked"));
       const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
@@ -1512,20 +1623,32 @@ wire_api = "responses"
       expect(healthyRow).toBeDefined();
       expect(fullRow).toBeDefined();
       expect(lowRow).toBeDefined();
-      const scoreColumn = tableLines[0]?.indexOf("SCORE") ?? -1;
-      const used5hColumn = tableLines[0]?.indexOf("5H USED") ?? -1;
-      const used1wColumn = tableLines[0]?.indexOf("1W USED") ?? -1;
-      const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
-      expect(weeklyBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
-      expect(fiveHourBlockedRow?.indexOf("0%", scoreColumn)).toBe(scoreColumn);
-      expect(criticalRow?.indexOf("8%", scoreColumn)).toBe(scoreColumn);
-      expect(healthyRow?.indexOf("80%", scoreColumn)).toBe(scoreColumn);
-      expect(fullRow?.indexOf("100%", scoreColumn)).toBe(scoreColumn);
-      expect(criticalRow?.indexOf("92%", used5hColumn)).toBe(used5hColumn);
-      expect(lowRow?.indexOf("85%", used5hColumn)).toBe(used5hColumn);
-      expect(healthyRow?.indexOf("20%", used5hColumn)).toBe(used5hColumn);
-      expect(healthyRow?.indexOf("10%", used1wColumn)).toBe(used1wColumn);
-      expect(fullRow?.indexOf("0%", used5hColumn)).toBe(used5hColumn);
+      const scoreColumn = tableLines[1]?.indexOf("SCORE") ?? -1;
+      const used5hColumn = tableLines[1]?.indexOf("5H") ?? -1;
+      const used1wColumn = tableLines[1]?.indexOf("1W") ?? -1;
+      const nextResetColumn = tableLines[1]?.indexOf("NEXT RESET") ?? -1;
+      const scoreEnds = [
+        labelEnd(weeklyBlockedRow ?? "", "0%", scoreColumn),
+        labelEnd(fiveHourBlockedRow ?? "", "0%", scoreColumn),
+        labelEnd(criticalRow ?? "", "8%", scoreColumn),
+        labelEnd(healthyRow ?? "", "80%", scoreColumn),
+        labelEnd(fullRow ?? "", "100%", scoreColumn),
+      ];
+      expect(new Set(scoreEnds).size).toBe(1);
+
+      const used5hEnds = [
+        labelEnd(criticalRow ?? "", "92%", used5hColumn),
+        labelEnd(lowRow ?? "", "85%", used5hColumn),
+        labelEnd(healthyRow ?? "", "20%", used5hColumn),
+        labelEnd(fullRow ?? "", "0%", used5hColumn),
+      ];
+      expect(new Set(used5hEnds).size).toBe(1);
+
+      const used1wEnds = [
+        labelEnd(healthyRow ?? "", "10%", used1wColumn),
+        labelEnd(weeklyBlockedRow ?? "", "100%", used1wColumn),
+      ];
+      expect(new Set(used1wEnds).size).toBe(1);
       expect(lowRow?.includes("(5m)")).toBe(true);
       expect(lowRow?.indexOf("(5m)", nextResetColumn)).toBeGreaterThan(nextResetColumn);
     } finally {

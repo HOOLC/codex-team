@@ -73,6 +73,54 @@ async function resolveWatchHistoryIdentity(
   }
 }
 
+async function persistWatchHistorySample(options: {
+  store: AccountStore;
+  historyStore: ReturnType<typeof createWatchHistoryStore>;
+  accountLabel: string;
+  quota: ReturnType<typeof toCliQuotaSummaryFromRuntimeQuota>;
+  debugLog: (message: string) => void;
+  scopeKind: "global" | "isolated";
+  scopeId?: string | null;
+}): Promise<void> {
+  if (options.quota.refresh_status !== "ok") {
+    return;
+  }
+
+  try {
+    const historyIdentity = await resolveWatchHistoryIdentity(
+      options.store,
+      options.accountLabel,
+      options.debugLog,
+    );
+    await appendWatchQuotaHistory(options.historyStore, {
+      recordedAt: options.quota.fetched_at ?? new Date().toISOString(),
+      scopeKind: options.scopeKind,
+      scopeId: options.scopeId ?? null,
+      accountName: options.accountLabel,
+      accountId: historyIdentity?.accountId ?? options.quota.account_id,
+      identity: historyIdentity?.identity ?? options.quota.identity,
+      planType: options.quota.plan_type,
+      available: options.quota.available,
+      fiveHour: options.quota.five_hour
+        ? {
+            usedPercent: options.quota.five_hour.used_percent,
+            windowSeconds: options.quota.five_hour.window_seconds,
+            resetAt: options.quota.five_hour.reset_at ?? null,
+          }
+        : null,
+      oneWeek: options.quota.one_week
+        ? {
+            usedPercent: options.quota.one_week.used_percent,
+            windowSeconds: options.quota.one_week.window_seconds,
+            resetAt: options.quota.one_week.reset_at ?? null,
+          }
+        : null,
+    });
+  } catch (error) {
+    options.debugLog(`watch: failed to persist watch history: ${(error as Error).message}`);
+  }
+}
+
 export async function runCliWatchSession(options: {
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
@@ -125,6 +173,7 @@ export async function runCliWatchSession(options: {
   let cliLastQuotaUpdateLine: string | null = null;
   let cliCurrentAccountLabel = await resolveWatchAccountLabel(store);
   const cliWatchSwitchCooldownMs = 5_000;
+  const watchHistoryStore = createWatchHistoryStore(store.paths.codexTeamDir);
 
   const handleCliQuotaResult = async (quotaSignal: {
     requestId: string;
@@ -245,6 +294,16 @@ export async function runCliWatchSession(options: {
         const quota = quotaSignal.quota
           ? toCliQuotaSummaryFromRuntimeQuota(quotaSignal.quota)
           : null;
+        if (quota) {
+          await persistWatchHistorySample({
+            store,
+            historyStore: watchHistoryStore,
+            accountLabel: cliCurrentAccountLabel,
+            quota,
+            debugLog,
+            scopeKind: "global",
+          });
+        }
         await handleCliQuotaResult({
           requestId: quotaSignal.requestId,
           quota,
@@ -274,6 +333,20 @@ export async function runManagedDesktopWatchSession(options: {
   managedDesktopWaitStatusIntervalMs: number;
   watchQuotaMinReadIntervalMs: number;
   watchQuotaIdleReadIntervalMs: number;
+  onAutoSwitchEvent?: (
+    event:
+      | {
+          type: "switched";
+          fromAccount: string;
+          toAccount: string;
+          warnings: string[];
+        }
+      | {
+          type: "skipped";
+          account: string;
+          reason: "lock-busy" | "already-best";
+        },
+  ) => Promise<void> | void;
 }): Promise<number> {
   const {
     store,
@@ -287,6 +360,7 @@ export async function runManagedDesktopWatchSession(options: {
     managedDesktopWaitStatusIntervalMs,
     watchQuotaMinReadIntervalMs,
     watchQuotaIdleReadIntervalMs,
+    onAutoSwitchEvent,
   } = options;
 
   let watchExitCode = 0;
@@ -306,38 +380,15 @@ export async function runManagedDesktopWatchSession(options: {
     shouldAutoSwitch: boolean;
   }) => {
     const quota = quotaSignal.quota;
-    if (quota?.refresh_status === "ok") {
-      try {
-        const historyIdentity = await resolveWatchHistoryIdentity(
-          store,
-          currentWatchAccountLabel,
-          debugLog,
-        );
-        await appendWatchQuotaHistory(watchHistoryStore, {
-          recordedAt: quota.fetched_at ?? new Date().toISOString(),
-          accountName: currentWatchAccountLabel,
-          accountId: historyIdentity?.accountId ?? quota.account_id,
-          identity: historyIdentity?.identity ?? quota.identity,
-          planType: quota.plan_type,
-          available: quota.available,
-          fiveHour: quota.five_hour
-            ? {
-                usedPercent: quota.five_hour.used_percent,
-                windowSeconds: quota.five_hour.window_seconds,
-                resetAt: quota.five_hour.reset_at ?? null,
-              }
-            : null,
-          oneWeek: quota.one_week
-            ? {
-                usedPercent: quota.one_week.used_percent,
-                windowSeconds: quota.one_week.window_seconds,
-                resetAt: quota.one_week.reset_at ?? null,
-              }
-            : null,
-        });
-      } catch (error) {
-        debugLog(`watch: failed to persist watch history: ${(error as Error).message}`);
-      }
+    if (quota) {
+      await persistWatchHistorySample({
+        store,
+        historyStore: watchHistoryStore,
+        accountLabel: currentWatchAccountLabel,
+        quota,
+        debugLog,
+        scopeKind: "global",
+      });
     }
     const quotaUpdateLine = describeWatchQuotaEvent(currentWatchAccountLabel, quota);
     if (quotaUpdateLine !== lastQuotaUpdateLine) {
@@ -365,6 +416,11 @@ export async function runManagedDesktopWatchSession(options: {
           describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "lock-busy"),
         )}\n`,
       );
+      await onAutoSwitchEvent?.({
+        type: "skipped",
+        account: currentWatchAccountLabel,
+        reason: "lock-busy",
+      });
       return;
     }
 
@@ -399,6 +455,11 @@ export async function runManagedDesktopWatchSession(options: {
             describeWatchAutoSwitchSkippedEvent(currentWatchAccountLabel, "already-best"),
           )}\n`,
         );
+        await onAutoSwitchEvent?.({
+          type: "skipped",
+          account: currentWatchAccountLabel,
+          reason: "already-best",
+        });
       } else if (autoSwitchResult.result) {
         const previousAccountLabel = currentWatchAccountLabel;
         currentWatchAccountLabel = autoSwitchResult.result.account.name;
@@ -411,6 +472,12 @@ export async function runManagedDesktopWatchSession(options: {
             ),
           )}\n`,
         );
+        await onAutoSwitchEvent?.({
+          type: "switched",
+          fromAccount: previousAccountLabel,
+          toAccount: currentWatchAccountLabel,
+          warnings: autoSwitchResult.result.warnings,
+        });
       }
 
       if (autoSwitchResult.refreshResult.failures.length > 0) {

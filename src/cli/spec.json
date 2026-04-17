@@ -7,27 +7,37 @@
     { "flag": "--version", "description": "print the installed version", "global": true },
     { "flag": "--debug", "description": "enable debug logging", "global": true, "aliases": ["-d"] },
     { "flag": "--accounts", "description": "print saved account names for shell completion", "global": false },
+    { "flag": "--account", "description": "run codex with a saved account snapshot in an isolated runtime", "global": false, "takesValue": true },
     { "flag": "--auto", "description": "switch to the best available account", "global": false, "aliases": ["-a"] },
     { "flag": "--detach", "description": "run watch in the background", "global": false },
     { "flag": "--device-auth", "description": "add account with device-code login", "global": false },
     { "flag": "--dry-run", "description": "show the selected account without switching", "global": false, "aliases": ["-n"] },
     { "flag": "--force", "description": "skip confirmation and force the action", "global": false, "aliases": ["-f"] },
+    { "flag": "--daily", "description": "include per-day usage breakdown", "global": false },
     { "flag": "--json", "description": "print JSON output", "global": false, "aliases": ["-j"] },
+    { "flag": "--name", "description": "set the local account name for import", "global": false, "takesValue": true },
     { "flag": "--no-auto-switch", "description": "watch without switching accounts automatically", "global": false },
+    { "flag": "--owner-pid", "description": "set the owning process id for a created overlay", "global": false, "takesValue": true },
+    { "flag": "--output", "description": "write output to the given file", "global": false, "takesValue": true },
     { "flag": "--refresh", "description": "refresh quota data before printing", "global": false },
     { "flag": "--status", "description": "show background watch status", "global": false },
     { "flag": "--stop", "description": "stop the background watch", "global": false },
+    { "flag": "--usage-window", "description": "select the embedded usage summary window", "global": false, "takesValue": true },
     { "flag": "--verbose", "description": "show expanded score inputs and diagnostics", "global": false, "aliases": ["-v"] },
     { "flag": "--watch", "description": "start a detached watch after launch", "global": false },
+    { "flag": "--window", "description": "select the usage summary window", "global": false, "takesValue": true },
     { "flag": "--with-api-key", "description": "add account by reading an API key from stdin", "global": false },
     { "flag": "--yes", "description": "skip removal confirmation", "global": false, "aliases": ["-y"] }
   ],
-  "completionAccountCommands": ["launch", "list", "remove", "rename", "switch"],
+  "completionAccountCommands": ["launch", "list", "protect", "remove", "rename", "switch", "unprotect"],
   "notes": [
+    "In an interactive terminal, running plain codexm opens the account dashboard; use \"codexm tui [query]\" for an explicit entry or initial filter.",
     "codexm current shows live usage when a managed Codex Desktop session is available.",
     "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
     "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --verbose to expand score inputs.",
+    "codexm export writes a share bundle for the current auth or a managed account; codexm import saves a shared bundle without switching current auth.",
+    "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, sharing bundles, deleting accounts, undoing the latest import/export/delete, and opening codex or Desktop from the selected account.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
     "Unknown commands and flags fail fast; close matches include a suggestion."
   ],
@@ -51,10 +61,10 @@
     {
       "name": "list",
       "aliases": ["ls"],
-      "flags": ["--json", "--verbose"],
-      "helpUsages": ["codexm list [name] [--verbose] [--json]"],
+      "flags": ["--json", "--usage-window", "--verbose"],
+      "helpUsages": ["codexm list [name] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"],
       "usageErrors": {
-        "default": "codexm list [name] [--verbose] [--json]"
+        "default": "codexm list [name] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"
       }
     },
     {
@@ -110,11 +120,82 @@
       }
     },
     {
-      "name": "run",
-      "flags": [],
-      "helpUsages": ["codexm run [-- ...codexArgs]"],
+      "name": "protect",
+      "flags": ["--json"],
+      "helpUsages": ["codexm protect <name> [--json]"],
       "usageErrors": {
-        "default": "codexm run [-- ...codexArgs]"
+        "default": "codexm protect <name> [--json]"
+      }
+    },
+    {
+      "name": "unprotect",
+      "flags": ["--json"],
+      "helpUsages": ["codexm unprotect <name> [--json]"],
+      "usageErrors": {
+        "default": "codexm unprotect <name> [--json]"
+      }
+    },
+    {
+      "name": "overlay",
+      "flags": ["--json", "--owner-pid"],
+      "helpUsages": [
+        "codexm overlay <create|delete|gc> ...",
+        "codexm overlay create <name> [--owner-pid <pid>] [--json]",
+        "codexm overlay delete <run-id|path> [--json]",
+        "codexm overlay gc [--json]"
+      ],
+      "usageErrors": {
+        "default": "codexm overlay <create|delete|gc> ...",
+        "create": "codexm overlay create <name> [--owner-pid <pid>] [--json]",
+        "delete": "codexm overlay delete <run-id|path> [--json]"
+      }
+    },
+    {
+      "name": "export",
+      "flags": ["--output", "--force", "--json"],
+      "helpUsages": ["codexm export [name] [--output <file>] [--force] [--json]"],
+      "usageErrors": {
+        "default": "codexm export [name] [--output <file>] [--force] [--json]"
+      }
+    },
+    {
+      "name": "import",
+      "flags": ["--name", "--force", "--json"],
+      "helpUsages": ["codexm import <file> --name <local-name> [--force] [--json]"],
+      "usageErrors": {
+        "default": "codexm import <file> --name <local-name> [--force] [--json]"
+      }
+    },
+    {
+      "name": "inspect",
+      "flags": ["--json"],
+      "helpUsages": ["codexm inspect <file> [--json]"],
+      "usageErrors": {
+        "default": "codexm inspect <file> [--json]"
+      }
+    },
+    {
+      "name": "tui",
+      "flags": [],
+      "helpUsages": ["codexm tui [query]"],
+      "usageErrors": {
+        "default": "codexm tui [query]"
+      }
+    },
+    {
+      "name": "usage",
+      "flags": ["--window", "--daily", "--json"],
+      "helpUsages": ["codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]"],
+      "usageErrors": {
+        "default": "codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]"
+      }
+    },
+    {
+      "name": "run",
+      "flags": ["--account"],
+      "helpUsages": ["codexm run [--account <name>] [-- ...codexArgs]"],
+      "usageErrors": {
+        "default": "codexm run [--account <name>] [-- ...codexArgs]"
       }
     },
     {
@@ -168,6 +249,13 @@
             }
           },
           {
+            "usage": "codexm update",
+            "description": {
+              "en": "refresh the saved snapshot for the current managed account",
+              "zh-CN": "刷新当前托管账号对应的已保存快照"
+            }
+          },
+          {
             "usage": "codexm rename <old> <new>",
             "description": {
               "en": "rename a saved snapshot",
@@ -175,10 +263,45 @@
             }
           },
           {
+            "usage": "codexm protect <name>",
+            "description": {
+              "en": "exclude a saved snapshot from automatic switch target selection",
+              "zh-CN": "将已保存快照排除出自动切换候选"
+            }
+          },
+          {
+            "usage": "codexm unprotect <name>",
+            "description": {
+              "en": "restore a saved snapshot to automatic switch target selection",
+              "zh-CN": "恢复已保存快照进入自动切换候选"
+            }
+          },
+          {
             "usage": "codexm remove <name> --yes",
             "description": {
               "en": "remove a saved snapshot",
               "zh-CN": "删除已保存快照"
+            }
+          },
+          {
+            "usage": "codexm export [name] [--output <file>]",
+            "description": {
+              "en": "export the current auth or a saved snapshot as a share bundle",
+              "zh-CN": "把当前 auth 或已保存快照导出成分享 bundle"
+            }
+          },
+          {
+            "usage": "codexm import <file> --name <local-name>",
+            "description": {
+              "en": "import a share bundle as a named managed account",
+              "zh-CN": "把分享 bundle 导入成命名托管账号"
+            }
+          },
+          {
+            "usage": "codexm inspect <file>",
+            "description": {
+              "en": "preview bundle metadata before importing",
+              "zh-CN": "导入前预览 bundle 元数据"
             }
           }
         ]
@@ -191,6 +314,13 @@
         },
         "entries": [
           {
+            "usage": "codexm",
+            "description": {
+              "en": "open the interactive account dashboard when running in a TTY",
+              "zh-CN": "在交互式终端里直接打开账号面板"
+            }
+          },
+          {
             "usage": "codexm current [--refresh]",
             "description": {
               "en": "show the current account and optionally refresh quota",
@@ -198,10 +328,17 @@
             }
           },
           {
-            "usage": "codexm list [--verbose]",
+            "usage": "codexm doctor",
             "description": {
-              "en": "show saved accounts, quota usage, score, ETA, and reset times",
-              "zh-CN": "查看所有保存账号、quota、score、ETA 和 reset 时间"
+              "en": "diagnose local auth, runtime probes, and managed Desktop consistency",
+              "zh-CN": "诊断本地 auth、runtime 探测和托管 Desktop 一致性"
+            }
+          },
+          {
+            "usage": "codexm list [--usage-window <today|7d|30d|all-time>] [--verbose]",
+            "description": {
+              "en": "show saved accounts plus an embedded local usage summary",
+              "zh-CN": "查看所有保存账号，并附带一行本地 usage 摘要"
             }
           },
           {
@@ -216,6 +353,20 @@
             "description": {
               "en": "include diagnostic details about quota normalization and observed ratios",
               "zh-CN": "输出 quota 归一化和观测比例相关诊断信息"
+            }
+          },
+          {
+            "usage": "codexm tui [query]",
+            "description": {
+              "en": "explicitly open the account dashboard, optionally with an initial filter",
+              "zh-CN": "显式打开账号面板，可选带初始筛选词"
+            }
+          },
+          {
+            "usage": "codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]",
+            "description": {
+              "en": "summarize local token usage and estimated cost from session logs",
+              "zh-CN": "从本地 session 日志汇总 token usage 和 estimated cost"
             }
           }
         ]
@@ -286,10 +437,17 @@
             }
           },
           {
-            "usage": "codexm run [-- ...codexArgs]",
+            "usage": "codexm run [--account <name>] [-- ...codexArgs]",
             "description": {
-              "en": "restart the codex CLI automatically after auth changes",
-              "zh-CN": "在 auth 变化后自动重启 codex CLI"
+              "en": "run codex with global auth follow-restart or an isolated managed account snapshot",
+              "zh-CN": "以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行"
+            }
+          },
+          {
+            "usage": "codexm overlay create <name>",
+            "description": {
+              "en": "create an isolated CODEX_HOME overlay for another tool to use",
+              "zh-CN": "为其他工具创建隔离的 CODEX_HOME overlay"
             }
           }
         ]

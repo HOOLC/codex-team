@@ -35,26 +35,35 @@ import {
 import { writeJson } from "./cli/output.js";
 import {
   handleAddCommand,
+  handleProtectCommand,
   handleRemoveCommand,
   handleRenameCommand,
   handleSaveCommand,
+  handleUnprotectCommand,
   handleUpdateCommand,
 } from "./commands/account-management.js";
+import {
+  handleExportCommand,
+  handleImportCommand,
+  handleInspectBundleCommand,
+} from "./commands/share-bundle.js";
 import { handleCompletionCommand } from "./commands/completion.js";
 import {
   handleCurrentCommand,
   handleDoctorCommand,
   handleListCommand,
 } from "./commands/inspection.js";
+import { handleUsageCommand } from "./commands/usage.js";
+import { performManualSwitch } from "./commands/switch.js";
+import { handleTuiCommand } from "./commands/tui.js";
 import {
   handleLaunchCommand,
   handleWatchCommand,
 } from "./commands/desktop.js";
+import { handleOverlayCommand } from "./commands/overlay.js";
 import {
   describeBusySwitchLock,
   performAutoSwitch,
-  refreshManagedDesktopAfterSwitch,
-  stripManagedDesktopWarning,
   tryAcquireSwitchLock,
 } from "./switching.js";
 
@@ -63,12 +72,12 @@ import {
   runCodexWithAutoRestart,
 } from "./codex-cli-runner.js";
 import {
+  prepareIsolatedCodexRun,
+  startIsolatedQuotaHistorySampler,
+} from "./run/isolated-runtime.js";
+import {
   createPlatformDesktopLauncher,
 } from "./platform-desktop-adapter.js";
-import {
-  shouldSkipManagedDesktopRefresh,
-} from "./desktop/managed-state.js";
-
 export { rankAutoSwitchCandidates } from "./cli/quota.js";
 
 interface CliStreams {
@@ -162,6 +171,26 @@ export async function runCli(
       return 0;
     }
 
+    if (
+      !parsed.command &&
+      !parsed.flags.has("--help") &&
+      streams.stdin.isTTY &&
+      streams.stdout.isTTY
+    ) {
+      return await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher,
+        watchProcessManager,
+        streams,
+        runCodexCli,
+        debugLog,
+        interruptSignal,
+        managedDesktopWaitStatusDelayMs,
+        managedDesktopWaitStatusIntervalMs,
+      });
+    }
+
     if (!parsed.command || parsed.flags.has("--help")) {
       printHelp(streams.stdout);
       return 0;
@@ -206,7 +235,20 @@ export async function runCli(
           debug,
           json,
           targetName: parsed.positionals[0],
+          usageWindow: parsed.optionValues.get("--usage-window"),
           verbose: parsed.flags.has("--verbose"),
+        });
+      }
+
+      case "usage": {
+        return await handleUsageCommand({
+          positionals: parsed.positionals,
+          window: parsed.optionValues.get("--window"),
+          daily: parsed.flags.has("--daily"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
         });
       }
 
@@ -383,58 +425,20 @@ export async function runCli(
           throw new Error(`Usage: ${getUsage("switch")}`);
         }
         ensureAccountName(name);
-
-        debugLog(`switch: mode=manual target=${name} force=${force}`);
-        const switchCommand = `switch ${name}`;
-        const lock = await tryAcquireSwitchLock(store, switchCommand);
-        if (!lock.acquired) {
-          throw new Error(describeBusySwitchLock(lock.lockPath, lock.owner));
+        const { result, quota, desktopForceWarning } = await performManualSwitch({
+          name,
+          force,
+          store,
+          desktopLauncher,
+          stderr: streams.stderr,
+          debugLog,
+          interruptSignal,
+          managedDesktopWaitStatusDelayMs,
+          managedDesktopWaitStatusIntervalMs,
+        });
+        if (desktopForceWarning) {
+          streams.stderr.write(`${desktopForceWarning}\n`);
         }
-
-        const result = await (async () => {
-          try {
-            const switched = await store.switchAccount(name);
-            switched.warnings = stripManagedDesktopWarning(switched.warnings);
-            const skipDesktopRefresh = await shouldSkipManagedDesktopRefresh(
-              store,
-              desktopLauncher,
-              debugLog,
-            );
-            if (!skipDesktopRefresh) {
-              const refreshOutcome = await refreshManagedDesktopAfterSwitch(switched.warnings, desktopLauncher, {
-                force,
-                signal: interruptSignal,
-                statusStream: streams.stderr,
-                statusDelayMs: managedDesktopWaitStatusDelayMs,
-                statusIntervalMs: managedDesktopWaitStatusIntervalMs,
-              });
-              if (force && refreshOutcome === "none") {
-                streams.stderr.write(
-                  "Warning: --force is only meaningful with a managed Desktop session. " +
-                  "In CLI mode, use \"codexm run\" for seamless auth hot-switching.\n",
-                );
-              }
-            }
-            return switched;
-          } finally {
-            await lock.release();
-          }
-        })();
-        let quota: ReturnType<typeof toCliQuotaSummary> | null = null;
-        try {
-          await store.refreshQuotaForAccount(result.account.name, {
-            quotaClientMode: "list-fast",
-          });
-          const quotaList = await store.listQuotaSummaries();
-          const matched =
-            quotaList.accounts.find((account) => account.name === result.account.name) ?? null;
-          quota = matched ? toCliQuotaSummary(matched) : null;
-        } catch (error) {
-          result.warnings.push((error as Error).message);
-        }
-        debugLog(
-          `switch: completed target=${result.account.name} warnings=${result.warnings.length} quota_refreshed=${quota !== null}`,
-        );
         const payload = {
           ok: true,
           action: "switch",
@@ -496,48 +500,181 @@ export async function runCli(
         });
       }
 
+      case "protect": {
+        return await handleProtectCommand({
+          name: parsed.positionals[0],
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "unprotect": {
+        return await handleUnprotectCommand({
+          name: parsed.positionals[0],
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "overlay": {
+        return await handleOverlayCommand({
+          positionals: parsed.positionals,
+          ownerPid: parsed.optionValues.get("--owner-pid"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "export": {
+        return await handleExportCommand({
+          positionals: parsed.positionals,
+          outputPath: parsed.optionValues.get("--output"),
+          force: parsed.flags.has("--force"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "import": {
+        return await handleImportCommand({
+          positionals: parsed.positionals,
+          localName: parsed.optionValues.get("--name"),
+          force: parsed.flags.has("--force"),
+          json,
+          store,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "inspect": {
+        return await handleInspectBundleCommand({
+          positionals: parsed.positionals,
+          json,
+          stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "tui": {
+        return await handleTuiCommand({
+          positionals: parsed.positionals,
+          store,
+          desktopLauncher,
+          watchProcessManager,
+          streams,
+          runCodexCli,
+          debugLog,
+          interruptSignal,
+          managedDesktopWaitStatusDelayMs,
+          managedDesktopWaitStatusIntervalMs,
+        });
+      }
+
       case "run": {
         // `codexm run [-- ...codexArgs]` wraps `codex` and auto-restarts
         // when the auth file changes (e.g. after `codexm switch`).
         if (parsed.positionals.length > 0) {
           throw new Error(`Usage: ${getUsage("run")}`);
         }
+        const isolatedAccountName = parsed.optionValues.get("--account") ?? null;
+        if (isolatedAccountName) {
+          ensureAccountName(isolatedAccountName);
+        }
         const codexArgs = parsed.passthrough;
+        if (!isolatedAccountName) {
+          const currentAccount = await readCurrentRunAccountMetadata(store);
 
-        const currentAccount = await readCurrentRunAccountMetadata(store);
-
-        streams.stderr.write(
-          `[codexm run] Starting codex with auto-restart on auth changes...
-`,
-        );
-        if (codexArgs.length > 0) {
           streams.stderr.write(
-            `[codexm run] codex args: ${codexArgs.join(" ")}
+            `[codexm run] Starting codex with auto-restart on auth changes...
 `,
           );
-        }
-        streams.stderr.write(
-          `[codexm run] Use "codexm switch <account>" in another terminal to hot-switch accounts.
+          if (codexArgs.length > 0) {
+            streams.stderr.write(
+              `[codexm run] codex args: ${codexArgs.join(" ")}
+`,
+            );
+          }
+          streams.stderr.write(
+            `[codexm run] Use "codexm switch <account>" in another terminal to hot-switch accounts.
 
 `,
-        );
+          );
 
-        const result = await runCodexCli({
-          codexArgs,
-          accountId: currentAccount.accountId,
-          email: currentAccount.email,
-          debugLog,
-          stderr: streams.stderr,
-        });
+          const result = await runCodexCli({
+            codexArgs,
+            accountId: currentAccount.accountId,
+            email: currentAccount.email,
+            debugLog,
+            stderr: streams.stderr,
+          });
 
-        if (result.restartCount > 0) {
-          streams.stderr.write(
-            `
+          if (result.restartCount > 0) {
+            streams.stderr.write(
+              `
 [codexm run] Session ended. Restarted ${result.restartCount} time(s) due to auth changes.
 `,
-          );
+            );
+          }
+          return result.exitCode;
         }
-        return result.exitCode;
+
+        const preparedRun = await prepareIsolatedCodexRun({
+          accountName: isolatedAccountName,
+          baseEnv: process.env,
+          store,
+        });
+        const sampler = startIsolatedQuotaHistorySampler({
+          account: preparedRun.account,
+          codexHomeEnv: preparedRun.env,
+          pollIntervalMs: watchQuotaMinReadIntervalMs,
+          scopeId: preparedRun.runId,
+          store,
+          debugLog,
+        });
+
+        try {
+          streams.stderr.write(
+            `[codexm run] Starting codex in isolated mode with saved snapshot "${preparedRun.account.name}"...
+`,
+          );
+          if (codexArgs.length > 0) {
+            streams.stderr.write(
+              `[codexm run] codex args: ${codexArgs.join(" ")}
+`,
+            );
+          }
+          streams.stderr.write(
+            `[codexm run] CODEX_HOME is isolated for this process. It will not follow codexm switch/watch restarts.
+
+`,
+          );
+
+          const result = await runCodexCli({
+            codexArgs,
+            accountId: preparedRun.account.account_id,
+            email: preparedRun.account.email ?? null,
+            authFilePath: preparedRun.authFilePath,
+            sessionsDirPath: preparedRun.sessionsDirPath,
+            env: preparedRun.env,
+            disableAuthWatch: true,
+            registerProcess: false,
+            debugLog,
+            stderr: streams.stderr,
+          });
+          return result.exitCode;
+        } finally {
+          await sampler.stop();
+          await preparedRun.cleanup();
+        }
       }
 
 

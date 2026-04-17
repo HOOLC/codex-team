@@ -10,3 +10,4 @@ coverage
 *.log.*
 logs
 pnpm-debug.log*
+tests/.tmp-rstest-orphan*.test.ts

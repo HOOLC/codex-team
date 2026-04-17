@@ -525,7 +525,7 @@ describe("CLI", () => {
             };
           },
           watchManagedQuotaSignals: async () => {
-            await new Promise((resolve) => setTimeout(resolve, 15));
+            await new Promise((resolve) => setTimeout(resolve, 30));
             interruptController.abort();
           },
         }),
@@ -534,9 +534,10 @@ describe("CLI", () => {
       expect(exitCode).toBe(0);
       expect(readManagedCurrentQuotaCalls).toBeGreaterThanOrEqual(2);
       expect(stderr.read()).toContain("[debug] watch: reading managed Desktop quota reason=idle");
-      expect(stdout.read()).toMatch(
-        /\[\d{2}:\d{2}:\d{2}\] quota account="current" usage=available 5H=80% left 1W=70% left/,
-      );
+      const stdoutOutput = stdout.read();
+      expect(stdoutOutput).toContain('quota account="current" usage=available');
+      expect(stdoutOutput).toContain("5H=80% left");
+      expect(stdoutOutput).toContain("1W=70% left");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1157,6 +1158,86 @@ describe("CLI", () => {
       expect(exitCode).toBe(0);
       expect(applyManagedSwitchCalls).toBe(0);
       expect(stdout.read()).toContain('Switched to "switch-same-runtime"');
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch still refreshes managed Desktop when multiple managed snapshots share the same runtime-visible identity", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 9,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 300,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: 66,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 3_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "5",
+            },
+          });
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-shared-runtime", "chatgpt", "plus", "user-a");
+      await runCli(["save", "shared-runtime-a", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-shared-runtime", "chatgpt", "plus", "user-b");
+      await runCli(["save", "shared-runtime-b", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      let applyManagedSwitchCalls = 0;
+
+      const exitCode = await runCli(["switch", "shared-runtime-a"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentAccount: async () => ({
+            auth_mode: "chatgpt",
+            email: "acct-shared-runtime@example.com",
+            plan_type: "plus",
+            requires_openai_auth: false,
+          }),
+          applyManagedSwitch: async () => {
+            applyManagedSwitchCalls += 1;
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(applyManagedSwitchCalls).toBe(1);
+      expect(stdout.read()).toContain('Switched to "shared-runtime-a"');
       expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);

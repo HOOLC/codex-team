@@ -46,6 +46,10 @@ export interface SwitchLockOwner {
   started_at: string;
 }
 
+type SwitchLockOwnerReadResult =
+  | { status: "ok"; owner: SwitchLockOwner }
+  | { status: "missing" | "invalid"; owner: null };
+
 const SWITCH_LOCKS_DIR_NAME = "locks";
 const SWITCH_LOCK_DIR_NAME = "switch.lock";
 const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS = 1_000;
@@ -65,8 +69,9 @@ export function stripManagedDesktopWarning(warnings: string[]): string[] {
 }
 
 function startManagedDesktopWaitReporter(
-  stream: NodeJS.WriteStream,
   options: {
+    stream?: NodeJS.WriteStream;
+    onStatusMessage?: (message: string) => void;
     delayMs?: number;
     intervalMs?: number;
   } = {},
@@ -78,17 +83,19 @@ function startManagedDesktopWaitReporter(
   const startedAt = Date.now();
   let started = false;
   let intervalHandle: NodeJS.Timeout | null = null;
+  const emitStatusMessage = (message: string) => {
+    options.stream?.write(`${message}\n`);
+    options.onStatusMessage?.(message);
+  };
 
   const timeoutHandle = setTimeout(() => {
     started = true;
-    stream.write(
-      "Waiting for the current Codex Desktop thread to finish before applying the switch...\n",
-    );
+    emitStatusMessage("Waiting for the current Codex Desktop thread to finish before applying the switch...");
 
     intervalHandle = setInterval(() => {
       const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
-      stream.write(
-        `Still waiting for the current Codex Desktop thread to finish (${elapsedSeconds}s elapsed)...\n`,
+      emitStatusMessage(
+        `Still waiting for the current Codex Desktop thread to finish (${elapsedSeconds}s elapsed)...`,
       );
     }, intervalMs);
     intervalHandle.unref?.();
@@ -103,7 +110,7 @@ function startManagedDesktopWaitReporter(
       }
 
       if (started && result === "success") {
-        stream.write("Applied the switch to the managed Codex Desktop session.\n");
+        emitStatusMessage("Applied the switch to the managed Codex Desktop session.");
       }
     },
   };
@@ -116,16 +123,19 @@ export async function refreshManagedDesktopAfterSwitch(
     force?: boolean;
     signal?: AbortSignal;
     statusStream?: NodeJS.WriteStream;
+    onStatusMessage?: (message: string) => void;
     statusDelayMs?: number;
     statusIntervalMs?: number;
     timeoutMs?: number;
   } = {},
 ): Promise<"applied" | "killed" | "none" | "other-running" | "failed"> {
   let reporter: ReturnType<typeof startManagedDesktopWaitReporter> | null = null;
-  if (options.force !== true && options.statusStream) {
+  if (options.force !== true && (options.statusStream || options.onStatusMessage)) {
     try {
       if (await desktopLauncher.isManagedDesktopRunning()) {
-        reporter = startManagedDesktopWaitReporter(options.statusStream, {
+        reporter = startManagedDesktopWaitReporter({
+          stream: options.statusStream,
+          onStatusMessage: options.onStatusMessage,
           delayMs: options.statusDelayMs,
           intervalMs: options.statusIntervalMs,
         });
@@ -231,7 +241,9 @@ export async function tryReadManagedDesktopQuota(
 
 export async function selectAutoSwitchAccount(store: AccountStore): Promise<AutoSwitchSelection> {
   const refreshResult = await store.refreshAllQuotas();
-  const candidates = rankAutoSwitchCandidates(refreshResult.successes);
+  const candidates = rankAutoSwitchCandidates(
+    refreshResult.successes.filter((account) => account.auto_switch_eligible ?? true),
+  );
   if (candidates.length === 0) {
     throw new Error("No auto-switch candidate has usable 5H or 1W quota data available.");
   }
@@ -381,7 +393,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function readSwitchLockOwner(store: AccountStore): Promise<SwitchLockOwner | null> {
+async function readSwitchLockOwner(store: AccountStore): Promise<SwitchLockOwnerReadResult> {
   try {
     const raw = await readFile(getSwitchLockOwnerPath(store), "utf8");
     const parsed = JSON.parse(raw) as Partial<SwitchLockOwner>;
@@ -391,19 +403,33 @@ async function readSwitchLockOwner(store: AccountStore): Promise<SwitchLockOwner
       typeof parsed.started_at === "string"
     ) {
       return {
-        pid: parsed.pid,
-        command: parsed.command,
-        started_at: parsed.started_at,
+        status: "ok",
+        owner: {
+          pid: parsed.pid,
+          command: parsed.command,
+          started_at: parsed.started_at,
+        },
       };
     }
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code !== "ENOENT") {
-      return null;
+    if (nodeError.code === "ENOENT") {
+      return {
+        status: "missing",
+        owner: null,
+      };
     }
+
+    return {
+      status: "invalid",
+      owner: null,
+    };
   }
 
-  return null;
+  return {
+    status: "invalid",
+    owner: null,
+  };
 }
 
 export async function tryAcquireSwitchLock(
@@ -434,17 +460,18 @@ export async function tryAcquireSwitchLock(
   let created = await tryCreateLock();
   if (!created) {
     const existingOwner = await readSwitchLockOwner(store);
-    if (!existingOwner || !isProcessAlive(existingOwner.pid)) {
+    if (existingOwner.status === "ok" && !isProcessAlive(existingOwner.owner.pid)) {
       await rm(lockPath, { recursive: true, force: true });
       created = await tryCreateLock();
     }
   }
 
   if (!created) {
+    const existingOwner = await readSwitchLockOwner(store);
     return {
       acquired: false,
       lockPath,
-      owner: await readSwitchLockOwner(store),
+      owner: existingOwner.owner,
     };
   }
 
@@ -477,6 +504,8 @@ export function describeBusySwitchLock(lockPath: string, owner: SwitchLockOwner 
   let message = `Another codexm switch or launch operation is already in progress. Lock: ${lockPath}`;
   if (owner) {
     message += ` (pid ${owner.pid}, command ${JSON.stringify(owner.command)}, started ${owner.started_at})`;
+  } else {
+    message += " (owner metadata unavailable; if no switch or launch is running, remove the stale lock and retry)";
   }
   return message;
 }

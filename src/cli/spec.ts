@@ -7,6 +7,7 @@ interface CliFlagSpec {
   description: string;
   global: boolean;
   aliases?: string[];
+  takesValue?: boolean;
 }
 
 interface CliCommandSpec {
@@ -72,6 +73,9 @@ export const ACCOUNT_NAME_PATTERN = cliSpec.accountNamePattern;
 export const COMMAND_SPECS = cliSpec.commands;
 export const COMMAND_NAMES = cliSpec.commands.map((command) => command.name);
 export const GLOBAL_FLAGS = new Set(cliSpec.flags.filter((flag) => flag.global).map((flag) => flag.flag));
+export const VALUE_FLAGS = new Set(
+  cliSpec.flags.filter((flag) => flag.takesValue).map((flag) => flag.flag),
+);
 export const COMMAND_FLAGS = Object.fromEntries(
   cliSpec.commands.map((command) => [command.name, new Set(command.flags)]),
 ) as Record<(typeof COMMAND_NAMES)[number], Set<string>>;

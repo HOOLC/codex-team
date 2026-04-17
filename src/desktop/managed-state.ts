@@ -1,7 +1,7 @@
-import { copyFile, readFile, rm, stat } from "node:fs/promises";
+import { copyFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { getSnapshotEmail, parseAuthSnapshot } from "../auth-snapshot.js";
+import { getSnapshotEmail, readAuthSnapshotFile } from "../auth-snapshot.js";
 import type { AccountStore } from "../account-store/index.js";
 import {
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
@@ -158,8 +158,7 @@ export async function shouldSkipManagedDesktopRefresh(
       return false;
     }
 
-    const rawAuth = await readFile(store.paths.currentAuthPath, "utf8");
-    const currentSnapshot = parseAuthSnapshot(rawAuth);
+    const currentSnapshot = await readAuthSnapshotFile(store.paths.currentAuthPath);
     const currentEmail = getSnapshotEmail(currentSnapshot);
     if (!currentEmail) {
       debugLog?.("switch: current auth email unavailable");
@@ -170,6 +169,34 @@ export async function shouldSkipManagedDesktopRefresh(
     const sameEmail = runtimeAccount.email.trim().toLowerCase() === currentEmail.trim().toLowerCase();
     if (!sameAuthMode || !sameEmail) {
       debugLog?.("switch: managed Desktop runtime differs from target auth");
+      return false;
+    }
+
+    const { accounts } = await store.listAccounts();
+    let managedMatches = 0;
+    for (const account of accounts) {
+      if (account.auth_mode !== currentSnapshot.auth_mode) {
+        continue;
+      }
+
+      try {
+        const accountSnapshot = await readAuthSnapshotFile(account.authPath);
+        const accountEmail = getSnapshotEmail(accountSnapshot);
+        if (
+          accountEmail &&
+          accountEmail.trim().toLowerCase() === currentEmail.trim().toLowerCase()
+        ) {
+          managedMatches += 1;
+        }
+      } catch {
+        // Ignore unreadable managed snapshots and fall back to refreshing Desktop.
+      }
+    }
+
+    if (managedMatches !== 1) {
+      debugLog?.(
+        `switch: managed Desktop runtime identity is ambiguous across ${managedMatches} saved snapshot(s)`,
+      );
       return false;
     }
 

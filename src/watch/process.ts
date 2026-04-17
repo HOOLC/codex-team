@@ -3,6 +3,8 @@ import { closeSync, openSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
+import { createWatchLeaseManager } from "./lease.js";
+
 export interface WatchProcessState {
   pid: number;
   started_at: string;
@@ -101,6 +103,7 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
   const statePath = join(codexTeamDir, "watch-state.json");
   const logsDir = join(codexTeamDir, "logs");
   const logPath = join(logsDir, "watch.log");
+  const leaseManager = createWatchLeaseManager(codexTeamDir);
 
   async function readState(): Promise<WatchProcessState | null> {
     try {
@@ -131,6 +134,10 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
 
     if (!isProcessRunning(state.pid)) {
       await clearState();
+      await leaseManager.release({
+        ownerKind: "detached",
+        pid: state.pid,
+      });
       return {
         running: false,
         state: null,
@@ -190,6 +197,7 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
       }
 
       await writeState(state);
+      await leaseManager.recordDetached(state);
       return state;
     } finally {
       closeSync(outputFd);
@@ -215,6 +223,10 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
     for (let attempt = 0; attempt < 20; attempt += 1) {
       if (!isProcessRunning(status.state.pid)) {
         await clearState();
+        await leaseManager.release({
+          ownerKind: "detached",
+          pid: status.state.pid,
+        });
         return {
           running: false,
           state: status.state,
@@ -230,6 +242,10 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
     for (let attempt = 0; attempt < 20; attempt += 1) {
       if (!isProcessRunning(status.state.pid)) {
         await clearState();
+        await leaseManager.release({
+          ownerKind: "detached",
+          pid: status.state.pid,
+        });
         return {
           running: false,
           state: status.state,
