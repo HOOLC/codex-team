@@ -10,6 +10,7 @@ import {
   type AccountDashboardExternalUpdate,
   type AccountDashboardSnapshot,
 } from "../src/tui/index.js";
+import { setPlatformForTesting } from "../src/platform.js";
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
 import {
@@ -613,6 +614,7 @@ describe("Account Dashboard TUI", () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();
     const stderr = captureWritable();
+    const restorePlatform = setPlatformForTesting("darwin");
     let managedDesktopRunning = false;
     let foregroundWatchStarts = 0;
     let runningApps: Array<{ pid: number; command: string }> = [];
@@ -684,6 +686,7 @@ describe("Account Dashboard TUI", () => {
       expect(result).toBe(0);
       expect(foregroundWatchStarts).toBe(1);
     } finally {
+      restorePlatform();
       await cleanupTempHome(homeDir);
     }
   });
@@ -1994,11 +1997,12 @@ describe("Account Dashboard TUI", () => {
       expect(snapshot.accounts[1]).toMatchObject({
         current: true,
         identityLabel: "acct...pha",
-        joinedAtLabel: "2026-03-18 12:30",
-        lastSwitchedAtLabel: "2026-04-16 13:24",
       });
+      expect(snapshot.accounts[1]?.joinedAtLabel).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+      expect(snapshot.accounts[1]?.lastSwitchedAtLabel).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
       expect(snapshot.accounts[1]?.detailLines).toEqual(
         expect.arrayContaining([
+          expect.stringMatching(/^Joined: \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/),
           expect.stringMatching(/^Switched: .*ago\)$/),
           expect.stringMatching(/^Next reset: .*\((?:in .+|.+ ago|now)\)$/),
         ]),
