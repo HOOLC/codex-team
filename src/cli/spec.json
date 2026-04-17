@@ -33,11 +33,11 @@
   "notes": [
     "In an interactive terminal, running plain codexm opens the account dashboard; use \"codexm tui [query]\" for an explicit entry or initial filter.",
     "codexm current shows live usage when a managed Codex Desktop session is available.",
-    "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
+    "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API and recent cached quota when refresh fails.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
     "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --verbose to expand score inputs.",
     "codexm export writes a share bundle for the current auth or a managed account; codexm import saves a shared bundle without switching current auth.",
-    "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, sharing bundles, deleting accounts, undoing the latest import/export/delete, and opening codex or Desktop from the selected account.",
+    "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, sharing bundles, deleting accounts, undoing the latest import/export/delete, and opening codex or Desktop from the selected account while keeping the last successful quota view visible through transient refresh failures.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
     "Unknown commands and flags fail fast; close matches include a suggestion."
   ],

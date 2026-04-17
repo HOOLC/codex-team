@@ -9,12 +9,11 @@ import type { CliQuotaSummary } from "./quota-types.js";
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-export function computeAvailability(account: AccountQuotaSummary): string | null {
-  if (account.status !== "ok") {
-    return null;
-  }
-
-  const usedPercents = [account.five_hour?.used_percent, account.one_week?.used_percent].filter(
+function computeAvailabilityFromWindows(
+  fiveHour: { used_percent?: number | null } | null | undefined,
+  oneWeek: { used_percent?: number | null } | null | undefined,
+): string | null {
+  const usedPercents = [fiveHour?.used_percent, oneWeek?.used_percent].filter(
     (value): value is number => typeof value === "number",
   );
 
@@ -27,6 +26,14 @@ export function computeAvailability(account: AccountQuotaSummary): string | null
   }
 
   return "available";
+}
+
+export function computeAvailability(account: AccountQuotaSummary): string | null {
+  if (account.status !== "ok") {
+    return null;
+  }
+
+  return computeAvailabilityFromWindows(account.five_hour, account.one_week);
 }
 
 export function toCliQuotaSummary(account: AccountQuotaSummary): CliQuotaSummary {
@@ -93,6 +100,22 @@ export function describeCurrentUsageSummary(
   if (quota.refresh_status !== "ok") {
     if (quota.refresh_status === "unsupported") {
       return "Usage: unsupported";
+    }
+
+    if (quota.refresh_status === "stale") {
+      const availability = quota.available ?? computeAvailabilityFromWindows(quota.five_hour, quota.one_week);
+      const fetchedLabel =
+        quota.fetched_at
+          ? dayjs.utc(quota.fetched_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm")
+          : "unknown";
+
+      return [
+        `Usage: stale${availability ? ` (${availability})` : ""}`,
+        `5H ${quota.five_hour?.used_percent ?? "-"}% used`,
+        `1W ${quota.one_week?.used_percent ?? "-"}% used`,
+        sourceLabel ? `${sourceLabel} (${fetchedLabel})` : `cached ${fetchedLabel}`,
+        ...(quota.error_message ? [quota.error_message] : []),
+      ].join(" | ");
     }
 
     return `Usage: ${quota.refresh_status}${quota.error_message ? ` | ${quota.error_message}` : ""}`;

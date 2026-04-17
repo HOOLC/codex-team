@@ -239,6 +239,41 @@ function toQuotaSummary(account: ManagedAccount, refreshed: AccountQuotaSummary 
   };
 }
 
+function canRenderQuotaFromSnapshot(account: AccountQuotaSummary | undefined): account is AccountQuotaSummary {
+  return account !== undefined && (account.status === "ok" || account.status === "stale");
+}
+
+function mergeDashboardSourceAccounts(
+  previousAccounts: AccountQuotaSummary[] | undefined,
+  nextAccounts: AccountQuotaSummary[],
+): AccountQuotaSummary[] {
+  if (!previousAccounts || previousAccounts.length === 0) {
+    return nextAccounts;
+  }
+
+  const previousByName = new Map(previousAccounts.map((account) => [account.name, account] as const));
+  return nextAccounts.map((account) => {
+    if (account.status === "ok") {
+      return account;
+    }
+
+    const previous = previousByName.get(account.name);
+    if (!canRenderQuotaFromSnapshot(previous)) {
+      return account;
+    }
+
+    return {
+      ...previous,
+      name: account.name,
+      account_id: account.account_id,
+      user_id: account.user_id,
+      identity: account.identity,
+      auto_switch_eligible: account.auto_switch_eligible,
+      plan_type: account.plan_type ?? previous.plan_type,
+    };
+  });
+}
+
 function describeCurrentHeader(
   status: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>,
   usableCount: number,
@@ -356,11 +391,13 @@ function buildDashboardSnapshot(options: {
   watchHistory: Awaited<ReturnType<ReturnType<typeof createWatchHistoryStore>["read"]>>;
   usageSummary: Awaited<ReturnType<typeof loadFreshLocalUsageSummary>> | null;
   refreshedByName?: Map<string, AccountQuotaSummary>;
+  previousSnapshot?: AccountDashboardSnapshot;
   debugLog?: DebugLogger;
 }): AccountDashboardSnapshot {
-  const allAccounts = options.accounts.map((account) =>
+  const nextAccounts = options.accounts.map((account) =>
     toQuotaSummary(account, options.refreshedByName?.get(account.name) ?? null),
   );
+  const allAccounts = mergeDashboardSourceAccounts(options.previousSnapshot?.sourceAccounts, nextAccounts);
   const now = new Date();
   const etaByName = new Map(
     allAccounts.map((account) => [
@@ -394,6 +431,7 @@ function buildDashboardSnapshot(options: {
     showEtaColumn,
     warnings: options.warnings,
     failures: options.failures,
+    sourceAccounts: allAccounts,
     accounts: orderedAccounts.map((account) => {
       const candidate = toAutoSwitchCandidate(account);
       const eta = etaByName.get(account.name);
@@ -447,6 +485,7 @@ function buildDashboardSnapshot(options: {
 
 export async function buildAccountDashboardSnapshot(options: {
   store: AccountStore;
+  previousSnapshot?: AccountDashboardSnapshot;
   debugLog?: DebugLogger;
 }): Promise<AccountDashboardSnapshot> {
   const result = await options.store.refreshAllQuotas(undefined, {
@@ -466,6 +505,7 @@ export async function buildAccountDashboardSnapshot(options: {
     watchHistory,
     usageSummary,
     refreshedByName,
+    previousSnapshot: options.previousSnapshot,
     debugLog: options.debugLog,
   });
 }
@@ -525,10 +565,11 @@ export async function handleTuiCommand(options: {
 
   while (true) {
     const silentStatusStream = new PassThrough() as unknown as NodeJS.WriteStream;
-    const initialSnapshot = await buildCachedAccountDashboardSnapshot({
+    let latestDashboardSnapshot = await buildCachedAccountDashboardSnapshot({
       store: options.store,
       debugLog: options.debugLog,
     });
+    const initialSnapshot = latestDashboardSnapshot;
     const externalUpdateFeed = createAccountDashboardExternalUpdateFeed();
     if (queuedExternalUpdate) {
       externalUpdateFeed.emit(queuedExternalUpdate);
@@ -563,10 +604,15 @@ export async function handleTuiCommand(options: {
         initialQuery: nextInitialQuery,
         initialSnapshot,
         subscribeExternalUpdates: externalUpdateFeed.subscribe,
-        loadSnapshot: async () => await buildAccountDashboardSnapshot({
-          store: options.store,
-          debugLog: options.debugLog,
-        }),
+        loadSnapshot: async () => {
+          const nextSnapshot = await buildAccountDashboardSnapshot({
+            store: options.store,
+            previousSnapshot: latestDashboardSnapshot,
+            debugLog: options.debugLog,
+          });
+          latestDashboardSnapshot = nextSnapshot;
+          return nextSnapshot;
+        },
         switchAccount: async (name, switchOptions) => {
           localSwitchInFlightRef.value = true;
           try {

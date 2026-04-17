@@ -2417,6 +2417,330 @@ describe("Account Dashboard TUI", () => {
     }
   });
 
+  test("reuses the previous successful dashboard quota rows when a later refresh fails for one account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const previousSnapshot = await buildCachedAccountDashboardSnapshot({
+        store: {
+          paths: {
+            homeDir,
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "alpha",
+                auth_mode: "chatgpt",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "ok",
+                  plan_type: "plus",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  five_hour: { used_percent: 18, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                  one_week: { used_percent: 42, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+                },
+                authPath: `${homeDir}/alpha/auth.json`,
+                metaPath: `${homeDir}/alpha/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+              {
+                name: "beta",
+                auth_mode: "chatgpt",
+                account_id: "acct-beta",
+                user_id: "user-beta",
+                identity: "acct-beta:user-beta",
+                email: "beta@example.com",
+                created_at: "2026-03-19T01:00:00.000Z",
+                updated_at: "2026-04-16T05:20:00.000Z",
+                last_switched_at: "2026-04-15T02:10:00.000Z",
+                quota: {
+                  status: "ok",
+                  plan_type: "pro",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  five_hour: { used_percent: 36, window_seconds: 18_000, reset_at: "2026-04-16T10:00:00.000Z" },
+                  one_week: { used_percent: 27, window_seconds: 604_800, reset_at: "2026-04-18T10:00:00.000Z" },
+                  unlimited: true,
+                },
+                authPath: `${homeDir}/beta/auth.json`,
+                metaPath: `${homeDir}/beta/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+            ],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-alpha",
+            user_id: "user-alpha",
+            identity: "acct-alpha:user-alpha",
+            matched_accounts: ["alpha"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+        } as never,
+      });
+
+      const snapshot = await buildAccountDashboardSnapshot({
+        store: {
+          paths: {
+            homeDir,
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "alpha",
+                auth_mode: "chatgpt",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "error",
+                  plan_type: "plus",
+                  fetched_at: "2026-04-16T08:05:00.000Z",
+                  error_message: "quota failed",
+                },
+                authPath: `${homeDir}/alpha/auth.json`,
+                metaPath: `${homeDir}/alpha/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+              {
+                name: "beta",
+                auth_mode: "chatgpt",
+                account_id: "acct-beta",
+                user_id: "user-beta",
+                identity: "acct-beta:user-beta",
+                email: "beta@example.com",
+                created_at: "2026-03-19T01:00:00.000Z",
+                updated_at: "2026-04-16T05:20:00.000Z",
+                last_switched_at: "2026-04-15T02:10:00.000Z",
+                quota: {
+                  status: "ok",
+                  plan_type: "pro",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  five_hour: { used_percent: 36, window_seconds: 18_000, reset_at: "2026-04-16T10:00:00.000Z" },
+                  one_week: { used_percent: 27, window_seconds: 604_800, reset_at: "2026-04-18T10:00:00.000Z" },
+                  unlimited: true,
+                },
+                authPath: `${homeDir}/beta/auth.json`,
+                metaPath: `${homeDir}/beta/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+            ],
+          }),
+          refreshAllQuotas: async () => ({
+            successes: [
+              {
+                name: "beta",
+                account_id: "acct-beta",
+                user_id: "user-beta",
+                identity: "acct-beta:user-beta",
+                plan_type: "pro",
+                credits_balance: null,
+                status: "ok",
+                fetched_at: "2026-04-16T08:10:00.000Z",
+                error_message: null,
+                unlimited: true,
+                five_hour: { used_percent: 22, window_seconds: 18_000, reset_at: "2026-04-16T12:00:00.000Z" },
+                one_week: { used_percent: 19, window_seconds: 604_800, reset_at: "2026-04-18T12:00:00.000Z" },
+              },
+            ],
+            failures: [{ name: "alpha", error: "quota failed" }],
+            warnings: [],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-alpha",
+            user_id: "user-alpha",
+            identity: "acct-alpha:user-alpha",
+            matched_accounts: ["alpha"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+        } as never,
+        previousSnapshot,
+      });
+
+      expect(snapshot.headerLine).toContain("codexm | current alpha | 2/2 usable");
+      expect(snapshot.summaryLine).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x1, pro x1");
+      expect(snapshot.failures).toEqual([{ name: "alpha", error: "quota failed" }]);
+      const accountByName = new Map(snapshot.accounts.map((account) => [account.name, account] as const));
+      expect(snapshot.accounts.map((account) => account.name)).toEqual(["beta", "alpha"]);
+      expect(accountByName.get("alpha")).toMatchObject({
+        name: "alpha",
+        refreshStatusLabel: "ok",
+        fiveHourLabel: "18%",
+        oneWeekLabel: "42%",
+        current: true,
+      });
+      expect(accountByName.get("beta")).toMatchObject({
+        name: "beta",
+        refreshStatusLabel: "ok",
+        fiveHourLabel: "22%",
+        oneWeekLabel: "19%",
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("reuses the previous successful dashboard quota rows when a later refresh only has stale cached quota", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const previousSnapshot = await buildCachedAccountDashboardSnapshot({
+        store: {
+          paths: {
+            homeDir,
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "alpha",
+                auth_mode: "chatgpt",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "ok",
+                  plan_type: "plus",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  five_hour: { used_percent: 12, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                  one_week: { used_percent: 47, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+                },
+                authPath: `${homeDir}/alpha/auth.json`,
+                metaPath: `${homeDir}/alpha/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+            ],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-alpha",
+            user_id: "user-alpha",
+            identity: "acct-alpha:user-alpha",
+            matched_accounts: ["alpha"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+        } as never,
+      });
+
+      const snapshot = await buildAccountDashboardSnapshot({
+        store: {
+          paths: {
+            homeDir,
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "alpha",
+                auth_mode: "chatgpt",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "stale",
+                  plan_type: "plus",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  error_message: "refresh failed",
+                  five_hour: { used_percent: 12, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                  one_week: { used_percent: 47, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+                },
+                authPath: `${homeDir}/alpha/auth.json`,
+                metaPath: `${homeDir}/alpha/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+            ],
+          }),
+          refreshAllQuotas: async () => ({
+            successes: [
+              {
+                name: "alpha",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                plan_type: "plus",
+                credits_balance: null,
+                status: "stale",
+                fetched_at: "2026-04-16T08:00:00.000Z",
+                error_message: "refresh failed",
+                unlimited: false,
+                five_hour: { used_percent: 12, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                one_week: { used_percent: 47, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+              },
+            ],
+            failures: [],
+            warnings: ["alpha using cached quota from 2026-04-16T08:00:00.000Z after refresh failed"],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-alpha",
+            user_id: "user-alpha",
+            identity: "acct-alpha:user-alpha",
+            matched_accounts: ["alpha"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+        } as never,
+        previousSnapshot,
+      });
+
+      expect(snapshot.headerLine).toContain("codexm | current alpha | 1/1 usable");
+      expect(snapshot.summaryLine).toBe("Accounts: 1/1 usable | blocked: 1W 0, 5H 0 | plus x1");
+      expect(snapshot.warnings).toEqual([
+        "alpha using cached quota from 2026-04-16T08:00:00.000Z after refresh failed",
+      ]);
+      expect(snapshot.accounts[0]).toMatchObject({
+        name: "alpha",
+        refreshStatusLabel: "ok",
+        fiveHourLabel: "12%",
+        oneWeekLabel: "47%",
+        current: true,
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("builds a cached dashboard snapshot from local quota metadata without refreshing", async () => {
     const homeDir = await createTempHome();
 

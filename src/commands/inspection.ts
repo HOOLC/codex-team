@@ -52,6 +52,45 @@ interface CurrentRuntimeQuotaView {
   source: RuntimeReadSource;
 }
 
+function toCurrentCliQuotaSummary(result: {
+  account: {
+    name: string;
+    account_id: string;
+    user_id?: string | null;
+    identity: string;
+    auto_switch_eligible?: boolean;
+    quota: {
+      plan_type?: string | null;
+    };
+  };
+  quota: {
+    status: CliQuotaSummary["refresh_status"];
+    plan_type?: string | null;
+    credits_balance?: number | null;
+    fetched_at?: string | null;
+    error_message?: string | null;
+    unlimited?: boolean;
+    five_hour?: CliQuotaSummary["five_hour"];
+    one_week?: CliQuotaSummary["one_week"];
+  };
+}): CliQuotaSummary {
+  return toCliQuotaSummary({
+    name: result.account.name,
+    account_id: result.account.account_id,
+    user_id: result.account.user_id ?? null,
+    identity: result.account.identity,
+    auto_switch_eligible: result.account.auto_switch_eligible,
+    plan_type: result.quota.plan_type ?? result.account.quota.plan_type ?? null,
+    credits_balance: result.quota.credits_balance ?? null,
+    status: result.quota.status,
+    fetched_at: result.quota.fetched_at ?? null,
+    error_message: result.quota.error_message ?? null,
+    unlimited: result.quota.unlimited === true,
+    five_hour: result.quota.five_hour ?? null,
+    one_week: result.quota.one_week ?? null,
+  });
+}
+
 interface DoctorCurrentAuthView {
   status: "ok" | "missing" | "invalid";
   auth_mode: string | null;
@@ -574,13 +613,23 @@ export async function handleCurrentCommand(options: {
             ? "refreshed via Desktop runtime"
             : "refreshed via direct runtime";
       } else {
-        const quotaResult = await options.store.refreshQuotaForAccount(currentName);
-        const quotaList = await options.store.listQuotaSummaries();
-        const matched =
-          quotaList.accounts.find((account) => account.name === quotaResult.account.name) ?? null;
-        quota = matched ? toCliQuotaSummary(matched) : null;
+        try {
+          const quotaResult = await options.store.refreshQuotaForAccount(currentName, {
+            allowCachedQuotaFallback: true,
+          });
+          quota = toCurrentCliQuotaSummary(quotaResult);
+        } catch (error) {
+          const quotaList = await options.store.listQuotaSummaries();
+          const matched =
+            quotaList.accounts.find((account) => account.name === currentName) ?? null;
+          quota = matched ? toCliQuotaSummary(matched) : null;
+          if (!quota) {
+            usageUnavailableReason = `unavailable (${(error as Error).message})`;
+          }
+        }
+
         if (quota) {
-          usageSourceLabel = "refreshed via api";
+          usageSourceLabel = quota.refresh_status === "stale" ? "cached quota" : "refreshed via api";
         }
       }
     }

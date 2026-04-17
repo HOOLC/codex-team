@@ -32,9 +32,10 @@
 
 - Use plain `codexm` in a TTY when the user wants the interactive dashboard immediately; use `codexm tui [query]` when they want an explicit dashboard entry or an initial filter.
 - Use `codexm current` when the user does not know what auth is active now or wants a quick current-usage summary.
-- Use `codexm current --refresh` when the user explicitly wants the latest usage data instead of best-effort live data.
+- Use `codexm current --refresh` when the user explicitly wants the latest usage data instead of best-effort live data. It prefers managed Desktop/runtime quota, then the ChatGPT usage API, and falls back to recent cached quota with a `stale` label when the API is temporarily unavailable.
 - Use `codexm doctor` when the user is debugging mismatches between local auth, direct runtime reads, and managed Desktop state.
 - Use `codexm list` when the user wants to compare saved accounts or inspect quota state.
+- If the user is asking about transient dashboard refresh failures, explain that the dashboard keeps the last successful quota view on screen and reports the failed refresh through warnings/failures.
 - Use `codexm list --verbose` when the user wants score details behind auto-switch ranking.
 - Use `codexm add <name>` when the user wants to create a managed account without changing current auth.
 - Use `codexm add <name> --device-auth` on remote/headless machines where browser callback login is inconvenient.

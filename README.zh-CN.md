@@ -72,6 +72,8 @@ dashboard 里常用按键：
 - `d`：打开或聚焦 Codex Desktop，但不离开 dashboard
 - `Shift+D`：用选中账号重新拉起 Codex Desktop；如果当前已有非 `codexm` 托管的 Desktop，会先确认再强制关闭重启
 
+如果 quota refresh 失败，dashboard 会保留上一份成功的 quota 视图，并通过 warning/failure 提示异常，而不是把列表、汇总和详情面板一起打乱成退化状态。
+
 ### 3. 让它持续自动工作
 
 macOS + Codex Desktop：
@@ -92,7 +94,7 @@ codexm watch
 codexm run -- --model o3
 ```
 
-`codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
+`codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。`codexm current --refresh` 会优先读取托管 Desktop runtime quota，其次尝试 ChatGPT usage API；如果 API 临时不可用，会回退到最近的 cached quota，并标记为 `stale`。
 
 ## 输出示例
 

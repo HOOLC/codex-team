@@ -945,6 +945,170 @@ describe("CLI Read Commands", () => {
     }
   });
 
+  test("current --refresh falls back to recent cached quota when chatgpt.com usage fetch is unreachable", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const seededStore = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 12,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 400,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: 47,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-cached");
+      await runCli(["save", "current-cached", "--json"], {
+        store: seededStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await runCli(["current", "--refresh"], {
+        store: seededStore,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const failingStore = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          throw new TypeError("fetch failed");
+        },
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store: failingStore,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: current-cached");
+      expect(output).toContain("Usage: stale");
+      expect(output).toContain("5H 12% used");
+      expect(output).toContain("1W 47% used");
+      expect(output).toContain("cached");
+      expect(output).toContain("fetch failed");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("current --refresh falls back to recent cached quota when chatgpt.com usage returns an API error", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const seededStore = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 15,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 400,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: 45,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-api-error");
+      await runCli(["save", "current-api-error", "--json"], {
+        store: seededStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await runCli(["current", "--refresh"], {
+        store: seededStore,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const failingStore = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          return textResponse("upstream exploded", 503);
+        },
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store: failingStore,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: current-api-error");
+      expect(output).toContain("Usage: stale");
+      expect(output).toContain("5H 15% used");
+      expect(output).toContain("1W 45% used");
+      expect(output).toContain("cached");
+      expect(output).toContain("503");
+      expect(output).toContain("upstream exploded");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("current --refresh --json includes refreshed quota data", async () => {
     const homeDir = await createTempHome();
 

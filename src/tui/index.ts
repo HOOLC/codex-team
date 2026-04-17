@@ -1,4 +1,5 @@
 import type { LocalUsageSummary } from "../local-usage/types.js";
+import type { AccountQuotaSummary } from "../account-store/index.js";
 import {
   formatTuiUsageSummaryLine,
   formatTuiUsageTrendLine,
@@ -107,6 +108,7 @@ export interface AccountDashboardSnapshot {
   warnings: string[];
   failures: Array<{ name: string; error: string }>;
   accounts: AccountDashboardAccount[];
+  sourceAccounts?: AccountQuotaSummary[];
 }
 
 export interface AccountDashboardState {

@@ -72,6 +72,8 @@ Inside the dashboard:
 - `d`: open or focus Codex Desktop without leaving the dashboard
 - `Shift+D`: relaunch Codex Desktop for the selected account; when an unmanaged Desktop instance is already running, confirm before forcing it closed
 
+When a quota refresh fails, the dashboard keeps the last successful quota view on screen and surfaces the failure through warnings instead of collapsing the list, summary, and detail panes into a degraded redraw.
+
 ### 3. Keep working automatically
 
 macOS + Codex Desktop:
@@ -92,7 +94,7 @@ In another terminal:
 codexm run -- --model o3
 ```
 
-`codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI, survives repeated `~/.codex/auth.json` replacements, and auto-resumes the active interactive session after an account-triggered restart. If you end `codexm run` manually while a session is recoverable, it prints the resume command to use.
+`codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI, survives repeated `~/.codex/auth.json` replacements, and auto-resumes the active interactive session after an account-triggered restart. If you end `codexm run` manually while a session is recoverable, it prints the resume command to use. `codexm current --refresh` prefers managed Desktop runtime quota, then the ChatGPT usage API, and falls back to recent cached quota with a `stale` label when the API is temporarily unavailable.
 
 ## Example output
 
