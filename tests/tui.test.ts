@@ -1938,6 +1938,7 @@ describe("Account Dashboard TUI", () => {
               pid: 54321,
               started_at: "2026-04-17T00:00:00.000Z",
               auto_switch: true,
+              auto_switch_eta_hours: null,
               debug: false,
             },
           }),
@@ -1948,6 +1949,7 @@ describe("Account Dashboard TUI", () => {
               pid: 54321,
               started_at: "2026-04-17T00:00:00.000Z",
               auto_switch: true,
+              auto_switch_eta_hours: null,
               debug: false,
             },
           }),
@@ -1984,7 +1986,11 @@ describe("Account Dashboard TUI", () => {
     let settled = false;
     let foregroundWatchStarts = 0;
     let foregroundWatchAborts = 0;
-    const detachedStarts: Array<{ autoSwitch: boolean; debug: boolean }> = [];
+    const detachedStarts: Array<{
+      autoSwitch: boolean;
+      autoSwitchEtaHours: number | null;
+      debug: boolean;
+    }> = [];
     let tuiPromise: Promise<number> | null = null;
     let resolveForegroundWatchStarted: (() => void) | null = null;
     const foregroundWatchStarted = new Promise<void>((resolve) => {
@@ -2028,6 +2034,7 @@ describe("Account Dashboard TUI", () => {
               started_at: "2026-04-17T00:00:00.000Z",
               log_path: "/tmp/watch.log",
               auto_switch: options.autoSwitch,
+              auto_switch_eta_hours: options.autoSwitchEtaHours,
               debug: options.debug,
             };
           },
@@ -2061,7 +2068,7 @@ describe("Account Dashboard TUI", () => {
       await expect(tuiPromise).resolves.toBe(0);
       expect(foregroundWatchStarts).toBe(1);
       expect(foregroundWatchAborts).toBe(1);
-      expect(detachedStarts).toEqual([{ autoSwitch: true, debug: false }]);
+      expect(detachedStarts).toEqual([{ autoSwitch: true, autoSwitchEtaHours: null, debug: false }]);
     } finally {
       if (!settled && tuiPromise) {
         stdin.emitInput("q");
@@ -2120,6 +2127,7 @@ describe("Account Dashboard TUI", () => {
                   started_at: "2026-04-17T00:00:00.000Z",
                   log_path: "/tmp/watch.log",
                   auto_switch: true,
+                  auto_switch_eta_hours: null,
                   debug: false,
                 }
               : null,

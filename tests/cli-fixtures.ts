@@ -242,7 +242,11 @@ export function createInteractiveStdout(
 }
 
 export function createWatchProcessManagerStub(overrides: Partial<{
-  startDetached: (options: { autoSwitch: boolean; debug: boolean }) => Promise<WatchProcessState>;
+  startDetached: (options: {
+    autoSwitch: boolean;
+    autoSwitchEtaHours: number | null;
+    debug: boolean;
+  }) => Promise<WatchProcessState>;
   getStatus: () => Promise<{ running: boolean; state: WatchProcessState | null }>;
   stop: () => Promise<{ running: boolean; state: WatchProcessState | null; stopped: boolean }>;
 }> = {}): WatchProcessManager {
@@ -254,6 +258,7 @@ export function createWatchProcessManagerStub(overrides: Partial<{
         started_at: "2026-04-08T13:58:00.000Z",
         log_path: "/tmp/watch.log",
         auto_switch: false,
+        auto_switch_eta_hours: null,
         debug: false,
       })),
     getStatus:

@@ -10,7 +10,7 @@ Use it when you regularly switch between multiple Codex accounts and want a simp
 - switch the active `~/.codex/auth.json`
 - check quota usage across saved accounts
 - export and import fully trusted share bundles without re-login
-- automatically switch and restart when the current account is exhausted
+- automatically switch and restart when the current account is exhausted or nearly exhausted
 
 ## Platform support
 
@@ -92,7 +92,7 @@ In another terminal:
 codexm run -- --model o3
 ```
 
-`codexm watch` monitors quota and can auto-switch accounts. `codexm run` wraps the `codex` CLI, survives repeated `~/.codex/auth.json` replacements, and auto-resumes the active interactive session after an account-triggered restart. If you end `codexm run` manually while a session is recoverable, it prints the resume command to use.
+`codexm watch` monitors quota and can auto-switch accounts. Add `--auto-switch-eta-hours <hours>` when you want it to switch before hard exhaustion. `codexm run` wraps the `codex` CLI, survives repeated `~/.codex/auth.json` replacements, and auto-resumes the active interactive session after an account-triggered restart. If you end `codexm run` manually while a session is recoverable, it prints the resume command to use.
 
 ## Example output
 
@@ -145,11 +145,11 @@ This is the main command to use when deciding which account to switch to next.
 
 - `codexm switch <name>`: switch to a saved account
 - `codexm switch --auto --dry-run`: preview the best auto-switch candidate
-- `codexm launch [name] [--auto] [--watch]`: launch Codex Desktop on macOS
+- `codexm launch [name] [--auto] [--watch] [--auto-switch-eta-hours <hours>]`: launch Codex Desktop on macOS
 
 ### Watch and auto-restart
 
-- `codexm watch`: watch quota changes and auto-switch on exhaustion
+- `codexm watch [--auto-switch-eta-hours <hours>]`: watch quota changes and auto-switch on exhaustion or low ETA
 - `codexm watch --detach`: run the watcher in the background
 - `codexm watch --status`: inspect detached watcher state
 - `codexm watch --stop`: stop the detached watcher
@@ -165,7 +165,7 @@ In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `f` / `
 
 - `codexm list` is the best overview when choosing the next account.
 - `codexm usage` is the best view for local token volume and estimated cost.
-- `codexm watch` is the automation loop that reacts to quota exhaustion.
+- `codexm watch` is the automation loop that reacts to quota exhaustion, and it can switch earlier with `--auto-switch-eta-hours <hours>`.
 - `codexm run` is useful in CLI workflows where the running `codex` process should follow account switches.
 - Use `--json` for scripting and `--debug` for diagnostics.
 

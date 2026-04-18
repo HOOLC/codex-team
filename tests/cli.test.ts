@@ -199,6 +199,7 @@ describe("CLI", () => {
               started_at: "2026-04-08T13:58:00.000Z",
               log_path: "/tmp/watch.log",
               auto_switch: true,
+              auto_switch_eta_hours: 0.5,
               debug: false,
             },
           }),
@@ -210,6 +211,7 @@ describe("CLI", () => {
       expect(output).toContain("Watch: running (pid 43210)");
       expect(output).toContain("Started at: 2026-04-08T13:58:00.000Z");
       expect(output).toContain("Auto-switch: enabled");
+      expect(output).toContain("Auto-switch ETA threshold: 0.5h");
       expect(output).toContain("Log: /tmp/watch.log");
     } finally {
       await cleanupTempHome(homeDir);
@@ -218,7 +220,9 @@ describe("CLI", () => {
 
   test("watch --detach starts a background auto-switch watcher by default", async () => {
     const homeDir = await createTempHome();
-    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let startedOptions:
+      | { autoSwitch: boolean; autoSwitchEtaHours: number | null; debug: boolean }
+      | null = null;
 
     try {
       const store = createAccountStore(homeDir);
@@ -240,6 +244,7 @@ describe("CLI", () => {
               started_at: "2026-04-08T13:58:00.000Z",
               log_path: "/tmp/watch.log",
               auto_switch: true,
+              auto_switch_eta_hours: null,
               debug: true,
             };
           },
@@ -249,6 +254,7 @@ describe("CLI", () => {
       expect(exitCode).toBe(0);
       expect(startedOptions).toEqual({
         autoSwitch: true,
+        autoSwitchEtaHours: null,
         debug: true,
       });
       expect(stdout.read()).toContain("Started background watch (pid 43210).");
@@ -261,7 +267,9 @@ describe("CLI", () => {
 
   test("watch --detach --no-auto-switch starts a background watcher without auto-switch", async () => {
     const homeDir = await createTempHome();
-    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let startedOptions:
+      | { autoSwitch: boolean; autoSwitchEtaHours: number | null; debug: boolean }
+      | null = null;
 
     try {
       const store = createAccountStore(homeDir);
@@ -281,6 +289,7 @@ describe("CLI", () => {
               started_at: "2026-04-08T13:58:00.000Z",
               log_path: "/tmp/watch.log",
               auto_switch: false,
+              auto_switch_eta_hours: null,
               debug: false,
             };
           },
@@ -290,6 +299,7 @@ describe("CLI", () => {
       expect(exitCode).toBe(0);
       expect(startedOptions).toEqual({
         autoSwitch: false,
+        autoSwitchEtaHours: null,
         debug: false,
       });
     } finally {
@@ -317,6 +327,7 @@ describe("CLI", () => {
               started_at: "2026-04-08T13:58:00.000Z",
               log_path: "/tmp/watch.log",
               auto_switch: true,
+              auto_switch_eta_hours: null,
               debug: false,
             },
           }),
@@ -402,6 +413,48 @@ describe("CLI", () => {
       );
       expect(readManagedCurrentQuotaCalls).toBe(1);
       expect(applyManagedSwitchCalls).toBe(0);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch --detach forwards the ETA threshold to the detached watcher", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions:
+      | { autoSwitch: boolean; autoSwitchEtaHours: number | null; debug: boolean }
+      | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+
+      const exitCode = await runCli(["watch", "--detach", "--auto-switch-eta-hours", "0.5"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              auto_switch_eta_hours: 0.5,
+              debug: false,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: true,
+        autoSwitchEtaHours: 0.5,
+        debug: false,
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -694,6 +747,162 @@ describe("CLI", () => {
       expect(stderr.read()).toContain(
         '[debug] watch: skipping auto switch for requestId=poll:startup because the event is informational only',
       );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch auto-switches when ETA drops below the configured threshold", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const headers = new Headers(init?.headers);
+          const accountId = headers.get("ChatGPT-Account-Id");
+          if (accountId === "acct-watch-eta-a") {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 90,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 500,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 90,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 6_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: false,
+                unlimited: false,
+                balance: "0",
+              },
+            });
+          }
+
+          if (accountId === "acct-watch-eta-b") {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 10,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 500,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 10,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 6_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "3",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-eta-a");
+      await runCli(["save", "watch-eta-a", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-eta-b");
+      await runCli(["save", "watch-eta-b", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-watch-eta-a");
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+
+      const exitCode = await runCli(["watch", "--debug", "--auto-switch-eta-hours", "1.5"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: null,
+            unlimited: false,
+            fetched_at: "2026-04-08T10:00:00.000Z",
+            five_hour: {
+              used_percent: 80,
+              window_seconds: 18_000,
+              reset_at: "2026-04-08T14:00:00.000Z",
+            },
+            one_week: {
+              used_percent: 80,
+              window_seconds: 604_800,
+              reset_at: "2026-04-14T10:00:00.000Z",
+            },
+          }),
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "rpc:req-eta",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "rpc_response",
+              bodySnippet:
+                '{"type":"mcp-response","message":{"id":"req-eta","result":{"rateLimits":{"primaryWindow":{"usedPercent":90},"secondaryWindow":{"usedPercent":90}}}}}',
+              shouldAutoSwitch: false,
+              quota: {
+                plan_type: "plus",
+                credits_balance: null,
+                unlimited: false,
+                fetched_at: "2026-04-08T11:00:00.000Z",
+                five_hour: {
+                  used_percent: 90,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-08T14:00:00.000Z",
+                },
+                one_week: {
+                  used_percent: 90,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-14T10:00:00.000Z",
+                },
+              },
+            });
+          },
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] auto-switch from="watch-eta-a" to="watch-eta-b"/,
+      );
+      expect(stderr.read()).toContain(
+        "threshold_hours=1.5 trigger=true",
+      );
+      expect(applyManagedSwitchCalls).toEqual([{ force: false, timeoutMs: 900_000 }]);
     } finally {
       await cleanupTempHome(homeDir);
     }

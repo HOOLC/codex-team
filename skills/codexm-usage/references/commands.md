@@ -18,7 +18,7 @@
 - Preview the `switch --auto` decision without changing auth: `codexm switch --auto --dry-run`
 - Start Codex Desktop with the current auth, switch first, or auto-pick the best account: `codexm launch [name]`, `codexm launch --auto`
 - Launch Desktop and ensure a detached watcher is running: `codexm launch --watch`, `codexm launch --auto --watch`
-- Watch managed Desktop MCP/quota signals and auto-switch on terminal quota exhaustion: `codexm watch`
+- Watch managed Desktop MCP/quota signals and auto-switch on terminal quota exhaustion or a low ETA threshold: `codexm watch`, `codexm watch --auto-switch-eta-hours 0.5`
 - Watch without automatic switching: `codexm watch --no-auto-switch`
 - Run the watcher in the background: `codexm watch --detach`, `codexm watch --detach --no-auto-switch`
 - Inspect or stop the background watcher: `codexm watch --status`, `codexm watch --stop`
@@ -40,8 +40,8 @@
 - Use `codexm add <name> --device-auth` on remote/headless machines where browser callback login is inconvenient.
 - Use `codexm save <name>` right after the user has already logged into the desired account with native Codex auth or Codex Desktop.
 - Use `codexm update` when the current local auth already matches a managed account and the user wants to refresh the saved snapshot.
-- Use `codexm launch [name]` when the user wants Codex Desktop to start with a specific account immediately, and add `--watch` when they also want background quota supervision.
-- Use `codexm watch` when the user wants ongoing monitoring with automatic switching; use `codexm watch --no-auto-switch` for observation only.
+- Use `codexm launch [name]` when the user wants Codex Desktop to start with a specific account immediately, and add `--watch` when they also want background quota supervision. Add `--auto-switch-eta-hours <hours>` when they want the background watcher to switch before hard exhaustion.
+- Use `codexm watch` when the user wants ongoing monitoring with automatic switching; add `--auto-switch-eta-hours <hours>` when they want early switching based on ETA, and use `codexm watch --no-auto-switch` for observation only.
 - Use `codexm export`, `codexm inspect`, and `codexm import` when the user wants to move a login to another fully trusted machine without re-login; explicitly call out that share bundles are plain auth snapshots.
 - Use `codexm run` when the user wants the CLI process to survive account-triggered auth replacements and resume the active session after automatic restart.
 - Use `codexm completion <zsh|bash>` when the user wants shell completion setup; saved account names are completed dynamically.
