@@ -24,11 +24,13 @@ describe("Watch Lease Manager", () => {
 
       const firstClaim = await manager.claimForeground({
         autoSwitch: true,
+        autoSwitchEtaHours: null,
         debug: false,
         pid: holder.pid,
       });
       const secondClaim = await manager.claimForeground({
         autoSwitch: true,
+        autoSwitchEtaHours: null,
         debug: false,
         pid: process.pid,
       });
@@ -66,6 +68,7 @@ describe("Watch Lease Manager", () => {
         pid: 999_999,
         started_at: "2026-04-17T00:00:00.000Z",
         auto_switch: true,
+        auto_switch_eta_hours: null,
         debug: false,
       });
 

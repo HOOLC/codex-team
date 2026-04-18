@@ -10,12 +10,14 @@ export interface WatchProcessState {
   started_at: string;
   log_path: string;
   auto_switch: boolean;
+  auto_switch_eta_hours: number | null;
   debug: boolean;
 }
 
 export interface WatchProcessManager {
   startDetached(options: {
     autoSwitch: boolean;
+    autoSwitchEtaHours: number | null;
     debug: boolean;
   }): Promise<WatchProcessState>;
   getStatus(): Promise<{
@@ -58,6 +60,11 @@ function parseWatchProcessState(raw: string): WatchProcessState | null {
     typeof parsed.log_path !== "string" ||
     parsed.log_path.trim() === "" ||
     typeof parsed.auto_switch !== "boolean" ||
+    (parsed.auto_switch_eta_hours !== null &&
+      parsed.auto_switch_eta_hours !== undefined &&
+      (typeof parsed.auto_switch_eta_hours !== "number" ||
+        !Number.isFinite(parsed.auto_switch_eta_hours) ||
+        parsed.auto_switch_eta_hours <= 0)) ||
     typeof parsed.debug !== "boolean"
   ) {
     return null;
@@ -68,6 +75,10 @@ function parseWatchProcessState(raw: string): WatchProcessState | null {
     started_at: parsed.started_at,
     log_path: parsed.log_path,
     auto_switch: parsed.auto_switch,
+    auto_switch_eta_hours:
+      typeof parsed.auto_switch_eta_hours === "number"
+        ? parsed.auto_switch_eta_hours
+        : null,
     debug: parsed.debug,
   };
 }
@@ -152,6 +163,7 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
 
   async function startDetached(options: {
     autoSwitch: boolean;
+    autoSwitchEtaHours: number | null;
     debug: boolean;
   }): Promise<WatchProcessState> {
     const status = await getStatus();
@@ -172,6 +184,9 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
         cliEntryPath,
         "watch",
         ...(options.autoSwitch ? [] : ["--no-auto-switch"]),
+        ...(options.autoSwitchEtaHours !== null
+          ? ["--auto-switch-eta-hours", String(options.autoSwitchEtaHours)]
+          : []),
         ...(options.debug ? ["--debug"] : []),
       ];
 
@@ -189,6 +204,7 @@ export function createWatchProcessManager(codexTeamDir: string): WatchProcessMan
         started_at: new Date().toISOString(),
         log_path: logPath,
         auto_switch: options.autoSwitch,
+        auto_switch_eta_hours: options.autoSwitchEtaHours,
         debug: options.debug,
       };
 

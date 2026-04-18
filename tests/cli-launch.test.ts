@@ -613,7 +613,9 @@ describe("CLI Launch", () => {
 
   test("launch --watch starts a detached background watch with auto-switch enabled", async () => {
     const homeDir = await createTempHome();
-    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let startedOptions:
+      | { autoSwitch: boolean; autoSwitchEtaHours: number | null; debug: boolean }
+      | null = null;
     let listCalls = 0;
 
     try {
@@ -644,6 +646,7 @@ describe("CLI Launch", () => {
               started_at: "2026-04-08T13:58:00.000Z",
               log_path: "/tmp/watch.log",
               auto_switch: true,
+              auto_switch_eta_hours: null,
               debug: false,
             };
           },
@@ -653,10 +656,63 @@ describe("CLI Launch", () => {
       expect(exitCode).toBe(0);
       expect(startedOptions).toEqual({
         autoSwitch: true,
+        autoSwitchEtaHours: null,
         debug: false,
       });
       expect(stdout.read()).toContain("Started background watch (pid 43210).");
       expect(stdout.read()).toContain("Launched Codex Desktop with current auth.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launch --watch forwards the ETA threshold to the detached watcher", async () => {
+    const homeDir = await createTempHome();
+    let startedOptions:
+      | { autoSwitch: boolean; autoSwitchEtaHours: number | null; debug: boolean }
+      | null = null;
+    let listCalls = 0;
+
+    try {
+      const store = createAccountStore(homeDir);
+
+      const exitCode = await runCli(["launch", "--watch", "--auto-switch-eta-hours", "0.75"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          listRunningApps: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? []
+              : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+          startDetached: async (options) => {
+            startedOptions = options;
+            return {
+              pid: 43210,
+              started_at: "2026-04-08T13:58:00.000Z",
+              log_path: "/tmp/watch.log",
+              auto_switch: true,
+              auto_switch_eta_hours: 0.75,
+              debug: false,
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(startedOptions).toEqual({
+        autoSwitch: true,
+        autoSwitchEtaHours: 0.75,
+        debug: false,
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

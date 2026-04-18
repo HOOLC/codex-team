@@ -31,6 +31,19 @@ interface CliStreams {
   stderr: NodeJS.WriteStream;
 }
 
+function parseAutoSwitchEtaHours(rawValue: string | undefined): number | null {
+  if (rawValue === undefined) {
+    return null;
+  }
+
+  const numeric = Number(rawValue);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    throw new Error("--auto-switch-eta-hours must be a positive number.");
+  }
+
+  return numeric;
+}
+
 export async function handleLaunchCommand(options: {
   parsed: ParsedArgs;
   json: boolean;
@@ -56,11 +69,16 @@ export async function handleLaunchCommand(options: {
   const auto = parsed.flags.has("--auto");
   const watch = parsed.flags.has("--watch");
   const noAutoSwitch = parsed.flags.has("--no-auto-switch");
+  const autoSwitchEtaHours = parseAutoSwitchEtaHours(
+    parsed.optionValues.get("--auto-switch-eta-hours"),
+  );
 
   if (
     parsed.positionals.length > 1 ||
     (auto && name) ||
-    (noAutoSwitch && !watch)
+    (noAutoSwitch && !watch) ||
+    (autoSwitchEtaHours !== null && !watch) ||
+    (noAutoSwitch && autoSwitchEtaHours !== null)
   ) {
     throw new Error(`Usage: ${getUsage("launch")}`);
   }
@@ -206,6 +224,7 @@ export async function handleLaunchCommand(options: {
   if (watch) {
     detachedWatchResult = await ensureDetachedWatch(watchProcessManager, {
       autoSwitch: watchAutoSwitch,
+      autoSwitchEtaHours,
       debug,
     });
   }
@@ -235,6 +254,7 @@ export async function handleLaunchCommand(options: {
               started_at: detachedWatchResult.state.started_at,
               log_path: detachedWatchResult.state.log_path,
               auto_switch: detachedWatchResult.state.auto_switch,
+              auto_switch_eta_hours: detachedWatchResult.state.auto_switch_eta_hours,
             },
       warnings,
     });
@@ -309,9 +329,17 @@ export async function handleWatchCommand(options: {
   const detach = parsed.flags.has("--detach");
   const status = parsed.flags.has("--status");
   const stop = parsed.flags.has("--stop");
+  const autoSwitchEtaHours = parseAutoSwitchEtaHours(
+    parsed.optionValues.get("--auto-switch-eta-hours"),
+  );
   const modeCount = [detach, status, stop].filter(Boolean).length;
 
-  if (modeCount > 1 || ((status || stop) && parsed.flags.has("--no-auto-switch"))) {
+  if (
+    modeCount > 1 ||
+    ((status || stop) &&
+      (parsed.flags.has("--no-auto-switch") || autoSwitchEtaHours !== null)) ||
+    (!autoSwitch && autoSwitchEtaHours !== null)
+  ) {
     throw new Error(`Usage: ${getUsage("watch")}`);
   }
 
@@ -325,6 +353,11 @@ export async function handleWatchCommand(options: {
       streams.stdout.write(
         `Auto-switch: ${watchStatus.state.auto_switch ? "enabled" : "disabled"}\n`,
       );
+      if (watchStatus.state.auto_switch_eta_hours !== null) {
+        streams.stdout.write(
+          `Auto-switch ETA threshold: ${watchStatus.state.auto_switch_eta_hours}h\n`,
+        );
+      }
       streams.stdout.write(`Log: ${watchStatus.state.log_path}\n`);
     }
     return 0;
@@ -354,6 +387,7 @@ export async function handleWatchCommand(options: {
       streams,
       interruptSignal,
       autoSwitch,
+      autoSwitchEtaHours,
       debug,
       debugLog,
       watchQuotaMinReadIntervalMs,
@@ -365,6 +399,7 @@ export async function handleWatchCommand(options: {
   if (detach) {
     const detachedState = await watchProcessManager.startDetached({
       autoSwitch,
+      autoSwitchEtaHours,
       debug,
     });
     streams.stdout.write(`Started background watch (pid ${detachedState.pid}).\n`);
@@ -378,6 +413,7 @@ export async function handleWatchCommand(options: {
     streams,
     interruptSignal,
     autoSwitch,
+    autoSwitchEtaHours,
     debug,
     debugLog,
     managedDesktopWaitStatusDelayMs,

@@ -320,6 +320,7 @@ export async function startTuiExternalUpdateMonitors(options: {
 
     const lease = await watchLeaseManager.claimForeground({
       autoSwitch: true,
+      autoSwitchEtaHours: null,
       debug: false,
       pid: process.pid,
     }).catch((error) => {
@@ -347,6 +348,7 @@ export async function startTuiExternalUpdateMonitors(options: {
       },
       interruptSignal: foregroundWatchAbortController.signal,
       autoSwitch: true,
+      autoSwitchEtaHours: null,
       debug: false,
       debugLog: debugLog ?? (() => undefined),
       managedDesktopWaitStatusDelayMs,
@@ -452,6 +454,7 @@ export async function startTuiExternalUpdateMonitors(options: {
         if (!activeLease.active) {
           await watchProcessManager.startDetached({
             autoSwitch: true,
+            autoSwitchEtaHours: null,
             debug: false,
           }).catch((error) => {
             debugLog?.(`tui: failed to hand off to detached watch: ${(error as Error).message}`);

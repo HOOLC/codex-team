@@ -11,6 +11,7 @@ import {
 } from "../cli/quota.js";
 import {
   appendWatchQuotaHistory,
+  computeWatchEtaContext,
   createWatchHistoryStore,
 } from "./history.js";
 import {
@@ -121,12 +122,42 @@ async function persistWatchHistorySample(options: {
   }
 }
 
+async function shouldAutoSwitchForEtaThreshold(options: {
+  historyStore: ReturnType<typeof createWatchHistoryStore>;
+  quota: ReturnType<typeof toCliQuotaSummaryFromRuntimeQuota> | null;
+  thresholdHours: number | null;
+  debugLog: (message: string) => void;
+}): Promise<boolean> {
+  if (
+    options.thresholdHours === null ||
+    options.quota === null ||
+    options.quota.refresh_status !== "ok"
+  ) {
+    return false;
+  }
+
+  const eta = await computeWatchEtaContext(options.historyStore, options.quota);
+  if (eta.status !== "ok" || typeof eta.etaHours !== "number") {
+    options.debugLog(
+      `watch: ETA threshold inactive status=${eta.status} threshold_hours=${options.thresholdHours}`,
+    );
+    return false;
+  }
+
+  const shouldSwitch = eta.etaHours <= options.thresholdHours;
+  options.debugLog(
+    `watch: ETA evaluation eta_hours=${eta.etaHours} threshold_hours=${options.thresholdHours} trigger=${shouldSwitch}`,
+  );
+  return shouldSwitch;
+}
+
 export async function runCliWatchSession(options: {
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
   streams: CliStreams;
   interruptSignal?: AbortSignal;
   autoSwitch: boolean;
+  autoSwitchEtaHours: number | null;
   debug: boolean;
   debugLog: (message: string) => void;
   watchQuotaMinReadIntervalMs: number;
@@ -139,6 +170,7 @@ export async function runCliWatchSession(options: {
     streams,
     interruptSignal,
     autoSwitch,
+    autoSwitchEtaHours,
     debug,
     debugLog,
     watchQuotaMinReadIntervalMs,
@@ -186,7 +218,14 @@ export async function runCliWatchSession(options: {
       cliLastQuotaUpdateLine = quotaUpdateLine;
     }
 
-    if (!autoSwitch || !quotaSignal.shouldAutoSwitch) {
+    const etaTriggered = await shouldAutoSwitchForEtaThreshold({
+      historyStore: watchHistoryStore,
+      quota: quotaSignal.quota,
+      thresholdHours: autoSwitchEtaHours,
+      debugLog,
+    });
+
+    if (!autoSwitch || (!quotaSignal.shouldAutoSwitch && !etaTriggered)) {
       return;
     }
 
@@ -327,6 +366,7 @@ export async function runManagedDesktopWatchSession(options: {
   streams: CliStreams;
   interruptSignal?: AbortSignal;
   autoSwitch: boolean;
+  autoSwitchEtaHours: number | null;
   debug: boolean;
   debugLog: (message: string) => void;
   managedDesktopWaitStatusDelayMs: number;
@@ -354,6 +394,7 @@ export async function runManagedDesktopWatchSession(options: {
     streams,
     interruptSignal,
     autoSwitch,
+    autoSwitchEtaHours,
     debug,
     debugLog,
     managedDesktopWaitStatusDelayMs,
@@ -401,7 +442,14 @@ export async function runManagedDesktopWatchSession(options: {
       return;
     }
 
-    if (!quotaSignal.shouldAutoSwitch) {
+    const etaTriggered = await shouldAutoSwitchForEtaThreshold({
+      historyStore: watchHistoryStore,
+      quota,
+      thresholdHours: autoSwitchEtaHours,
+      debugLog,
+    });
+
+    if (!quotaSignal.shouldAutoSwitch && !etaTriggered) {
       debugLog(
         `watch: skipping auto switch for requestId=${quotaSignal.requestId} because the event is informational only`,
       );

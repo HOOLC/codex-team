@@ -9,6 +9,7 @@
     { "flag": "--accounts", "description": "print saved account names for shell completion", "global": false },
     { "flag": "--account", "description": "run codex with a saved account snapshot in an isolated runtime", "global": false, "takesValue": true },
     { "flag": "--auto", "description": "switch to the best available account", "global": false, "aliases": ["-a"] },
+    { "flag": "--auto-switch-eta-hours", "description": "preemptively auto-switch when ETA drops below the given hours", "global": false, "takesValue": true },
     { "flag": "--detach", "description": "run watch in the background", "global": false },
     { "flag": "--device-auth", "description": "add account with device-code login", "global": false },
     { "flag": "--dry-run", "description": "show the selected account without switching", "global": false, "aliases": ["-n"] },
@@ -105,18 +106,18 @@
     },
     {
       "name": "launch",
-      "flags": ["--auto", "--watch", "--no-auto-switch", "--json"],
-      "helpUsages": ["codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]"],
+      "flags": ["--auto", "--watch", "--no-auto-switch", "--auto-switch-eta-hours", "--json"],
+      "helpUsages": ["codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--auto-switch-eta-hours <hours>] [--json]"],
       "usageErrors": {
-        "default": "codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]"
+        "default": "codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--auto-switch-eta-hours <hours>] [--json]"
       }
     },
     {
       "name": "watch",
-      "flags": ["--no-auto-switch", "--detach", "--status", "--stop"],
-      "helpUsages": ["codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"],
+      "flags": ["--no-auto-switch", "--auto-switch-eta-hours", "--detach", "--status", "--stop"],
+      "helpUsages": ["codexm watch [--no-auto-switch] [--auto-switch-eta-hours <hours>] [--detach] [--status] [--stop]"],
       "usageErrors": {
-        "default": "codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"
+        "default": "codexm watch [--no-auto-switch] [--auto-switch-eta-hours <hours>] [--detach] [--status] [--stop]"
       }
     },
     {
@@ -393,7 +394,7 @@
             }
           },
           {
-            "usage": "codexm launch [name] [--auto] [--watch]",
+            "usage": "codexm launch [name] [--auto] [--watch] [--auto-switch-eta-hours <hours>]",
             "description": {
               "en": "launch Codex Desktop on macOS",
               "zh-CN": "在 macOS 上启动 Codex Desktop"
@@ -409,10 +410,10 @@
         },
         "entries": [
           {
-            "usage": "codexm watch",
+            "usage": "codexm watch [--auto-switch-eta-hours <hours>]",
             "description": {
-              "en": "watch quota changes and auto-switch on exhaustion",
-              "zh-CN": "监听 quota 变化，并在耗尽时自动切号"
+              "en": "watch quota changes and auto-switch on exhaustion or low ETA",
+              "zh-CN": "监听 quota 变化，并在耗尽或 ETA 很低时自动切号"
             }
           },
           {

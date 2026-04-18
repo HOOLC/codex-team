@@ -10,7 +10,7 @@
 - 切换当前生效的 `~/.codex/auth.json`
 - 查看多个账号的 quota 使用情况
 - 导出和导入完全信任前提下的分享 bundle，而不需要重新登录
-- 在当前账号耗尽时自动切号并重启运行中的 Codex
+- 在当前账号耗尽或即将耗尽时自动切号并重启运行中的 Codex
 
 ## 平台支持
 
@@ -92,7 +92,7 @@ codexm watch
 codexm run -- --model o3
 ```
 
-`codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
+`codexm watch` 会持续监控 quota，并在耗尽时自动切号；如果你希望在真正打满前就切，可以加 `--auto-switch-eta-hours <hours>`。`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
 
 ## 输出示例
 
@@ -145,11 +145,11 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 - `codexm switch <name>`: 切换到指定保存账号
 - `codexm switch --auto --dry-run`: 预览自动切号会选中的账号
-- `codexm launch [name] [--auto] [--watch]`: 在 macOS 上启动 Codex Desktop
+- `codexm launch [name] [--auto] [--watch] [--auto-switch-eta-hours <hours>]`: 在 macOS 上启动 Codex Desktop
 
 ### Watch 与自动重启
 
-- `codexm watch`: 监听 quota 变化，并在耗尽时自动切号
+- `codexm watch [--auto-switch-eta-hours <hours>]`: 监听 quota 变化，并在耗尽或 ETA 很低时自动切号
 - `codexm watch --detach`: 后台运行 watcher
 - `codexm watch --status`: 查看后台 watcher 状态
 - `codexm watch --stop`: 停止后台 watcher
@@ -165,7 +165,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 - 如果你想判断“接下来该用哪个账号”，优先看 `codexm list`
 - 如果你想看本地 token 量和 estimated cost，优先看 `codexm usage`
-- 如果你想自动切号，使用 `codexm watch`
+- 如果你想自动切号，使用 `codexm watch`；如果想在快耗尽时提前切，加 `--auto-switch-eta-hours <hours>`
 - 如果你在 CLI 场景里希望运行中的 `codex` 跟随切号自动重启，使用 `codexm run`
 - 脚本场景使用 `--json`，排查问题使用 `--debug`
 

@@ -8,6 +8,7 @@ export interface WatchLeaseState {
   pid: number;
   started_at: string;
   auto_switch: boolean;
+  auto_switch_eta_hours: number | null;
   debug: boolean;
 }
 
@@ -18,6 +19,7 @@ export interface WatchLeaseManager {
   }>;
   claimForeground(options: {
     autoSwitch: boolean;
+    autoSwitchEtaHours: number | null;
     debug: boolean;
     pid?: number;
   }): Promise<{
@@ -28,6 +30,7 @@ export interface WatchLeaseManager {
     pid: number;
     started_at: string;
     auto_switch: boolean;
+    auto_switch_eta_hours: number | null;
     debug: boolean;
   }): Promise<void>;
   release(options: {
@@ -64,6 +67,11 @@ function parseWatchLeaseState(raw: string): WatchLeaseState | null {
     || typeof parsed.started_at !== "string"
     || parsed.started_at.trim() === ""
     || typeof parsed.auto_switch !== "boolean"
+    || (parsed.auto_switch_eta_hours !== null
+      && parsed.auto_switch_eta_hours !== undefined
+      && (typeof parsed.auto_switch_eta_hours !== "number"
+        || !Number.isFinite(parsed.auto_switch_eta_hours)
+        || parsed.auto_switch_eta_hours <= 0))
     || typeof parsed.debug !== "boolean"
   ) {
     return null;
@@ -74,6 +82,10 @@ function parseWatchLeaseState(raw: string): WatchLeaseState | null {
     pid: parsed.pid,
     started_at: parsed.started_at,
     auto_switch: parsed.auto_switch,
+    auto_switch_eta_hours:
+      typeof parsed.auto_switch_eta_hours === "number"
+        ? parsed.auto_switch_eta_hours
+        : null,
     debug: parsed.debug,
   };
 }
@@ -163,6 +175,7 @@ export function createWatchLeaseManager(codexTeamDir: string): WatchLeaseManager
 
   async function claimForeground(options: {
     autoSwitch: boolean;
+    autoSwitchEtaHours: number | null;
     debug: boolean;
     pid?: number;
   }): Promise<{ acquired: boolean; state: WatchLeaseState | null }> {
@@ -187,6 +200,7 @@ export function createWatchLeaseManager(codexTeamDir: string): WatchLeaseManager
       pid,
       started_at: new Date().toISOString(),
       auto_switch: options.autoSwitch,
+      auto_switch_eta_hours: options.autoSwitchEtaHours,
       debug: options.debug,
     };
     if (await tryCreateState(state)) {
@@ -219,6 +233,7 @@ export function createWatchLeaseManager(codexTeamDir: string): WatchLeaseManager
     pid: number;
     started_at: string;
     auto_switch: boolean;
+    auto_switch_eta_hours: number | null;
     debug: boolean;
   }): Promise<void> {
     await writeState({
@@ -226,6 +241,7 @@ export function createWatchLeaseManager(codexTeamDir: string): WatchLeaseManager
       pid: state.pid,
       started_at: state.started_at,
       auto_switch: state.auto_switch,
+      auto_switch_eta_hours: state.auto_switch_eta_hours,
       debug: state.debug,
     });
   }
