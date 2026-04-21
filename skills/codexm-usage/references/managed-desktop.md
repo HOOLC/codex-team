@@ -22,7 +22,7 @@
 
 ## proxy account
 
-- `codexm proxy enable` writes a synthetic ChatGPT auth, `chatgpt_base_url`, and a proxy-backed `model_provider` into the default `CODEX_HOME`; managed Desktop launched afterward sees the proxy as the current account. For `codexm`-managed Desktop and CLI entrypoints, live Responses websocket turns and REST traffic both go through the local proxy. Bare Desktop or CLI launches outside `codexm` are not forced into that path.
+- `codexm proxy enable` writes a synthetic ChatGPT auth plus proxy-backed `chatgpt_base_url` and `openai_base_url` into the default `CODEX_HOME`, while keeping the live provider identity unchanged so proxy and non-proxy sessions keep shared history. Managed Desktop or CLI entrypoints launched through `codexm` route both live Responses websocket turns and REST traffic through the local proxy. Bare Desktop or CLI launches outside `codexm` are not forced into that path.
 - `CODEXM_PROXY_PORT=<port>` changes the shared daemon/proxy bind port for `launch`, `daemon start`, `autoswitch enable`, `proxy enable`, and `run --proxy`; use `--port` on `proxy enable` when only that invocation should differ.
 - `codexm proxy disable` restores the previous direct auth/config backup and stops the proxy daemon.
 - For one-off CLI runs that must not affect local Desktop or thread/session data, prefer `codexm run --proxy` because it creates an isolated `CODEX_HOME`.
@@ -31,7 +31,7 @@
 
 - `codexm autoswitch enable` turns on daemon-backed background auto-switching for managed Desktop and proxy flows.
 - `codexm autoswitch disable` turns that feature off while leaving the baseline daemon running.
-- `codexm daemon status` shows the shared daemon pid, enabled features, and log path; `codexm daemon stop` stops the daemon and restores direct auth if proxy mode was active.
+- `codexm daemon status` shows the shared daemon pid, enabled features, and log path; `codexm daemon stop` stops the daemon but preserves the last daemon feature state for the next start or restart.
 - `codexm watch` observes managed Desktop MCP/quota signals and runs `switch --auto` after terminal quota-exhaustion signals by default.
 - `codexm watch --no-auto-switch` keeps the same quota and reconnect output without changing accounts automatically.
 - `codexm watch` is foreground-only; it prints structured quota and reconnect lines, and `--debug` adds raw bridge `mcp-*` traffic plus watch decision logs on stderr.

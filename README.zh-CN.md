@@ -177,7 +177,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm autoswitch enable`: 启用 daemon 驱动的自动切号
 - `codexm autoswitch disable`: 关闭自动切号，并保留基础 daemon 常驻
 - `codexm daemon start`: 启动共享后台 daemon，但不额外启用附加能力
-- `codexm daemon stop`: 停止共享后台 daemon；若 proxy 模式生效则恢复 direct auth
+- `codexm daemon stop`: 停止共享后台 daemon，并保留最近一次 daemon 功能开关状态
 - `codexm run [--account <name>] [-- ...codexArgs]`: 以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行
 - `codexm run --proxy [-- ...codexArgs]`: 用隔离 CODEX_HOME 通过本地 proxy 运行 codex
 - `codexm proxy enable`: 启用由本地 proxy 提供的全局 synthetic ChatGPT auth
@@ -187,7 +187,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`a` 用来切换 daemon 驱动的 autoswitch，`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；退出时则停止这条前台 watch。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`a` 用来切换 daemon 驱动的 autoswitch，`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。列表里的 `Next reset` 现在会同时显示绝对时间和简短的相对倒计时，详情区会固定展示 `5H reset` 和 `1W reset`。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；这条前台 watch 会跟随当前 autoswitch 开关，并在退出时停止。
 
 ## 什么时候该用哪个命令？
 

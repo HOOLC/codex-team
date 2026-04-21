@@ -2,6 +2,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { basename, dirname } from "node:path";
 
 import { type AccountStore } from "../account-store/index.js";
+import type { DaemonProcessManager } from "../daemon/process.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
 import {
   prepareIsolatedCodexRun,
@@ -116,6 +117,7 @@ function describeForegroundAutoSwitchMessage(
 export async function startTuiExternalUpdateMonitors(options: {
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
+  daemonProcessManager: DaemonProcessManager;
   watchProcessManager: WatchProcessManager;
   watchLeaseManager?: WatchLeaseManager;
   updateFeed: AccountDashboardExternalUpdateFeed;
@@ -130,6 +132,7 @@ export async function startTuiExternalUpdateMonitors(options: {
   const {
     store,
     desktopLauncher,
+    daemonProcessManager,
     watchProcessManager,
     updateFeed,
     currentManagedAccountRef,
@@ -264,6 +267,12 @@ export async function startTuiExternalUpdateMonitors(options: {
       };
     });
 
+  const getForegroundAutoSwitchEnabled = async () =>
+    await daemonProcessManager.getStatus().then((status) => status.state?.auto_switch === true).catch((error) => {
+      debugLog?.(`tui: failed to inspect daemon autoswitch status: ${(error as Error).message}`);
+      return false;
+    });
+
   const releaseForegroundWatchLease = async () => {
     if (!ownsForegroundWatchLease) {
       return;
@@ -289,7 +298,7 @@ export async function startTuiExternalUpdateMonitors(options: {
     await releaseForegroundWatchLease();
   };
 
-  const startForegroundWatch = async () => {
+  const startForegroundWatch = async (autoSwitchEnabled: boolean) => {
     if (foregroundWatchPromise) {
       return;
     }
@@ -318,7 +327,7 @@ export async function startTuiExternalUpdateMonitors(options: {
     }
 
     const lease = await watchLeaseManager.claimForeground({
-      autoSwitch: true,
+      autoSwitch: autoSwitchEnabled,
       debug: false,
       pid: process.pid,
     }).catch((error) => {
@@ -344,7 +353,7 @@ export async function startTuiExternalUpdateMonitors(options: {
         stderr: silentStream,
       },
       interruptSignal: foregroundWatchAbortController.signal,
-      autoSwitch: true,
+      autoSwitch: autoSwitchEnabled,
       debug: false,
       debugLog: debugLog ?? (() => undefined),
       managedDesktopWaitStatusDelayMs,
@@ -398,6 +407,8 @@ export async function startTuiExternalUpdateMonitors(options: {
       return;
     }
 
+    const autoSwitchEnabled = await getForegroundAutoSwitchEnabled();
+
     if (foregroundWatchPromise) {
       const detachedWatchStatus = await getDetachedWatchStatus();
       if (detachedWatchStatus.running) {
@@ -415,11 +426,22 @@ export async function startTuiExternalUpdateMonitors(options: {
         )
       ) {
         await stopForegroundWatch();
+        return;
+      }
+
+      if (
+        activeLease.active
+        && activeLease.state
+        && activeLease.state.owner_kind === "tui-foreground"
+        && activeLease.state.pid === process.pid
+        && activeLease.state.auto_switch !== autoSwitchEnabled
+      ) {
+        await stopForegroundWatch();
       }
       return;
     }
 
-    await startForegroundWatch();
+    await startForegroundWatch(autoSwitchEnabled);
   };
 
   await reconcileForegroundWatch();

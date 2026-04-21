@@ -25,6 +25,7 @@ import {
 } from "./test-helpers.js";
 import {
   captureWritable,
+  createDaemonProcessManagerStub,
   createDesktopLauncherStub,
   createInteractiveStdin,
   createInteractiveStdout,
@@ -146,7 +147,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         score: 88,
         scoreLabel: "88%",
         etaLabel: "8.2h",
-        nextResetLabel: "04-16 19:30",
+        nextResetLabel: "04-16 19:30 (6h)",
         fiveHourLabel: "18%",
         oneWeekLabel: "42%",
         authModeLabel: "chatgpt",
@@ -178,7 +179,8 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
           "ETA: 8.2h",
           "5H used: 18%",
           "1W used: 42%",
-          "Next reset: 04-16 19:30",
+          "5H reset: 04-16 19:30",
+          "1W reset: 04-19 11:00",
         ],
       },
       {
@@ -191,7 +193,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         score: 64,
         scoreLabel: "64%",
         etaLabel: "3.5h",
-        nextResetLabel: "04-16 18:10",
+        nextResetLabel: "04-16 18:10 (4.7h)",
         fiveHourLabel: "36%",
         oneWeekLabel: "27%",
         authModeLabel: "chatgpt",
@@ -223,7 +225,8 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
           "ETA: 3.5h",
           "5H used: 36%",
           "1W used: 27%",
-          "Next reset: 04-16 18:10",
+          "5H reset: 04-16 18:10",
+          "1W reset: 04-19 11:00",
         ],
       },
       {
@@ -236,7 +239,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         score: 0,
         scoreLabel: "0%",
         etaLabel: "-",
-        nextResetLabel: "04-17 09:00",
+        nextResetLabel: "04-17 09:00 (19.5h)",
         fiveHourLabel: "100%",
         oneWeekLabel: "100%",
         authModeLabel: "chatgpt",
@@ -268,7 +271,8 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
           "ETA: -",
           "5H used: 100%",
           "1W used: 100%",
-          "Next reset: 04-17 09:00",
+          "5H reset: 04-17 09:00",
+          "1W reset: 04-17 09:00",
         ],
       },
     ],
@@ -399,7 +403,7 @@ describe("Account Dashboard TUI", () => {
         score: 73.4,
         scoreLabel: "73.4%",
         etaLabel: "1.2h",
-        nextResetLabel: "04-16 18:10",
+        nextResetLabel: "04-16 18:10 (4.7h)",
         fiveHourLabel: "64.6%",
         oneWeekLabel: "100.0%",
         authModeLabel: "proxy",
@@ -427,7 +431,8 @@ describe("Account Dashboard TUI", () => {
         "ETA: 1.2h",
         "5H used: 64.6%",
         "1W used: 100.0%",
-        "Next reset: 04-16 18:10",
+        "5H reset: 04-16 18:10",
+        "1W reset: 04-19 11:00",
       ],
     });
 
@@ -474,7 +479,8 @@ describe("Account Dashboard TUI", () => {
         "ETA: 8.2h",
         "5H used: 18%",
         "1W used: 42%",
-        "Next reset: 04-16 19:30",
+        "5H reset: 04-16 19:30",
+        "1W reset: 04-19 11:00",
       ],
     };
 
@@ -918,7 +924,7 @@ describe("Account Dashboard TUI", () => {
         score: 92,
         scoreLabel: "92%",
         etaLabel: "9.1h",
-        nextResetLabel: "04-16 19:30",
+        nextResetLabel: "04-16 19:30 (6h)",
         fiveHourLabel: "8%",
         oneWeekLabel: "12%",
         authModeLabel: "proxy",
@@ -989,7 +995,7 @@ describe("Account Dashboard TUI", () => {
         score: 92,
         scoreLabel: "92%",
         etaLabel: "9.1h",
-        nextResetLabel: "04-16 19:30",
+        nextResetLabel: "04-16 19:30 (6h)",
         fiveHourLabel: "8%",
         oneWeekLabel: "12%",
         authModeLabel: "proxy",
@@ -2240,6 +2246,129 @@ describe("Account Dashboard TUI", () => {
     }
   });
 
+  test("starts the foreground watch with autoswitch disabled when daemon autoswitch is off", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    const claimedAutoSwitchModes: boolean[] = [];
+    let foregroundWatchStarts = 0;
+    let settled = false;
+    let tuiPromise: Promise<number> | null = null;
+    let resolveForegroundWatchStarted: (() => void) | null = null;
+    const foregroundWatchStarted = new Promise<void>((resolve) => {
+      resolveForegroundWatchStarted = resolve;
+    });
+
+    try {
+      const store = createAccountStore(homeDir);
+      tuiPromise = handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          readManagedCurrentQuota: async () => null,
+          watchManagedQuotaSignals: async (options) => {
+            foregroundWatchStarts += 1;
+            resolveForegroundWatchStarted?.();
+            await new Promise<void>((resolve) => {
+              if (options?.signal?.aborted) {
+                resolve();
+                return;
+              }
+
+              options?.signal?.addEventListener("abort", () => {
+                resolve();
+              }, { once: true });
+            });
+          },
+        }),
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: true,
+            state: {
+              pid: 54321,
+              started_at: "2026-04-18T00:00:00.000Z",
+              log_path: "/tmp/daemon.log",
+              stayalive: true,
+              watch: false,
+              auto_switch: false,
+              proxy: false,
+              host: "127.0.0.1",
+              port: 14555,
+              base_url: "http://127.0.0.1:14555/backend-api",
+              openai_base_url: "http://127.0.0.1:14555/v1",
+              debug: false,
+            },
+          }),
+        }),
+        watchProcessManager: createWatchProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }),
+        watchLeaseManager: {
+          getStatus: async () => ({
+            active: false,
+            state: null,
+          }),
+          claimForeground: async (options) => {
+            claimedAutoSwitchModes.push(options.autoSwitch);
+            return {
+              acquired: true,
+              state: {
+                owner_kind: "tui-foreground",
+                pid: process.pid,
+                started_at: "2026-04-18T00:00:00.000Z",
+                auto_switch: options.autoSwitch,
+                debug: options.debug,
+              },
+            };
+          },
+          recordDetached: async () => undefined,
+          release: async () => undefined,
+        },
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+      });
+      void tuiPromise.finally(() => {
+        settled = true;
+      });
+
+      await Promise.race([
+        foregroundWatchStarted,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => {
+            reject(new Error("Expected foreground watch to start."));
+          }, 250);
+        }),
+      ]);
+
+      expect(foregroundWatchStarts).toBe(1);
+      expect(claimedAutoSwitchModes).toEqual([false]);
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toBe(0);
+      expect(stderr.read()).toBe("");
+    } finally {
+      if (!settled && tuiPromise) {
+        stdin.emitInput("q");
+        await tuiPromise;
+      }
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("reopens the dashboard after running codex from the o shortcut", async () => {
     const homeDir = await createTempHome();
     const stdin = createInteractiveStdin();
@@ -2806,10 +2935,11 @@ describe("Account Dashboard TUI", () => {
           "User: user-alpha",
           expect.stringMatching(/^Joined: \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/),
           expect.stringMatching(/^Switched: .*ago\)$/),
-          expect.stringMatching(/^Next reset: \d{2}-\d{2} \d{2}:\d{2}$/),
+          expect.stringMatching(/^5H reset: /),
+          expect.stringMatching(/^1W reset: /),
         ]),
       );
-      expect(snapshot.accounts[1]?.nextResetLabel).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/);
+      expect(snapshot.accounts[1]?.nextResetLabel).toMatch(/^\d{2}-\d{2} \d{2}:\d{2} \([^)]+\)$/);
       expect(snapshot.accounts[0]).toMatchObject({
         planLabel: "pro",
         emailLabel: "beta@example.com",
@@ -3002,6 +3132,109 @@ describe("Account Dashboard TUI", () => {
           "User: user-beta",
         ]),
       );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("keeps the proxy row visible in dashboard snapshots even when proxy mode is off", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const snapshot = await buildAccountDashboardSnapshot({
+        store: {
+          paths: {
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "alpha",
+                auth_mode: "chatgpt",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "ok",
+                  plan_type: "plus",
+                  fetched_at: "2026-04-16T08:00:00.000Z",
+                  five_hour: { used_percent: 18, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                  one_week: { used_percent: 42, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+                },
+                authPath: `${homeDir}/alpha/auth.json`,
+                metaPath: `${homeDir}/alpha/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+              },
+            ],
+          }),
+          listQuotaSummaries: async () => ({
+            accounts: [
+              {
+                name: "alpha",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                plan_type: "plus",
+                credits_balance: null,
+                status: "ok",
+                fetched_at: "2026-04-16T08:00:00.000Z",
+                error_message: null,
+                unlimited: false,
+                auto_switch_eligible: true,
+                five_hour: { used_percent: 18, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                one_week: { used_percent: 42, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+              },
+            ],
+          }),
+          refreshAllQuotas: async () => ({
+            successes: [
+              {
+                name: "alpha",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                plan_type: "plus",
+                credits_balance: null,
+                status: "ok",
+                fetched_at: "2026-04-16T08:00:00.000Z",
+                error_message: null,
+                unlimited: false,
+                five_hour: { used_percent: 18, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
+                one_week: { used_percent: 42, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+              },
+            ],
+            failures: [],
+            warnings: [],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-alpha",
+            user_id: "user-alpha",
+            identity: "acct-alpha:user-alpha",
+            matched_accounts: ["alpha"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+        } as never,
+      });
+
+      expect(snapshot.currentStatusLine).toBe(
+        "Current managed account: alpha | [daemon:off] [proxy:off] [autoswitch:off]",
+      );
+      expect(snapshot.accounts.map((account) => account.name)).toEqual(["proxy", "alpha"]);
+      expect(snapshot.accounts[0]).toMatchObject({
+        name: "proxy",
+        authModeLabel: "proxy",
+        current: false,
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

@@ -177,7 +177,7 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm autoswitch enable`: enable daemon-backed auto-switching
 - `codexm autoswitch disable`: disable auto-switching while keeping the baseline daemon alive
 - `codexm daemon start`: start the shared background daemon without enabling extra features
-- `codexm daemon stop`: stop the shared background daemon and restore direct auth if proxy mode was active
+- `codexm daemon stop`: stop the shared background daemon while preserving the last daemon feature state
 - `codexm run [--account <name>] [-- ...codexArgs]`: run codex with global auth follow-restart or an isolated managed account snapshot
 - `codexm run --proxy [-- ...codexArgs]`: run codex in an isolated CODEX_HOME through the local proxy
 - `codexm proxy enable`: enable global synthetic ChatGPT auth backed by the local proxy
@@ -187,7 +187,7 @@ This is the main command to use when deciding which account to switch to next.
 
 Use `codexm --help` for the full command reference. Share bundles are plain auth snapshots intended only for fully trusted recipients.
 
-In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `a` toggles daemon-backed autoswitch, while `p` toggles whether the selected account can be picked as an auto-switch target; protection does not stop the current in-use account from being switched away later. `Esc` backs out of prompts; `q` quits from the main dashboard. When a managed Desktop switch has to wait for the active thread to finish, the dashboard status line now shows that wait progress instead of sitting on a generic busy label. When no other live watch owner is present and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active and stops that foreground watch when you quit.
+In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `a` toggles daemon-backed autoswitch, while `p` toggles whether the selected account can be picked as an auto-switch target; protection does not stop the current in-use account from being switched away later. `Esc` backs out of prompts; `q` quits from the main dashboard. The list shows `Next reset` as an absolute timestamp plus a short relative countdown, and the detail pane shows both `5H reset` and `1W reset`. When a managed Desktop switch has to wait for the active thread to finish, the dashboard status line now shows that wait progress instead of sitting on a generic busy label. When no other live watch owner is present and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active; that foreground watch follows the current autoswitch setting and stops when you quit.
 
 ## When should I use each command?
 

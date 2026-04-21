@@ -62,7 +62,6 @@ import { getUsage } from "../cli/spec.js";
 import { type RunnerOptions, type RunnerResult } from "../codex-cli-runner.js";
 import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME, PROXY_EMAIL, PROXY_USER_ID } from "../proxy/constants.js";
 import { buildProxyQuotaAggregate } from "../proxy/quota.js";
-import { readProxyState } from "../proxy/state.js";
 import {
   deleteAccountForTui,
   exportShareBundleForTui,
@@ -208,7 +207,7 @@ function formatDateTimeWithRelative(
 
 function formatWindowResetForList(
   window: { reset_at?: string | null } | null | undefined,
-  _now: Date,
+  now: Date,
 ): string {
   if (!window?.reset_at) {
     return "-";
@@ -219,14 +218,15 @@ function formatWindowResetForList(
     return "-";
   }
 
-  return dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
-}
+  const absolute = dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
+  const relative = formatRelativeOffsetCompact(timestamp - now.getTime());
+  if (relative === "now") {
+    return `${absolute} (now)`;
+  }
 
-function formatWindowResetForDetail(
-  window: { reset_at?: string | null } | null | undefined,
-  _now: Date,
-): string {
-  return formatWindowResetForList(window, _now);
+  return timestamp >= now.getTime()
+    ? `${absolute} (${relative})`
+    : `${absolute} (${relative} ago)`;
 }
 
 function toQuotaSummary(account: ManagedAccount, refreshed: AccountQuotaSummary | null): AccountQuotaSummary {
@@ -301,7 +301,6 @@ function buildAccountDetailLines(options: {
   availabilityLabel: string;
   score: number | null;
   eta: WatchHistoryEtaContext | undefined;
-  nextResetDetailLabel: string;
   reasonLabel: string;
   candidate: ReturnType<typeof toAutoSwitchCandidate>;
   now: Date;
@@ -312,7 +311,6 @@ function buildAccountDetailLines(options: {
     availabilityLabel,
     score,
     eta,
-    nextResetDetailLabel,
     reasonLabel,
     candidate,
     now,
@@ -338,7 +336,8 @@ function buildAccountDetailLines(options: {
     `ETA: ${formatEtaLabel(eta)}`,
     `5H used: ${formattedFiveHour}`,
     `1W used: ${formattedOneWeek}`,
-    `Next reset: ${nextResetDetailLabel}`,
+    `5H reset: ${formatResetAt(account.five_hour)}`,
+    `1W reset: ${formatResetAt(account.one_week)}`,
     `Availability: ${availabilityLabel}`,
   ];
 
@@ -370,8 +369,6 @@ function buildAccountDetailLines(options: {
     `5H->1W 1H: ${candidate ? formatRawScore(candidate.projected_5h_in_1w_units_1h) : "-"}`,
     `1W 1H: ${colorizeScore(formatRemainingPercent(projectedOneWeek1h), projectedOneWeek1h)}`,
     `5H:1W: ${candidate ? String(candidate.five_hour_to_one_week_ratio) : "-"}`,
-    `5H reset: ${formatResetAt(account.five_hour)}`,
-    `1W reset: ${formatResetAt(account.one_week)}`,
   );
 
   return lines;
@@ -448,7 +445,6 @@ function buildDashboardSnapshot(options: {
       const score = candidate ? normalizePlusScore(candidate.current_score, account.plan_type) : null;
       const nextResetWindow = candidate ? selectCurrentNextResetWindow(account, candidate) : null;
       const nextResetLabel = formatWindowResetForList(nextResetWindow, now);
-      const nextResetDetailLabel = formatWindowResetForDetail(nextResetWindow, now);
       const availabilityLabel = deriveAvailability(account);
       const reasonLabel = buildReasonLabel(account, eta);
       const accountMeta = accountMetaByName.get(account.name);
@@ -506,7 +502,6 @@ function buildDashboardSnapshot(options: {
           availabilityLabel,
           score,
           eta,
-          nextResetDetailLabel,
           reasonLabel,
           candidate,
           now,
@@ -541,7 +536,6 @@ export async function buildAccountDashboardSnapshot(options: {
   const watchHistory = await readWatchHistory(options.store, new Date());
   const usageSummary = await loadFreshLocalUsageSummary(options.store);
   const refreshedByName = new Map(result.successes.map((account) => [account.name, account] as const));
-  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
   const proxyAggregate = await buildProxyQuotaAggregate({
     store: options.store,
     includeWhenDisabled: true,
@@ -557,8 +551,7 @@ export async function buildAccountDashboardSnapshot(options: {
     refreshedByName,
     proxySummary: proxyAggregate?.summary ?? null,
     proxyAggregate,
-    useProxyAggregate: proxyAggregate !== null
-      && (proxyState?.enabled === true || current.account_id === PROXY_ACCOUNT_ID),
+    useProxyAggregate: proxyAggregate !== null,
     debugLog: options.debugLog,
   });
 }
@@ -583,7 +576,6 @@ export async function buildCachedAccountDashboardSnapshot(options: {
   const daemonStatus = await daemonProcessManager.getStatus();
   const watchHistory = await readWatchHistory(options.store, new Date());
   const usageSummary = await loadCachedLocalUsageSummary(options.store);
-  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
   const proxyAggregate = await buildProxyQuotaAggregate({
     store: options.store,
     includeWhenDisabled: true,
@@ -599,8 +591,7 @@ export async function buildCachedAccountDashboardSnapshot(options: {
     usageSummary,
     proxySummary: proxyAggregate?.summary ?? null,
     proxyAggregate,
-    useProxyAggregate: proxyAggregate !== null
-      && (proxyState?.enabled === true || current.account_id === PROXY_ACCOUNT_ID),
+    useProxyAggregate: proxyAggregate !== null,
     debugLog: options.debugLog,
   });
 }
@@ -665,6 +656,7 @@ export async function handleTuiCommand(options: {
     const externalUpdateMonitors = await startTuiExternalUpdateMonitors({
       store: options.store,
       desktopLauncher: options.desktopLauncher,
+      daemonProcessManager,
       watchProcessManager: options.watchProcessManager,
       watchLeaseManager: options.watchLeaseManager,
       updateFeed: externalUpdateFeed,
@@ -835,6 +827,7 @@ export async function handleTuiCommand(options: {
               store: options.store,
               daemonProcessManager,
             });
+            await externalUpdateMonitors.reconcileNow();
             return {
               statusMessage: "Disabled autoswitch.",
               preferredName: null,
@@ -846,6 +839,7 @@ export async function handleTuiCommand(options: {
             daemonProcessManager,
             debug: false,
           });
+          await externalUpdateMonitors.reconcileNow();
           return {
             statusMessage: "Enabled autoswitch.",
             preferredName: null,

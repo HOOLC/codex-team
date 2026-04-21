@@ -503,8 +503,8 @@
           {
             "usage": "codexm daemon stop",
             "description": {
-              "en": "stop the shared background daemon and restore direct auth if proxy mode was active",
-              "zh-CN": "停止共享后台 daemon；若 proxy 模式生效则恢复 direct auth"
+              "en": "stop the shared background daemon while preserving the last daemon feature state",
+              "zh-CN": "停止共享后台 daemon，并保留最近一次 daemon 功能开关状态"
             }
           },
           {

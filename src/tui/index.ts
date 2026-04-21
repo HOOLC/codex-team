@@ -43,11 +43,15 @@ const WIDE_NAME_MIN_WIDTH = 10;
 const WIDE_NAME_PREFERRED_WIDTH = 22;
 const WIDE_IDENTITY_MIN_WIDTH = 8;
 const WIDE_IDENTITY_MAX_WIDTH = 14;
-const WIDE_PLAN_WIDTH = 6;
-const WIDE_SCORE_WIDTH = 6;
+const WIDE_PLAN_MIN_WIDTH = 4;
+const WIDE_PLAN_MAX_WIDTH = 6;
+const WIDE_SCORE_MIN_WIDTH = 5;
+const WIDE_SCORE_MAX_WIDTH = 6;
 const WIDE_ETA_WIDTH = 6;
-const WIDE_USED_WIDTH = 6;
-const WIDE_RESET_WIDTH = 11;
+const WIDE_USED_MIN_WIDTH = 4;
+const WIDE_USED_MAX_WIDTH = 6;
+const WIDE_RESET_MIN_WIDTH = 11;
+const WIDE_RESET_MAX_WIDTH = 18;
 const EXIT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 type SignalSource = {
   on(event: NodeJS.Signals, listener: () => void): unknown;
@@ -240,6 +244,11 @@ interface DashboardLayout {
 interface WideColumnWidths {
   nameWidth: number;
   identityWidth: number;
+  planWidth: number;
+  scoreWidth: number;
+  fiveHourWidth: number;
+  oneWeekWidth: number;
+  resetWidth: number;
   minListWidth: number;
   preferredListWidth: number;
 }
@@ -368,21 +377,45 @@ function compactDetailLine(line: string, width: number): string {
   return truncate(line, width);
 }
 
-function getWideFixedWidth(showEtaColumn: boolean): number {
+function resolveDynamicColumnWidth(options: {
+  header: string;
+  values: string[];
+  minWidth: number;
+  maxWidth: number;
+}): { minWidth: number; desiredWidth: number } {
+  const minWidth = Math.max(options.minWidth, visibleWidth(options.header));
+  const desiredWidth = Math.min(
+    options.maxWidth,
+    Math.max(
+      minWidth,
+      ...options.values.map((value) => Math.min(visibleWidth(value), options.maxWidth)),
+    ),
+  );
+
+  return {
+    minWidth,
+    desiredWidth,
+  };
+}
+
+function getWideFixedWidth(
+  showEtaColumn: boolean,
+  columns: Pick<WideColumnWidths, "planWidth" | "scoreWidth" | "fiveHourWidth" | "oneWeekWidth" | "resetWidth">,
+): number {
   return (
     3 +
     1 +
     1 +
-    WIDE_PLAN_WIDTH +
+    columns.planWidth +
     1 +
-    WIDE_SCORE_WIDTH +
+    columns.scoreWidth +
     (showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0) +
     1 +
-    WIDE_USED_WIDTH +
+    columns.fiveHourWidth +
     1 +
-    WIDE_USED_WIDTH +
+    columns.oneWeekWidth +
     1 +
-    WIDE_RESET_WIDTH
+    columns.resetWidth
   );
 }
 
@@ -391,7 +424,44 @@ function getWideColumnWidths(
   showEtaColumn: boolean,
   accounts: AccountDashboardAccount[],
 ): WideColumnWidths {
-  const fixedWithoutNameIdentity = getWideFixedWidth(showEtaColumn);
+  const planWidths = resolveDynamicColumnWidth({
+    header: "PLAN",
+    values: accounts.map((account) => account.planLabel),
+    minWidth: WIDE_PLAN_MIN_WIDTH,
+    maxWidth: WIDE_PLAN_MAX_WIDTH,
+  });
+  const scoreWidths = resolveDynamicColumnWidth({
+    header: "SCORE",
+    values: accounts.map((account) => account.scoreLabel),
+    minWidth: WIDE_SCORE_MIN_WIDTH,
+    maxWidth: WIDE_SCORE_MAX_WIDTH,
+  });
+  const fiveHourWidths = resolveDynamicColumnWidth({
+    header: "5H",
+    values: accounts.map((account) => account.fiveHourLabel),
+    minWidth: WIDE_USED_MIN_WIDTH,
+    maxWidth: WIDE_USED_MAX_WIDTH,
+  });
+  const oneWeekWidths = resolveDynamicColumnWidth({
+    header: "1W",
+    values: accounts.map((account) => account.oneWeekLabel),
+    minWidth: WIDE_USED_MIN_WIDTH,
+    maxWidth: WIDE_USED_MAX_WIDTH,
+  });
+  const resetWidths = resolveDynamicColumnWidth({
+    header: "NEXT RESET",
+    values: accounts.map((account) => account.nextResetLabel),
+    minWidth: WIDE_RESET_MIN_WIDTH,
+    maxWidth: WIDE_RESET_MAX_WIDTH,
+  });
+  const fixedMinWidths = {
+    planWidth: planWidths.minWidth,
+    scoreWidth: scoreWidths.minWidth,
+    fiveHourWidth: fiveHourWidths.minWidth,
+    oneWeekWidth: oneWeekWidths.minWidth,
+    resetWidth: resetWidths.minWidth,
+  };
+  const fixedWithoutNameIdentity = getWideFixedWidth(showEtaColumn, fixedMinWidths);
   const desiredNameWidth = Math.min(
     WIDE_NAME_PREFERRED_WIDTH,
     Math.max(
@@ -410,9 +480,33 @@ function getWideColumnWidths(
     WIDE_NAME_MIN_WIDTH + WIDE_IDENTITY_MIN_WIDTH,
     width - fixedWithoutNameIdentity,
   );
+  const desiredFixedGrowths = {
+    planWidth: Math.max(0, planWidths.desiredWidth - planWidths.minWidth),
+    scoreWidth: Math.max(0, scoreWidths.desiredWidth - scoreWidths.minWidth),
+    fiveHourWidth: Math.max(0, fiveHourWidths.desiredWidth - fiveHourWidths.minWidth),
+    oneWeekWidth: Math.max(0, oneWeekWidths.desiredWidth - oneWeekWidths.minWidth),
+    resetWidth: Math.max(0, resetWidths.desiredWidth - resetWidths.minWidth),
+  };
   let nameWidth = WIDE_NAME_MIN_WIDTH;
   let identityWidth = WIDE_IDENTITY_MIN_WIDTH;
+  let planWidth = planWidths.minWidth;
+  let scoreWidth = scoreWidths.minWidth;
+  let fiveHourWidth = fiveHourWidths.minWidth;
+  let oneWeekWidth = oneWeekWidths.minWidth;
+  let resetWidth = resetWidths.minWidth;
   let remainingFlexibleWidth = flexibleWidth - nameWidth - identityWidth;
+
+  const consumeGrowth = (currentWidth: number, desiredGrowth: number): [number, number] => {
+    const appliedGrowth = Math.min(remainingFlexibleWidth, desiredGrowth);
+    remainingFlexibleWidth -= appliedGrowth;
+    return [currentWidth + appliedGrowth, desiredGrowth - appliedGrowth];
+  };
+
+  [planWidth] = consumeGrowth(planWidth, desiredFixedGrowths.planWidth);
+  [scoreWidth] = consumeGrowth(scoreWidth, desiredFixedGrowths.scoreWidth);
+  [fiveHourWidth] = consumeGrowth(fiveHourWidth, desiredFixedGrowths.fiveHourWidth);
+  [oneWeekWidth] = consumeGrowth(oneWeekWidth, desiredFixedGrowths.oneWeekWidth);
+  [resetWidth] = consumeGrowth(resetWidth, desiredFixedGrowths.resetWidth);
 
   const nameGrowth = Math.max(0, desiredNameWidth - nameWidth);
   const appliedNameGrowth = Math.min(remainingFlexibleWidth, nameGrowth);
@@ -437,8 +531,20 @@ function getWideColumnWidths(
   return {
     nameWidth,
     identityWidth,
-    minListWidth: fixedWithoutNameIdentity + WIDE_NAME_MIN_WIDTH + WIDE_IDENTITY_MIN_WIDTH,
-    preferredListWidth: fixedWithoutNameIdentity + desiredNameWidth + desiredIdentityWidth,
+    planWidth,
+    scoreWidth,
+    fiveHourWidth,
+    oneWeekWidth,
+    resetWidth,
+    minListWidth: getWideFixedWidth(showEtaColumn, fixedMinWidths) + WIDE_NAME_MIN_WIDTH + WIDE_IDENTITY_MIN_WIDTH,
+    preferredListWidth:
+      getWideFixedWidth(showEtaColumn, {
+        planWidth: planWidths.desiredWidth,
+        scoreWidth: scoreWidths.desiredWidth,
+        fiveHourWidth: fiveHourWidths.desiredWidth,
+        oneWeekWidth: oneWeekWidths.desiredWidth,
+        resetWidth: resetWidths.desiredWidth,
+      }) + desiredNameWidth + desiredIdentityWidth,
   };
 }
 
@@ -710,13 +816,21 @@ function renderWideListHeader(width: number, showEtaColumn: boolean): string[] {
 }
 
 function renderWideListHeaderWithColumns(
-  columns: Pick<WideColumnWidths, "nameWidth" | "identityWidth">,
+  columns: Pick<WideColumnWidths, "nameWidth" | "identityWidth" | "planWidth" | "scoreWidth" | "fiveHourWidth" | "oneWeekWidth" | "resetWidth">,
   showEtaColumn: boolean,
 ): string[] {
-  const { nameWidth, identityWidth } = columns;
+  const {
+    nameWidth,
+    identityWidth,
+    planWidth,
+    scoreWidth,
+    fiveHourWidth,
+    oneWeekWidth,
+    resetWidth,
+  } = columns;
   const etaBlockWidth = showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0;
-  const groupPrefix = 3 + nameWidth + 1 + identityWidth + 1 + WIDE_PLAN_WIDTH + 1 + WIDE_SCORE_WIDTH + etaBlockWidth + 1;
-  const usedSpan = WIDE_USED_WIDTH + 1 + WIDE_USED_WIDTH;
+  const groupPrefix = 3 + nameWidth + 1 + identityWidth + 1 + planWidth + 1 + scoreWidth + etaBlockWidth + 1;
+  const usedSpan = fiveHourWidth + 1 + oneWeekWidth;
 
   return [
     `${repeat(" ", groupPrefix)}${padVisibleCenter("USED", usedSpan)}`,
@@ -726,16 +840,16 @@ function renderWideListHeaderWithColumns(
       " ",
       padEndVisible("IDENTITY", identityWidth),
       " ",
-      padEndVisible("PLAN", WIDE_PLAN_WIDTH),
+      padEndVisible("PLAN", planWidth),
       " ",
-      padStartVisible("SCORE", WIDE_SCORE_WIDTH),
+      padStartVisible("SCORE", scoreWidth),
       showEtaColumn ? ` ${padStartVisible("ETA", WIDE_ETA_WIDTH)}` : "",
       " ",
-      padVisibleCenter("5H", WIDE_USED_WIDTH),
+      padVisibleCenter("5H", fiveHourWidth),
       " ",
-      padVisibleCenter("1W", WIDE_USED_WIDTH),
+      padVisibleCenter("1W", oneWeekWidth),
       " ",
-      padEndVisible("NEXT RESET", WIDE_RESET_WIDTH),
+      padEndVisible("NEXT RESET", resetWidth),
     ].join(""),
     [
       repeat("-", 2),
@@ -744,16 +858,16 @@ function renderWideListHeaderWithColumns(
       " ",
       repeat("-", identityWidth),
       " ",
-      repeat("-", WIDE_PLAN_WIDTH),
+      repeat("-", planWidth),
       " ",
-      repeat("-", WIDE_SCORE_WIDTH),
+      repeat("-", scoreWidth),
       showEtaColumn ? ` ${repeat("-", WIDE_ETA_WIDTH)}` : "",
       " ",
-      repeat("-", WIDE_USED_WIDTH),
+      repeat("-", fiveHourWidth),
       " ",
-      repeat("-", WIDE_USED_WIDTH),
+      repeat("-", oneWeekWidth),
       " ",
-      repeat("-", WIDE_RESET_WIDTH),
+      repeat("-", resetWidth),
     ].join(""),
   ];
 }
@@ -761,10 +875,18 @@ function renderWideListHeaderWithColumns(
 function renderWideListRow(
   account: AccountDashboardAccount,
   selected: boolean,
-  columns: Pick<WideColumnWidths, "nameWidth" | "identityWidth">,
+  columns: Pick<WideColumnWidths, "nameWidth" | "identityWidth" | "planWidth" | "scoreWidth" | "fiveHourWidth" | "oneWeekWidth" | "resetWidth">,
   showEtaColumn: boolean,
 ): string {
-  const { nameWidth, identityWidth } = columns;
+  const {
+    nameWidth,
+    identityWidth,
+    planWidth,
+    scoreWidth,
+    fiveHourWidth,
+    oneWeekWidth,
+    resetWidth,
+  } = columns;
   const displayName = displayAccountName(account);
   const line = [
     selected ? ">" : " ",
@@ -774,16 +896,16 @@ function renderWideListRow(
     " ",
     padEndVisible(compactIdentity(account.identityLabel, identityWidth), identityWidth),
     " ",
-    padEndVisible(truncate(account.planLabel, WIDE_PLAN_WIDTH), WIDE_PLAN_WIDTH),
+    padEndVisible(truncate(account.planLabel, planWidth), planWidth),
     " ",
-    padStartVisible(account.scoreLabel, WIDE_SCORE_WIDTH),
+    padStartVisible(account.scoreLabel, scoreWidth),
     showEtaColumn ? ` ${padStartVisible(account.etaLabel, WIDE_ETA_WIDTH)}` : "",
     " ",
-    padStartVisible(account.fiveHourLabel, WIDE_USED_WIDTH),
+    padStartVisible(account.fiveHourLabel, fiveHourWidth),
     " ",
-    padStartVisible(account.oneWeekLabel, WIDE_USED_WIDTH),
+    padStartVisible(account.oneWeekLabel, oneWeekWidth),
     " ",
-    padEndVisible(truncate(account.nextResetLabel, WIDE_RESET_WIDTH), WIDE_RESET_WIDTH),
+    padEndVisible(truncate(account.nextResetLabel, resetWidth), resetWidth),
   ].join("");
 
   return styleListLine(line, account, selected);
@@ -800,8 +922,8 @@ function renderCompactListRow(
   const includeReset = width >= 58;
   const firstFixedWidth =
     2 + 1 + 1 + 1 +
-    (includePlan ? 1 + WIDE_PLAN_WIDTH : 0) +
-    1 + WIDE_SCORE_WIDTH +
+    (includePlan ? 1 + WIDE_PLAN_MAX_WIDTH : 0) +
+    1 + WIDE_SCORE_MAX_WIDTH +
     (showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0);
   const nameWidth = Math.max(8, width - firstFixedWidth);
   const displayName = displayAccountName(account);
@@ -810,9 +932,9 @@ function renderCompactListRow(
     account.current ? "*" : " ",
     " ",
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
-    includePlan ? ` ${padEndVisible(truncate(account.planLabel, WIDE_PLAN_WIDTH), WIDE_PLAN_WIDTH)}` : "",
+    includePlan ? ` ${padEndVisible(truncate(account.planLabel, WIDE_PLAN_MAX_WIDTH), WIDE_PLAN_MAX_WIDTH)}` : "",
     " ",
-    padStartVisible(account.scoreLabel, WIDE_SCORE_WIDTH),
+    padStartVisible(account.scoreLabel, WIDE_SCORE_MAX_WIDTH),
     showEtaColumn ? ` ${padStartVisible(account.etaLabel, WIDE_ETA_WIDTH)}` : "",
   ].join("");
 
