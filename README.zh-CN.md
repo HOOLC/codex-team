@@ -106,7 +106,7 @@ codexm run --proxy -- --model o3
 codexm proxy disable
 ```
 
-`codexm proxy enable` 会在 `127.0.0.1` 启动本地 daemon，写入一个 synthetic ChatGPT auth（`proxy@codexm.local`），并把本地 auth/config 指向这个 proxy。live config 现在会保留内建 provider 身份，只改 transport URL，所以 proxy 和非 proxy 会继续共用同一份 live thread 历史。dashboard 总会显示一个 `proxy` 行，它的 quota 来自真实可用池：只统计未保护、允许 auto-switch 且当前仍可用的账号；受保护和已阻塞账号都不计入。它的 `5H`、`1W` 和 `ETA` 都基于这个池子的真实剩余额度聚合，消耗速率仍然沿用用户全局 watch 历史。启用 proxy 模式后，这个 synthetic 账号会成为默认 `CODEX_HOME` 的当前账号，`codexm list` 里也会显示它。这个 daemon 同时提供 OpenAI-compatible `/v1` 接口，覆盖 Responses、Chat Completions、旧版 Completions、Models，以及有 API-key 上游时的 Embeddings。
+`codexm proxy enable` 会在 `127.0.0.1` 启动本地 daemon，写入一个 synthetic ChatGPT auth（`proxy@codexm.local`），并把本地 auth/config 指向这个 proxy。live config 现在会保留内建 provider 身份，只改 transport URL，所以 proxy 和非 proxy 会继续共用同一份 live thread 历史。dashboard 总会显示一个 `proxy` 行，它的 quota 来自真实池：统计未保护、允许 auto-switch 且仍保留 quota 快照的账号，包含已经耗尽的账号，这样整个池子都归零时也会继续显示 `0%`，不会直接消失；受保护账号不计入。它的 `5H`、`1W` 和 `ETA` 都基于这个池子的真实剩余额度聚合，消耗速率仍然沿用用户全局 watch 历史。启用 proxy 模式后，这个 synthetic 账号会成为默认 `CODEX_HOME` 的当前账号，`codexm list` 里也会显示它。如果最近的 proxy 流量已经命中过真实上游账号，`codexm list` 会额外打印一行 `Proxy last upstream: ...`，对应的真实 upstream 行会带上 `@` 标记，dashboard 详情区也会显示同样的 `Last upstream` 信息。这个 daemon 同时提供 OpenAI-compatible `/v1` 接口，覆盖 Responses、Chat Completions、旧版 Completions、Models，以及有 API-key 上游时的 Embeddings。
 
 对 `codexm` 托管的 proxy 入口，`codexm proxy enable` 现在会改写 `chatgpt_base_url` 和 `openai_base_url`，但不再改 live provider 身份；`codexm run --proxy` 仍然会在隔离 overlay 里使用自定义 provider。这样 live proxy CLI/Desktop 能继续共用历史，而隔离 proxy run 仍然可以把实时 Responses websocket turn 和 REST 请求都强制导向本地 proxy。这个保证仍然只覆盖 `codexm` 托管入口；如果你绕过 `codexm` 直接裸跑 `codex` 或 Desktop，则不保证一定经过本地 proxy。
 
@@ -126,11 +126,11 @@ Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
 Available: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
-  NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
-  -----------  --------  ----  -----  -----   5H   1W   ----------
-* plus-main    ac1..123  plus    72%   2.1h   58%  41%  04-14 18:30
-  team-backup  ac9..987  team    64%   1.7h   61%  39%  04-14 19:10
-  plus-old     ac4..456  plus     0%      -   43% 100%  04-16 09:00
+   NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
+   -----------  --------  ----  -----  -----   5H   1W   ----------
+*  plus-main    ac1..123  plus    72%   2.1h   58%  41%  04-14 18:30
+   team-backup  ac9..987  team    64%   1.7h   61%  39%  04-14 19:10
+   plus-old     ac4..456  plus     0%      -   43% 100%  04-16 09:00
 ```
 
 如果你想判断“接下来该切到哪个账号”，优先看这个命令。
@@ -157,7 +157,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm current [--refresh]`: 查看当前账号；可选刷新 quota
 - `codexm doctor`: 诊断本地 auth、runtime 探测和托管 Desktop 一致性
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: 查看所有保存账号，并附带一行本地 usage 摘要
-- `codexm list --json`: 输出机器可读 JSON
+- `codexm list --json`: 输出机器可读 JSON；有数据时包含 proxy 最近一次上游命中信息
 - `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
 - `codexm proxy status`: 查看本地 proxy daemon 和 synthetic auth 状态
 - `codexm daemon status`: 查看共享后台 daemon、已启用能力和日志路径
@@ -187,7 +187,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`a` 用来切换 daemon 驱动的 autoswitch，`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。列表里的 `Next reset` 现在会同时显示绝对时间和简短的相对倒计时，详情区会固定展示 `5H reset` 和 `1W reset`。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；这条前台 watch 会跟随当前 autoswitch 开关，并在退出时停止。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`a` 用来切换 daemon 驱动的 autoswitch，`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。dashboard 列表里的 `Next reset` 现在和 `codexm list` 使用同一套格式，最后 1 小时内会显示带颜色的分钟倒计时，详情区会固定展示 `5H reset` 和 `1W reset`。如果最近一次 proxy 上游命中可用，dashboard 和 `codexm list` 里对应的真实 upstream 行会带上 `@` 标记，synthetic `proxy` 的详情区还会显示 `Last upstream: ...`。`[autoswitch:on|off]` 状态位仍然只表示 daemon/watch 的开关，不表示 proxy 内部上游选路。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；这条前台 watch 会跟随当前 autoswitch 开关，并在退出时停止。
 
 ## 什么时候该用哪个命令？
 

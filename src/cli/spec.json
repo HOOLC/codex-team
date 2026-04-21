@@ -34,7 +34,7 @@
     "codexm current shows live usage when a managed Codex Desktop session is available.",
     "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
-    "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --refresh to ensure a background auth refresh and --verbose to expand score inputs.",
+    "codexm list refreshes quota data, shows the current managed account, marks current rows with \"*\", and marks the most recent real proxy upstream row with \"@\" when known; use --refresh to ensure a background auth refresh and --verbose to expand score inputs.",
     "codexm launch starts Codex Desktop on macOS and ensures the shared background daemon is running.",
     "codexm autoswitch enable turns on daemon-backed auto-switching; disable leaves the baseline daemon running.",
     "codexm proxy enable installs a synthetic ChatGPT auth pointed at the local proxy while preserving the live provider identity; disable restores the previous direct auth/config backup or strips proxy config when no backup is available.",
@@ -387,8 +387,8 @@
           {
             "usage": "codexm list --json",
             "description": {
-              "en": "machine-readable output",
-              "zh-CN": "输出机器可读 JSON"
+              "en": "machine-readable output, including proxy last-upstream metadata when available",
+              "zh-CN": "输出机器可读 JSON；有数据时包含 proxy 最近一次上游命中信息"
             }
           },
           {

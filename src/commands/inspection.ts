@@ -35,6 +35,10 @@ import {
 } from "../watch/history.js";
 import { buildProxyQuotaAggregate } from "../proxy/quota.js";
 import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
+import {
+  formatProxyUpstreamSelectionLabel,
+  readLatestProxyUpstreamSelection,
+} from "../proxy/request-log.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { describeDaemonFeatureLine } from "../daemon/display.js";
 import { triggerDaemonAuthRefresh } from "../daemon/trigger.js";
@@ -676,6 +680,13 @@ export async function handleListCommand(options: {
     ? null
     : await buildProxyQuotaAggregate({ store: options.store });
   const proxySummary = proxyAggregate?.summary ?? null;
+  const now = new Date();
+  const proxyLastUpstream = proxySummary
+    ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
+    : null;
+  const proxyLastUpstreamLine = proxyLastUpstream
+    ? `Proxy last upstream: ${formatProxyUpstreamSelectionLabel(proxyLastUpstream, now) ?? proxyLastUpstream.accountName}`
+    : null;
   const displayResult = proxySummary
     ? {
         ...result,
@@ -688,7 +699,6 @@ export async function handleListCommand(options: {
   if (current.account_id === PROXY_ACCOUNT_ID) {
     currentAccounts.add(PROXY_ACCOUNT_NAME);
   }
-  const now = new Date();
   const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
   const watchHistory = filterWatchHistoryByScope(
     await watchHistoryStore.read(now),
@@ -748,6 +758,14 @@ export async function handleListCommand(options: {
         state: daemonStatus.state,
       },
       proxy: proxySummary ? toCliQuotaSummary(proxySummary) : null,
+      proxy_last_upstream: proxyLastUpstream
+        ? {
+            account_name: proxyLastUpstream.accountName,
+            auth_mode: proxyLastUpstream.authMode,
+            at: proxyLastUpstream.ts,
+            label: formatProxyUpstreamSelectionLabel(proxyLastUpstream, now),
+          }
+        : null,
       usage: usageBlock,
       successes: displayResult.successes.map((account) => ({
         ...toCliQuotaSummary(account),
@@ -771,6 +789,8 @@ export async function handleListCommand(options: {
         etaByName,
         usageLine,
         daemonFeatureLine: describeDaemonFeatureLine(daemonStatus),
+        proxyLastUpstreamLine,
+        proxyLastUpstreamAccountName: proxyLastUpstream?.accountName ?? null,
         summaryAccounts: result.successes,
       })}\n`,
     );

@@ -1371,8 +1371,8 @@ wire_api = "responses"
       expect(output).toContain("ETA");
       expect(output).toContain("SCORE");
       expect(output).toContain("NEXT RESET");
-      expect(output).toContain("* quota-main");
-      expect(output).toContain("  quota-backup");
+      expect(output).toContain("*  quota-main");
+      expect(output).toContain("   quota-backup");
       expect(output).toContain("2.1h");
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
@@ -1496,7 +1496,7 @@ wire_api = "responses"
       const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 5);
 
       expect(dataRows[0]).toContain("beta");
-      expect(dataRows[1]).toContain("* gamma");
+      expect(dataRows[1]).toContain("*  gamma");
       expect(dataRows[2]).toContain("alpha");
     } finally {
       await cleanupTempHome(homeDir);
@@ -1692,8 +1692,8 @@ wire_api = "responses"
       expect(listCode).toBe(0);
 
       const output = listStdout.read();
-      expect(output).not.toContain("\u001b[30m\u001b[41m* quota-weekly-blocked");
-      expect(output).not.toContain("\u001b[30m\u001b[41m  quota-five-hour-blocked");
+      expect(output).not.toContain("\u001b[30m\u001b[41m*  quota-weekly-blocked");
+      expect(output).not.toContain("\u001b[30m\u001b[41m   quota-five-hour-blocked");
       expect(output).toContain("\u001b[1m\u001b[93m85%\u001b[0m");
       expect(output).toContain("\u001b[1m\u001b[93m15%\u001b[0m");
       expect(output).toContain("\u001b[1m\u001b[93m92%\u001b[0m");
@@ -1833,7 +1833,7 @@ wire_api = "responses"
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
       const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
 
-      expect(dataRows[0]).toContain("* weekly-bottleneck-sooner");
+      expect(dataRows[0]).toContain("*  weekly-bottleneck-sooner");
       expect(dataRows[1]).toContain("five-hour-bottleneck-later");
     } finally {
       await cleanupTempHome(homeDir);

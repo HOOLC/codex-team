@@ -232,6 +232,8 @@ function describeQuotaAccounts(
     etaByName?: Map<string, WatchHistoryEtaContext>;
     usageLine?: string | null;
     daemonFeatureLine?: string | null;
+    proxyLastUpstreamLine?: string | null;
+    proxyLastUpstreamAccountName?: string | null;
     summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {
@@ -239,6 +241,7 @@ function describeQuotaAccounts(
     const lines = [
       describeCurrentListStatus(currentStatus),
       ...(options.daemonFeatureLine ? [options.daemonFeatureLine] : []),
+      ...(options.proxyLastUpstreamLine ? [options.proxyLastUpstreamLine] : []),
       ...(options.usageLine ? [options.usageLine] : []),
       "No saved accounts.",
     ];
@@ -290,8 +293,9 @@ function describeQuotaAccounts(
     const displayName = account.status === "stale"
       ? `${account.name} [stale]`
       : account.name;
+    const proxyMarker = options.proxyLastUpstreamAccountName === account.name ? "@" : " ";
     const row: Record<string, string> = {
-      name: `${currentAccounts.has(account.name) ? "*" : " "} ${displayName}`,
+      name: `${currentAccounts.has(account.name) ? "*" : " "}${proxyMarker} ${displayName}`,
       account_id: compactTableIdentity(maskAccountId(account.identity), "IDENTITY".length),
       plan_type: account.account_id === PROXY_ACCOUNT_ID ? "" : (account.plan_type ?? "-"),
       eta: formatEtaSummary(eta),
@@ -341,7 +345,7 @@ function describeQuotaAccounts(
     : false;
 
   const columns: TableColumn[] = [
-    { key: "name", label: "  NAME" },
+    { key: "name", label: "   NAME" },
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN" },
     { key: "score", label: "SCORE", align: "right", headerAlign: "right" },
@@ -390,6 +394,7 @@ function describeQuotaAccounts(
     ...(options.daemonFeatureLine ? [options.daemonFeatureLine] : []),
     summaryLine,
     poolLine,
+    ...(options.proxyLastUpstreamLine ? [options.proxyLastUpstreamLine] : []),
     ...(options.usageLine ? [options.usageLine] : []),
     "Refreshed quotas:",
     table,
@@ -413,6 +418,8 @@ export function describeQuotaRefresh(
     etaByName?: Map<string, WatchHistoryEtaContext>;
     usageLine?: string | null;
     daemonFeatureLine?: string | null;
+    proxyLastUpstreamLine?: string | null;
+    proxyLastUpstreamAccountName?: string | null;
     summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {

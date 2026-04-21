@@ -141,6 +141,20 @@ export async function readCurrentAuth(homeDir: string): Promise<AuthSnapshot> {
   return parseAuthSnapshot(raw);
 }
 
+export async function writeProxyRequestLog(
+  homeDir: string,
+  entries: Array<Record<string, unknown>>,
+  dateKey = "2026-04-21",
+): Promise<void> {
+  const logsDir = join(homeDir, ".codex-team", "logs");
+  await mkdir(logsDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(logsDir, `proxy-requests-${dateKey}.jsonl`),
+    `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    { mode: 0o600 },
+  );
+}
+
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,

@@ -61,7 +61,10 @@ function toUsagePercent(value: number): number {
 
 function eligibleForProxyPool(account: AccountQuotaSummary): boolean {
   return account.auto_switch_eligible !== false
-    && computeAvailability(account) === "available";
+    && (
+      typeof account.five_hour?.used_percent === "number"
+      || typeof account.one_week?.used_percent === "number"
+    );
 }
 
 interface AggregatedWindowResult {

@@ -292,7 +292,7 @@ async function selectProxyAccount(
     account: selectedAccount,
     snapshot: await readAuthSnapshotFile(selectedAccount.authPath),
     displayedScore,
-    forceFastServiceTier: displayedScore !== null && displayedScore <= 1,
+    forceFastServiceTier: selectedCandidate?.available === "unavailable",
   };
 }
 

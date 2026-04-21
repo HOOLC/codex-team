@@ -106,7 +106,7 @@ codexm run --proxy -- --model o3
 codexm proxy disable
 ```
 
-`codexm proxy enable` starts a local daemon on `127.0.0.1`, installs a synthetic ChatGPT auth (`proxy@codexm.local`), and points local auth/config at the proxy. The live config now keeps the built-in provider identity and only rewrites transport URLs, so proxy and non-proxy sessions continue sharing the same live thread history. The dashboard always shows a `proxy` row whose quota is aggregated from non-protected, auto-switch-eligible accounts that are still available; protected and blocked accounts are excluded. Its `5H`, `1W`, and `ETA` use that real pooled remaining capacity, while the burn rate still comes from the user's global watch history. Enabling proxy mode makes that synthetic account current in the default `CODEX_HOME`, and `codexm list` shows it there too. The same daemon also exposes an OpenAI-compatible `/v1` surface for common tools, including Responses, Chat Completions, legacy Completions, Models, and API-key-backed Embeddings.
+`codexm proxy enable` starts a local daemon on `127.0.0.1`, installs a synthetic ChatGPT auth (`proxy@codexm.local`), and points local auth/config at the proxy. The live config now keeps the built-in provider identity and only rewrites transport URLs, so proxy and non-proxy sessions continue sharing the same live thread history. The dashboard always shows a `proxy` row whose quota is aggregated from non-protected, auto-switch-eligible accounts that still have quota snapshots, including exhausted accounts so a fully drained pool still shows `0%` instead of disappearing; protected accounts are excluded. Its `5H`, `1W`, and `ETA` use that real pooled remaining capacity, while the burn rate still comes from the user's global watch history. Enabling proxy mode makes that synthetic account current in the default `CODEX_HOME`, and `codexm list` shows it there too. When recent proxy traffic has selected a real upstream account, `codexm list` prints a `Proxy last upstream: ...` line, the matching real upstream row gets an `@` marker, and the dashboard detail pane shows the same `Last upstream` label. The same daemon also exposes an OpenAI-compatible `/v1` surface for common tools, including Responses, Chat Completions, legacy Completions, Models, and API-key-backed Embeddings.
 
 For managed proxy-aware entrypoints, `codexm proxy enable` now rewrites `chatgpt_base_url` and `openai_base_url` without changing the live provider identity, while `codexm run --proxy` still uses an isolated custom provider inside its overlay. That means live proxy-backed CLI/Desktop sessions keep shared history, and isolated proxy runs still force Responses websocket turns as well as REST traffic through the local proxy. The guarantee is still scoped to `codexm`-managed entrypoints; bare `codex` or Desktop launches outside `codexm` are not forced through the local proxy.
 
@@ -126,11 +126,11 @@ Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
 Available: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
-  NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
-  -----------  --------  ----  -----  -----   5H   1W   ----------
-* plus-main    ac1..123  plus    72%   2.1h   58%  41%  04-14 18:30
-  team-backup  ac9..987  team    64%   1.7h   61%  39%  04-14 19:10
-  plus-old     ac4..456  plus     0%      -   43% 100%  04-16 09:00
+   NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
+   -----------  --------  ----  -----  -----   5H   1W   ----------
+*  plus-main    ac1..123  plus    72%   2.1h   58%  41%  04-14 18:30
+   team-backup  ac9..987  team    64%   1.7h   61%  39%  04-14 19:10
+   plus-old     ac4..456  plus     0%      -   43% 100%  04-16 09:00
 ```
 
 This is the main command to use when deciding which account to switch to next.
@@ -157,7 +157,7 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm current [--refresh]`: show the current account and optionally refresh quota
 - `codexm doctor`: diagnose local auth, runtime probes, and managed Desktop consistency
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: show saved accounts plus an embedded local usage summary
-- `codexm list --json`: machine-readable output
+- `codexm list --json`: machine-readable output, including proxy last-upstream metadata when available
 - `codexm list --debug`: include diagnostic details about quota normalization and observed ratios
 - `codexm proxy status`: inspect the local proxy daemon and synthetic auth mode
 - `codexm daemon status`: inspect the shared background daemon, enabled features, and log path
@@ -187,7 +187,7 @@ This is the main command to use when deciding which account to switch to next.
 
 Use `codexm --help` for the full command reference. Share bundles are plain auth snapshots intended only for fully trusted recipients.
 
-In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `a` toggles daemon-backed autoswitch, while `p` toggles whether the selected account can be picked as an auto-switch target; protection does not stop the current in-use account from being switched away later. `Esc` backs out of prompts; `q` quits from the main dashboard. The list shows `Next reset` as an absolute timestamp plus a short relative countdown, and the detail pane shows both `5H reset` and `1W reset`. When a managed Desktop switch has to wait for the active thread to finish, the dashboard status line now shows that wait progress instead of sitting on a generic busy label. When no other live watch owner is present and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active; that foreground watch follows the current autoswitch setting and stops when you quit.
+In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `a` toggles daemon-backed autoswitch, while `p` toggles whether the selected account can be picked as an auto-switch target; protection does not stop the current in-use account from being switched away later. `Esc` backs out of prompts; `q` quits from the main dashboard. The dashboard list now uses the same `Next reset` formatting as `codexm list`, including the colored minute countdown inside the last hour, and the detail pane shows both `5H reset` and `1W reset`. When a recent proxy upstream selection is known, the matching real upstream row is marked with `@` in both the dashboard and `codexm list`, and the synthetic `proxy` detail pane shows `Last upstream: ...`. The `[autoswitch:on|off]` status tag still reflects the daemon/watch feature flag, not proxy-internal upstream routing. When a managed Desktop switch has to wait for the active thread to finish, the dashboard status line now shows that wait progress instead of sitting on a generic busy label. When no other live watch owner is present and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active; that foreground watch follows the current autoswitch setting and stops when you quit.
 
 ## When should I use each command?
 

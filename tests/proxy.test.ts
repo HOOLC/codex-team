@@ -10,6 +10,7 @@ import { decodeJwtPayload, getSnapshotAccountId, getSnapshotEmail, getSnapshotUs
 import type { RunnerOptions } from "../src/codex-cli-runner.js";
 import { runCli } from "../src/main.js";
 import { PROXY_PORT_ENV_VAR } from "../src/proxy/constants.js";
+import { formatProxyUpstreamSelectionLabel } from "../src/proxy/request-log.js";
 import { readProxyState, writeProxyState } from "../src/proxy/state.js";
 import {
   cleanupTempHome,
@@ -21,6 +22,7 @@ import {
   withEnvVar,
   writeCurrentAuth,
   writeCurrentConfig,
+  writeProxyRequestLog,
 } from "./test-helpers.js";
 import {
   captureWritable,
@@ -996,7 +998,7 @@ describe("codexm proxy", () => {
     }
   });
 
-  test("proxy injects service_tier priority for low-score synthetic ChatGPT turns", async () => {
+  test("proxy injects service_tier priority for exhausted synthetic ChatGPT turns", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");
     const homeDir = await createTempHome();
@@ -1006,7 +1008,7 @@ describe("codexm proxy", () => {
       await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
       await writeQuotaMeta(
         (await store.getManagedAccount("alpha")).metaPath,
-        { status: "ok", plan_type: "plus", five_hour_used: 99.9, one_week_used: 99.9 },
+        { status: "ok", plan_type: "plus", five_hour_used: 100, one_week_used: 100 },
       );
 
       const forwardedBodies: unknown[] = [];
@@ -1046,6 +1048,66 @@ describe("codexm proxy", () => {
 
         expect(response.status).toBe(200);
         expect(forwardedBodies[0]).toMatchObject({
+          service_tier: "priority",
+        });
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy leaves service_tier unchanged for available synthetic ChatGPT turns", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await writeQuotaMeta(
+        (await store.getManagedAccount("alpha")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 99.9, one_week_used: 99.9 },
+      );
+
+      const forwardedBodies: unknown[] = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (_url, init) => {
+          forwardedBodies.push(JSON.parse(String(init?.body ?? "{}")) as unknown);
+          return sseResponse([
+            {
+              type: "response.completed",
+              response: {
+                id: "resp_normal",
+                object: "response",
+                model: "gpt-5.4",
+                output: [],
+              },
+            },
+          ]);
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const response = await fetch(`${server.baseUrl}/v1/responses`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            input: "hello",
+          }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(forwardedBodies[0]).not.toMatchObject({
           service_tier: "priority",
         });
       } finally {
@@ -1387,7 +1449,7 @@ describe("codexm proxy", () => {
     }
   });
 
-  test("proxy websocket injects service_tier priority for low-score synthetic turns", async () => {
+  test("proxy websocket injects service_tier priority for exhausted synthetic turns", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");
     const homeDir = await createTempHome();
@@ -1412,7 +1474,7 @@ describe("codexm proxy", () => {
       await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
       await writeQuotaMeta(
         (await store.getManagedAccount("alpha")).metaPath,
-        { status: "ok", plan_type: "plus", five_hour_used: 99.9, one_week_used: 99.9 },
+        { status: "ok", plan_type: "plus", five_hour_used: 100, one_week_used: 100 },
       );
 
       upstreamWs.on("connection", (socket) => {
@@ -1741,6 +1803,21 @@ describe("codexm proxy", () => {
 
     try {
       await writeCurrentAuth(homeDir, "acct-real", "chatgpt", "plus", "user-real");
+      const proxyLastUpstreamAt = new Date().toISOString();
+      const proxyLastUpstreamLabel = formatProxyUpstreamSelectionLabel({
+        accountName: "real-main",
+        authMode: "chatgpt",
+        ts: proxyLastUpstreamAt,
+      });
+      await writeProxyRequestLog(homeDir, [
+        {
+          ts: proxyLastUpstreamAt,
+          route: "/v1/responses",
+          selected_account_name: "real-main",
+          selected_auth_mode: "chatgpt",
+          status_code: 200,
+        },
+      ]);
       const quotaUrls: string[] = [];
       const store = createAccountStore(homeDir, {
         fetchImpl: async (url, init) => {
@@ -1795,10 +1872,13 @@ describe("codexm proxy", () => {
       expect(textListOutput).toContain("Accounts: 1/1 usable | blocked: 1W 0, 5H 0 | plus x1");
       expect(textListOutput).not.toContain("Accounts: 1/1 usable | blocked: 1W 0, 5H 0 | pro x1");
       expect(textListOutput).toContain("Available: bottleneck 0.13 | 5H->1W 0.13 | 1W 0.66 (plus 1W)");
+      expect(textListOutput).toContain(`Proxy last upstream: ${proxyLastUpstreamLabel}`);
+      expect(textListOutput).toMatch(/^[ *]@\s+real-main\b/m);
       const proxyLine = textListOutput
         .split("\n")
         .find((line) => line.includes("cod..oxy"));
       expect(proxyLine).toBeDefined();
+      expect(proxyLine ?? "").not.toContain("@ proxy");
       expect(proxyLine ?? "").not.toContain(" pro ");
 
       const listStdout = captureWritable();
@@ -1812,6 +1892,7 @@ describe("codexm proxy", () => {
       expect(listCode).toBe(0);
       const listPayload = JSON.parse(listStdout.read()) as {
         proxy: { name: string; plan_type: string; five_hour: { used_percent: number } } | null;
+        proxy_last_upstream: { account_name: string; auth_mode: string; label: string | null } | null;
         successes: Array<{ name: string; is_current: boolean }>;
       };
       expect(listPayload.proxy).toMatchObject({
@@ -1822,6 +1903,11 @@ describe("codexm proxy", () => {
       expect(listPayload.successes[0]).toMatchObject({
         name: "proxy",
         is_current: true,
+      });
+      expect(listPayload.proxy_last_upstream).toMatchObject({
+        account_name: "real-main",
+        auth_mode: "chatgpt",
+        label: proxyLastUpstreamLabel,
       });
       expect(quotaUrls).toContain("https://chatgpt.com/backend-api/wham/usage");
       expect(quotaUrls).not.toContain("http://127.0.0.1:14555/backend-api/backend-api/wham/usage");
@@ -1839,15 +1925,23 @@ describe("codexm proxy", () => {
         emailLabel: "proxy@codexm.local",
         planLabel: "",
         identityLabel: "",
+        proxyLastUpstreamLabel,
+      });
+      expect(dashboard.accounts[1]).toMatchObject({
+        name: "real-main",
+        proxyUpstreamActive: true,
       });
       expect(stripAnsi(dashboard.accounts[0]?.scoreLabel ?? "")).toBe("88%");
+      expect((dashboard.accounts[0]?.detailLines ?? []).map(stripAnsi)).toContain(
+        `Last upstream: ${proxyLastUpstreamLabel}`,
+      );
       expect((dashboard.accounts[0]?.detailLines ?? []).map(stripAnsi)).toContain("Score: 88%");
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("proxy aggregate quota excludes protected and unavailable accounts", async () => {
+  test("proxy aggregate quota excludes protected accounts but keeps exhausted ones visible", async () => {
     const { buildProxyQuotaAggregateFromAccounts } = await import("../src/proxy/quota.js");
 
     const aggregate = buildProxyQuotaAggregateFromAccounts([
@@ -1923,8 +2017,8 @@ describe("codexm proxy", () => {
     ]);
 
     expect(aggregate).not.toBeNull();
-    expect(aggregate?.summary.five_hour?.used_percent).toBe(20);
-    expect(aggregate?.summary.one_week?.used_percent).toBe(40);
+    expect(aggregate?.summary.five_hour?.used_percent).toBe(60);
+    expect(aggregate?.summary.one_week?.used_percent).toBe(70);
     expect(aggregate?.watchEtaTarget.remaining_5h_eq_1w).toBe(12);
     expect(aggregate?.watchEtaTarget.remaining_1w).toBe(60);
   });

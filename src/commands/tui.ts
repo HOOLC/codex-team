@@ -63,6 +63,11 @@ import { type RunnerOptions, type RunnerResult } from "../codex-cli-runner.js";
 import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME, PROXY_EMAIL, PROXY_USER_ID } from "../proxy/constants.js";
 import { buildProxyQuotaAggregate } from "../proxy/quota.js";
 import {
+  formatProxyUpstreamSelectionLabel,
+  readLatestProxyUpstreamSelection,
+  type ProxyLastUpstreamSelection,
+} from "../proxy/request-log.js";
+import {
   deleteAccountForTui,
   exportShareBundleForTui,
   importShareBundleForTui,
@@ -205,30 +210,6 @@ function formatDateTimeWithRelative(
   return relative ? `${absolute} (${relative})` : absolute;
 }
 
-function formatWindowResetForList(
-  window: { reset_at?: string | null } | null | undefined,
-  now: Date,
-): string {
-  if (!window?.reset_at) {
-    return "-";
-  }
-
-  const timestamp = Date.parse(window.reset_at);
-  if (Number.isNaN(timestamp)) {
-    return "-";
-  }
-
-  const absolute = dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
-  const relative = formatRelativeOffsetCompact(timestamp - now.getTime());
-  if (relative === "now") {
-    return `${absolute} (now)`;
-  }
-
-  return timestamp >= now.getTime()
-    ? `${absolute} (${relative})`
-    : `${absolute} (${relative} ago)`;
-}
-
 function toQuotaSummary(account: ManagedAccount, refreshed: AccountQuotaSummary | null): AccountQuotaSummary {
   if (refreshed) {
     return refreshed;
@@ -304,6 +285,7 @@ function buildAccountDetailLines(options: {
   reasonLabel: string;
   candidate: ReturnType<typeof toAutoSwitchCandidate>;
   now: Date;
+  proxyLastUpstreamLabel?: string | null;
 }): string[] {
   const {
     account,
@@ -314,6 +296,7 @@ function buildAccountDetailLines(options: {
     reasonLabel,
     candidate,
     now,
+    proxyLastUpstreamLabel,
   } = options;
   const etaSummary = toQuotaEtaSummary(eta);
   const formattedScore = colorizeScore(formatRemainingPercent(score), score);
@@ -355,6 +338,7 @@ function buildAccountDetailLines(options: {
     lines.push(
       "",
       `Pool: auto-switch eligible accounts`,
+      ...(proxyLastUpstreamLabel ? [`Last upstream: ${proxyLastUpstreamLabel}`] : []),
       `Bottleneck: ${formatBottleneck(eta)}`,
     );
   }
@@ -385,6 +369,7 @@ function buildDashboardSnapshot(options: {
   refreshedByName?: Map<string, AccountQuotaSummary>;
   proxySummary?: AccountQuotaSummary | null;
   proxyAggregate?: Awaited<ReturnType<typeof buildProxyQuotaAggregate>> | null;
+  proxyLastUpstream?: ProxyLastUpstreamSelection | null;
   useProxyAggregate?: boolean;
   debugLog?: DebugLogger;
 }): AccountDashboardSnapshot {
@@ -425,6 +410,7 @@ function buildDashboardSnapshot(options: {
     .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
   const usableCount = summaryAccounts.filter((account) => deriveAvailability(account) === "available").length;
   const accountMetaByName = new Map(options.accounts.map((account) => [account.name, account] as const));
+  const proxyUpstreamAccountName = options.proxyLastUpstream?.accountName ?? null;
 
   options.debugLog?.(
     `tui: accounts=${displayAccounts.length} proxy=${options.proxySummary ? "yes" : "no"} failures=${options.failures.length} warnings=${options.warnings.length} current_matches=${options.current.matched_accounts.length} watch_history_samples=${options.watchHistory.length}`,
@@ -444,12 +430,15 @@ function buildDashboardSnapshot(options: {
       const eta = etaByName.get(account.name);
       const score = candidate ? normalizePlusScore(candidate.current_score, account.plan_type) : null;
       const nextResetWindow = candidate ? selectCurrentNextResetWindow(account, candidate) : null;
-      const nextResetLabel = formatWindowResetForList(nextResetWindow, now);
+      const nextResetLabel = nextResetWindow ? formatResetAt(nextResetWindow) : "-";
       const availabilityLabel = deriveAvailability(account);
       const reasonLabel = buildReasonLabel(account, eta);
       const accountMeta = accountMetaByName.get(account.name);
       const isProxyAccount =
         account.name === PROXY_ACCOUNT_NAME && account.account_id === PROXY_ACCOUNT_ID;
+      const proxyLastUpstreamLabel = isProxyAccount
+        ? formatProxyUpstreamSelectionLabel(options.proxyLastUpstream, now)
+        : null;
       const accountMetaForDetail = accountMeta ?? (isProxyAccount
         ? {
             name: PROXY_ACCOUNT_NAME,
@@ -495,7 +484,9 @@ function buildDashboardSnapshot(options: {
         refreshStatusLabel: account.status,
         bottleneckLabel: formatBottleneck(eta),
         reasonLabel,
+        proxyUpstreamActive: !isProxyAccount && proxyUpstreamAccountName === account.name,
         oneWeekBlocked: isAccountFullyUnavailable(account),
+        proxyLastUpstreamLabel,
         detailLines: buildAccountDetailLines({
           account,
           accountMeta: accountMetaForDetail,
@@ -505,6 +496,7 @@ function buildDashboardSnapshot(options: {
           reasonLabel,
           candidate,
           now,
+          proxyLastUpstreamLabel,
         }),
       };
     }),
@@ -540,6 +532,7 @@ export async function buildAccountDashboardSnapshot(options: {
     store: options.store,
     includeWhenDisabled: true,
   });
+  const proxyLastUpstream = await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir);
   return buildDashboardSnapshot({
     accounts,
     current,
@@ -551,6 +544,7 @@ export async function buildAccountDashboardSnapshot(options: {
     refreshedByName,
     proxySummary: proxyAggregate?.summary ?? null,
     proxyAggregate,
+    proxyLastUpstream,
     useProxyAggregate: proxyAggregate !== null,
     debugLog: options.debugLog,
   });
@@ -580,6 +574,7 @@ export async function buildCachedAccountDashboardSnapshot(options: {
     store: options.store,
     includeWhenDisabled: true,
   });
+  const proxyLastUpstream = await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir);
 
   return buildDashboardSnapshot({
     accounts,
@@ -591,6 +586,7 @@ export async function buildCachedAccountDashboardSnapshot(options: {
     usageSummary,
     proxySummary: proxyAggregate?.summary ?? null,
     proxyAggregate,
+    proxyLastUpstream,
     useProxyAggregate: proxyAggregate !== null,
     debugLog: options.debugLog,
   });

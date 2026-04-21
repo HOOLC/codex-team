@@ -41,7 +41,7 @@
     "dev": "rslib build --watch",
     "docs:readme": "node ./scripts/sync-readme-command-sections.mjs",
     "prepack": "pnpm build",
-    "test": "rstest run",
+    "test": "node ./scripts/run-tests.cjs",
     "test:watch": "rstest watch",
     "typecheck": "tsc --noEmit",
     "verify": "pnpm typecheck && pnpm test",

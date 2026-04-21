@@ -114,6 +114,8 @@ export interface AccountDashboardAccount {
   refreshStatusLabel: string;
   bottleneckLabel: string;
   reasonLabel: string;
+  proxyUpstreamActive?: boolean;
+  proxyLastUpstreamLabel?: string | null;
   oneWeekBlocked?: boolean;
   detailLines: string[];
 }
@@ -403,7 +405,7 @@ function getWideFixedWidth(
   columns: Pick<WideColumnWidths, "planWidth" | "scoreWidth" | "fiveHourWidth" | "oneWeekWidth" | "resetWidth">,
 ): number {
   return (
-    3 +
+    4 +
     1 +
     1 +
     columns.planWidth +
@@ -829,13 +831,13 @@ function renderWideListHeaderWithColumns(
     resetWidth,
   } = columns;
   const etaBlockWidth = showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0;
-  const groupPrefix = 3 + nameWidth + 1 + identityWidth + 1 + planWidth + 1 + scoreWidth + etaBlockWidth + 1;
+  const groupPrefix = 4 + nameWidth + 1 + identityWidth + 1 + planWidth + 1 + scoreWidth + etaBlockWidth + 1;
   const usedSpan = fiveHourWidth + 1 + oneWeekWidth;
 
   return [
     `${repeat(" ", groupPrefix)}${padVisibleCenter("USED", usedSpan)}`,
     [
-      "   ",
+      "    ",
       padEndVisible("NAME", nameWidth),
       " ",
       padEndVisible("IDENTITY", identityWidth),
@@ -852,7 +854,7 @@ function renderWideListHeaderWithColumns(
       padEndVisible("NEXT RESET", resetWidth),
     ].join(""),
     [
-      repeat("-", 2),
+      repeat("-", 3),
       " ",
       repeat("-", nameWidth),
       " ",
@@ -891,6 +893,7 @@ function renderWideListRow(
   const line = [
     selected ? ">" : " ",
     account.current ? "*" : " ",
+    account.proxyUpstreamActive ? "@" : " ",
     " ",
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
     " ",
@@ -921,7 +924,7 @@ function renderCompactListRow(
   const includeIdentity = width >= 64 && account.identityLabel !== "";
   const includeReset = width >= 58;
   const firstFixedWidth =
-    2 + 1 + 1 + 1 +
+    3 + 1 + 1 + 1 +
     (includePlan ? 1 + WIDE_PLAN_MAX_WIDTH : 0) +
     1 + WIDE_SCORE_MAX_WIDTH +
     (showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0);
@@ -930,6 +933,7 @@ function renderCompactListRow(
   const firstLine = [
     selected ? ">" : " ",
     account.current ? "*" : " ",
+    account.proxyUpstreamActive ? "@" : " ",
     " ",
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
     includePlan ? ` ${padEndVisible(truncate(account.planLabel, WIDE_PLAN_MAX_WIDTH), WIDE_PLAN_MAX_WIDTH)}` : "",
@@ -944,7 +948,7 @@ function renderCompactListRow(
     `1W ${account.oneWeekLabel}`,
     includeReset ? account.nextResetLabel : null,
   ].filter((segment): segment is string => segment !== null);
-  const secondLine = `   ${truncate(secondSegments.join(" | "), Math.max(0, width - 3))}`;
+  const secondLine = `    ${truncate(secondSegments.join(" | "), Math.max(0, width - 4))}`;
 
   return [
     styleListLine(firstLine, account, selected),
@@ -1664,6 +1668,9 @@ export async function runAccountDashboardTui(
           }
         } finally {
           refreshing = false;
+          if (cleanedUp) {
+            refreshPromise = null;
+          }
           render();
         }
       }
