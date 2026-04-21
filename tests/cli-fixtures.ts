@@ -11,6 +11,7 @@ import type {
   RuntimeReadResult,
   RunningCodexDesktop,
 } from "../src/desktop/launcher.js";
+import type { DaemonProcessManager, DaemonProcessState } from "../src/daemon/process.js";
 import type { WatchProcessManager, WatchProcessState } from "../src/watch/process.js";
 
 export function captureWritable(): {
@@ -261,6 +262,52 @@ export function createWatchProcessManagerStub(overrides: Partial<{
       (async () => ({
         running: false,
         state: null,
+      })),
+    stop:
+      overrides.stop ??
+      (async () => ({
+        running: false,
+        state: null,
+        stopped: false,
+      })),
+  };
+}
+
+export function createDaemonProcessManagerStub(overrides: Partial<{
+  getStatus: () => Promise<{ running: boolean; state: DaemonProcessState | null }>;
+  ensureConfig: (config: Omit<DaemonProcessState, "pid" | "started_at" | "log_path" | "base_url" | "openai_base_url"> & {
+    base_url?: string;
+    openai_base_url?: string;
+  }) => Promise<{ action: "started" | "restarted" | "reused"; state: DaemonProcessState }>;
+  stop: () => Promise<{ running: boolean; state: DaemonProcessState | null; stopped: boolean }>;
+}> = {}): DaemonProcessManager {
+  const defaultState: DaemonProcessState = {
+    pid: 54321,
+    started_at: "2026-04-18T00:00:00.000Z",
+    log_path: "/tmp/daemon.log",
+    stayalive: true,
+    watch: false,
+    auto_switch: false,
+    proxy: false,
+    host: "127.0.0.1",
+    port: 14555,
+    base_url: "http://127.0.0.1:14555/backend-api",
+    openai_base_url: "http://127.0.0.1:14555/v1",
+    debug: false,
+  };
+
+  return {
+    getStatus:
+      overrides.getStatus ??
+      (async () => ({
+        running: false,
+        state: null,
+      })),
+    ensureConfig:
+      overrides.ensureConfig ??
+      (async () => ({
+        action: "started",
+        state: defaultState,
       })),
     stop:
       overrides.stop ??

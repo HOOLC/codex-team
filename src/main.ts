@@ -14,6 +14,16 @@ import {
   type WatchProcessManager,
 } from "./watch/process.js";
 import {
+  createDaemonProcessManager,
+  type DaemonProcessManager,
+} from "./daemon/process.js";
+import {
+  createProxyProcessManager,
+  type ProxyProcessManager,
+} from "./proxy/process.js";
+import { readProxyState } from "./proxy/state.js";
+import { DEFAULT_PROXY_HOST, resolveProxyPort } from "./proxy/constants.js";
+import {
   createCodexLoginProvider,
   type CodexLoginProvider,
 } from "./codex-login.js";
@@ -53,6 +63,7 @@ import {
   handleDoctorCommand,
   handleListCommand,
 } from "./commands/inspection.js";
+import { handleAutoswitchCommand } from "./commands/autoswitch.js";
 import { handleUsageCommand } from "./commands/usage.js";
 import { performManualSwitch } from "./commands/switch.js";
 import { handleTuiCommand } from "./commands/tui.js";
@@ -73,11 +84,14 @@ import {
 } from "./codex-cli-runner.js";
 import {
   prepareIsolatedCodexRun,
+  prepareIsolatedProxyRun,
   startIsolatedQuotaHistorySampler,
 } from "./run/isolated-runtime.js";
 import {
   createPlatformDesktopLauncher,
 } from "./platform-desktop-adapter.js";
+import { handleProxyCommand } from "./commands/proxy.js";
+import { handleDaemonCommand } from "./commands/daemon.js";
 export { rankAutoSwitchCandidates } from "./cli/quota.js";
 
 interface CliStreams {
@@ -90,13 +104,16 @@ interface RunCliOptions extends Partial<CliStreams> {
   store?: AccountStore;
   desktopLauncher?: CodexDesktopLauncher;
   authLogin?: CodexLoginProvider;
+  daemonProcessManager?: DaemonProcessManager;
   watchProcessManager?: WatchProcessManager;
+  proxyProcessManager?: ProxyProcessManager;
   runCodexCli?: (options: Parameters<typeof runCodexWithAutoRestart>[0]) => Promise<RunnerResult>;
   interruptSignal?: AbortSignal;
   managedDesktopWaitStatusDelayMs?: number;
   managedDesktopWaitStatusIntervalMs?: number;
   watchQuotaMinReadIntervalMs?: number;
   watchQuotaIdleReadIntervalMs?: number;
+  startIsolatedQuotaHistorySamplerImpl?: typeof startIsolatedQuotaHistorySampler;
 }
 function createDebugLogger(
   stream: NodeJS.WriteStream,
@@ -146,9 +163,15 @@ export async function runCli(
   const store = options.store ?? createAccountStore();
   const desktopLauncher = options.desktopLauncher ?? await createPlatformDesktopLauncher();
   const authLogin = options.authLogin ?? createCodexLoginProvider();
+  const daemonProcessManager =
+    options.daemonProcessManager ?? createDaemonProcessManager(store.paths.codexTeamDir);
   const watchProcessManager =
     options.watchProcessManager ?? createWatchProcessManager(store.paths.codexTeamDir);
+  const proxyProcessManager =
+    options.proxyProcessManager ?? createProxyProcessManager(store.paths.codexTeamDir);
   const runCodexCli = options.runCodexCli ?? runCodexWithAutoRestart;
+  const startIsolatedQuotaHistorySamplerImpl =
+    options.startIsolatedQuotaHistorySamplerImpl ?? startIsolatedQuotaHistorySampler;
   const interruptSignal = options.interruptSignal;
   const managedDesktopWaitStatusDelayMs =
     options.managedDesktopWaitStatusDelayMs ?? DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS;
@@ -177,14 +200,16 @@ export async function runCli(
       streams.stdin.isTTY &&
       streams.stdout.isTTY
     ) {
-      return await handleTuiCommand({
-        positionals: [],
-        store,
-        desktopLauncher,
-        watchProcessManager,
-        streams,
-        runCodexCli,
-        debugLog,
+        return await handleTuiCommand({
+          positionals: [],
+          store,
+          desktopLauncher,
+          daemonProcessManager,
+          watchProcessManager,
+          proxyProcessManager,
+          streams,
+          runCodexCli,
+          debugLog,
         interruptSignal,
         managedDesktopWaitStatusDelayMs,
         managedDesktopWaitStatusIntervalMs,
@@ -230,10 +255,12 @@ export async function runCli(
       case "list": {
         return await handleListCommand({
           store,
+          daemonProcessManager,
           stdout: streams.stdout,
           debugLog,
           debug,
           json,
+          refresh: parsed.flags.has("--refresh"),
           targetName: parsed.positionals[0],
           usageWindow: parsed.optionValues.get("--usage-window"),
           verbose: parsed.flags.has("--verbose"),
@@ -477,7 +504,7 @@ export async function runCli(
           debug,
           store,
           desktopLauncher,
-          watchProcessManager,
+          daemonProcessManager,
           streams,
           debugLog,
         });
@@ -488,7 +515,6 @@ export async function runCli(
           parsed,
           store,
           desktopLauncher,
-          watchProcessManager,
           streams,
           interruptSignal,
           debug,
@@ -497,6 +523,50 @@ export async function runCli(
           managedDesktopWaitStatusIntervalMs,
           watchQuotaMinReadIntervalMs,
           watchQuotaIdleReadIntervalMs,
+        });
+      }
+
+      case "daemon": {
+        return await handleDaemonCommand({
+          store,
+          positionals: parsed.positionals,
+          optionValues: parsed.optionValues,
+          stdout: streams.stdout,
+          debug,
+          json,
+          daemonProcessManager,
+          desktopLauncher,
+          streams,
+          debugLog,
+          managedDesktopWaitStatusDelayMs,
+          managedDesktopWaitStatusIntervalMs,
+          watchQuotaMinReadIntervalMs,
+          watchQuotaIdleReadIntervalMs,
+        });
+      }
+
+      case "autoswitch": {
+        return await handleAutoswitchCommand({
+          store,
+          positionals: parsed.positionals,
+          daemonProcessManager,
+          stdout: streams.stdout,
+          debug,
+          json,
+        });
+      }
+
+      case "proxy": {
+        return await handleProxyCommand({
+          store,
+          positionals: parsed.positionals,
+          optionValues: parsed.optionValues,
+          flags: parsed.flags,
+          stdout: streams.stdout,
+          debug,
+          json,
+          proxyProcessManager,
+          debugLog,
         });
       }
 
@@ -569,7 +639,9 @@ export async function runCli(
           positionals: parsed.positionals,
           store,
           desktopLauncher,
+          daemonProcessManager,
           watchProcessManager,
+          proxyProcessManager,
           streams,
           runCodexCli,
           debugLog,
@@ -586,10 +658,69 @@ export async function runCli(
           throw new Error(`Usage: ${getUsage("run")}`);
         }
         const isolatedAccountName = parsed.optionValues.get("--account") ?? null;
+        const proxyMode = parsed.flags.has("--proxy");
+        if (proxyMode && isolatedAccountName) {
+          throw new Error(`Usage: ${getUsage("run")}`);
+        }
         if (isolatedAccountName) {
           ensureAccountName(isolatedAccountName);
         }
         const codexArgs = parsed.passthrough;
+        if (proxyMode) {
+          const [savedProxyState, proxyStatus] = await Promise.all([
+            readProxyState(store.paths.codexTeamDir),
+            proxyProcessManager.getStatus(),
+          ]);
+          const proxyState =
+            savedProxyState?.enabled === true
+              ? proxyStatus.running && proxyStatus.state
+                ? proxyStatus.state
+                : await proxyProcessManager.startDetached({
+                    host: savedProxyState.host,
+                    port: savedProxyState.port,
+                    debug: savedProxyState.debug || debug,
+                  })
+              : await proxyProcessManager.startDetached({
+                  host: DEFAULT_PROXY_HOST,
+                  port: resolveProxyPort(),
+                  debug,
+                });
+          const preparedRun = await prepareIsolatedProxyRun({
+            backendBaseUrl: proxyState.base_url,
+            openAIBaseUrl: proxyState.openai_base_url,
+            baseEnv: process.env,
+            store,
+          });
+
+          try {
+            streams.stderr.write(
+              `[codexm run] Starting codex in isolated proxy mode through ${proxyState.base_url}...\n`,
+            );
+            if (codexArgs.length > 0) {
+              streams.stderr.write(
+                `[codexm run] codex args: ${codexArgs.join(" ")}\n`,
+              );
+            }
+            streams.stderr.write(
+              `[codexm run] CODEX_HOME is isolated for this process. It will not write local threads into the live runtime.\n\n`,
+            );
+            const result = await runCodexCli({
+              codexArgs,
+              accountId: preparedRun.account.account_id,
+              email: preparedRun.account.email,
+              authFilePath: preparedRun.authFilePath,
+              sessionsDirPath: preparedRun.sessionsDirPath,
+              env: preparedRun.env,
+              disableAuthWatch: true,
+              registerProcess: false,
+              debugLog,
+              stderr: streams.stderr,
+            });
+            return result.exitCode;
+          } finally {
+            await preparedRun.cleanup();
+          }
+        }
         if (!isolatedAccountName) {
           const currentAccount = await readCurrentRunAccountMetadata(store);
 
@@ -632,7 +763,7 @@ export async function runCli(
           baseEnv: process.env,
           store,
         });
-        const sampler = startIsolatedQuotaHistorySampler({
+        const sampler = startIsolatedQuotaHistorySamplerImpl({
           account: preparedRun.account,
           codexHomeEnv: preparedRun.env,
           pollIntervalMs: watchQuotaMinReadIntervalMs,

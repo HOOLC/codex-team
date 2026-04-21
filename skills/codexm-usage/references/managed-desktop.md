@@ -9,6 +9,7 @@
 
 - `codexm switch` always updates local auth first.
 - `codexm launch [name]` is the preferred way to make Codex Desktop use a selected account immediately.
+- `codexm launch` also ensures the shared baseline daemon is running.
 - If Desktop was started outside `codexm`, `codexm switch` only updates local auth and warns that the running Desktop session may still keep the previous login state.
 - If a non-managed Desktop session is already running, `codexm launch` asks the user to confirm a force-kill before relaunching with managed state.
 
@@ -19,17 +20,25 @@
 - `codexm switch --force` skips that wait and applies the change immediately.
 - Restarting the managed Codex app server interrupts the current managed Desktop thread.
 
+## proxy account
+
+- `codexm proxy enable` writes a synthetic ChatGPT auth, `chatgpt_base_url`, and a proxy-backed `model_provider` into the default `CODEX_HOME`; managed Desktop launched afterward sees the proxy as the current account. For `codexm`-managed Desktop and CLI entrypoints, live Responses websocket turns and REST traffic both go through the local proxy. Bare Desktop or CLI launches outside `codexm` are not forced into that path.
+- `CODEXM_PROXY_PORT=<port>` changes the shared daemon/proxy bind port for `launch`, `daemon start`, `autoswitch enable`, `proxy enable`, and `run --proxy`; use `--port` on `proxy enable` when only that invocation should differ.
+- `codexm proxy disable` restores the previous direct auth/config backup and stops the proxy daemon.
+- For one-off CLI runs that must not affect local Desktop or thread/session data, prefer `codexm run --proxy` because it creates an isolated `CODEX_HOME`.
+
 ## watch behavior
 
+- `codexm autoswitch enable` turns on daemon-backed background auto-switching for managed Desktop and proxy flows.
+- `codexm autoswitch disable` turns that feature off while leaving the baseline daemon running.
+- `codexm daemon status` shows the shared daemon pid, enabled features, and log path; `codexm daemon stop` stops the daemon and restores direct auth if proxy mode was active.
 - `codexm watch` observes managed Desktop MCP/quota signals and runs `switch --auto` after terminal quota-exhaustion signals by default.
 - `codexm watch --no-auto-switch` keeps the same quota and reconnect output without changing accounts automatically.
-- `codexm watch` prints structured quota and reconnect lines; use `--debug` if the user wants raw bridge `mcp-*` traffic and watch decision logs on stderr.
-- `codexm watch --detach` keeps the watcher running in the background.
-- `codexm watch --status` shows watcher state, pid, start time, and log path.
-- `codexm watch --stop` stops the background watcher.
+- `codexm watch` is foreground-only; it prints structured quota and reconnect lines, and `--debug` adds raw bridge `mcp-*` traffic plus watch decision logs on stderr.
 
 ## response guidance
 
 - If the user expects an already-running Desktop window to switch accounts in place, explain whether it is a managed or unmanaged Desktop session.
 - If the user mentions ongoing work in Desktop, mention the default wait behavior before suggesting `--force`.
 - If the user says "watch" but wants observation only, recommend `codexm watch --no-auto-switch`.
+- If the user wants background auto-switching without keeping a foreground watch open, recommend `codexm autoswitch enable`.

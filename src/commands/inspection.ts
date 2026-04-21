@@ -33,6 +33,11 @@ import {
   filterWatchHistoryByScope,
   type WatchHistoryEtaContext,
 } from "../watch/history.js";
+import { buildProxyQuotaAggregate } from "../proxy/quota.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
+import type { DaemonProcessManager } from "../daemon/process.js";
+import { describeDaemonFeatureLine } from "../daemon/display.js";
+import { triggerDaemonAuthRefresh } from "../daemon/trigger.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -645,10 +650,12 @@ export async function handleDoctorCommand(options: {
 
 export async function handleListCommand(options: {
   store: AccountStore;
+  daemonProcessManager: DaemonProcessManager;
   stdout: NodeJS.WriteStream;
   debugLog: DebugLogger;
   debug: boolean;
   json: boolean;
+  refresh: boolean;
   targetName?: string;
   usageWindow?: string;
   verbose: boolean;
@@ -665,8 +672,22 @@ export async function handleListCommand(options: {
     quotaClientMode: "list-fast",
     allowCachedQuotaFallback: true,
   });
+  const proxyAggregate = options.targetName
+    ? null
+    : await buildProxyQuotaAggregate({ store: options.store });
+  const proxySummary = proxyAggregate?.summary ?? null;
+  const displayResult = proxySummary
+    ? {
+        ...result,
+        successes: [proxySummary, ...result.successes],
+      }
+    : result;
   const current = await options.store.getCurrentStatus();
+  const daemonStatus = await options.daemonProcessManager.getStatus();
   const currentAccounts = new Set(current.matched_accounts);
+  if (current.account_id === PROXY_ACCOUNT_ID) {
+    currentAccounts.add(PROXY_ACCOUNT_NAME);
+  }
   const now = new Date();
   const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
   const watchHistory = filterWatchHistoryByScope(
@@ -674,13 +695,19 @@ export async function handleListCommand(options: {
     { kind: "global" },
   );
   const etaByName = new Map(
-    result.successes.map((account) => [
+    displayResult.successes.map((account) => [
       account.name,
-      computeWatchHistoryEta(watchHistory, toWatchEtaTarget(account), now),
+      computeWatchHistoryEta(
+        watchHistory,
+        account.name === PROXY_ACCOUNT_NAME && proxyAggregate
+          ? proxyAggregate.watchEtaTarget
+          : toWatchEtaTarget(account),
+        now,
+      ),
     ] as const),
   );
   options.debugLog(
-    `list: target=${options.targetName ?? "all"} usage_window=${usageWindow} successes=${result.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
+    `list: target=${options.targetName ?? "all"} usage_window=${usageWindow} successes=${displayResult.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} proxy=${proxySummary ? "yes" : "no"} watch_history_samples=${watchHistory.length}`,
   );
   const usageSummary = await new LocalUsageService({
     homeDir: options.store.paths.homeDir,
@@ -714,22 +741,47 @@ export async function handleListCommand(options: {
   }
   if (options.json) {
     writeJson(options.stdout, {
-      ...toCliQuotaRefreshResult(result),
+      ...toCliQuotaRefreshResult(displayResult),
       current,
+      daemon: {
+        running: daemonStatus.running,
+        state: daemonStatus.state,
+      },
+      proxy: proxySummary ? toCliQuotaSummary(proxySummary) : null,
       usage: usageBlock,
-      successes: result.successes.map((account) => ({
+      successes: displayResult.successes.map((account) => ({
         ...toCliQuotaSummary(account),
         is_current: currentAccounts.has(account.name),
         eta: toJsonEta(
           etaByName.get(account.name)
-            ?? computeWatchHistoryEta([], toWatchEtaTarget(account), now),
+            ?? computeWatchHistoryEta(
+              [],
+              account.name === PROXY_ACCOUNT_NAME && proxyAggregate
+                ? proxyAggregate.watchEtaTarget
+                : toWatchEtaTarget(account),
+              now,
+            ),
         ),
       })),
     });
   } else {
     options.stdout.write(
-      `${describeQuotaRefresh(result, current, { verbose: options.verbose, etaByName, usageLine })}\n`,
+      `${describeQuotaRefresh(displayResult, current, {
+        verbose: options.verbose,
+        etaByName,
+        usageLine,
+        daemonFeatureLine: describeDaemonFeatureLine(daemonStatus),
+        summaryAccounts: result.successes,
+      })}\n`,
     );
   }
+  void triggerDaemonAuthRefresh({
+    store: options.store,
+    daemonProcessManager: options.daemonProcessManager,
+    ensureDaemon: options.refresh,
+    source: options.refresh ? "list-refresh" : "list",
+  }).catch((error) => {
+    options.debugLog(`list: failed to queue background auth refresh: ${(error as Error).message}`);
+  });
   return result.failures.length === 0 ? 0 : 1;
 }

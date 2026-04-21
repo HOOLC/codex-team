@@ -153,7 +153,6 @@ export async function startTuiExternalUpdateMonitors(options: {
   let foregroundWatchPromise: Promise<number> | null = null;
   let recentSwitchTarget: { value: string | null; recordedAt: number } | null = null;
   let ownsForegroundWatchLease = false;
-  let startedForegroundWatch = false;
 
   const shouldSuppressSwitchNotice = (targetAccount: string | null): boolean =>
     recentSwitchTarget !== null &&
@@ -334,7 +333,6 @@ export async function startTuiExternalUpdateMonitors(options: {
     }
 
     ownsForegroundWatchLease = true;
-    startedForegroundWatch = true;
     foregroundWatchAbortController = new AbortController();
     const silentStream = createNullWriteStream();
 
@@ -440,24 +438,7 @@ export async function startTuiExternalUpdateMonitors(options: {
         clearInterval(foregroundWatchPollTimer);
         foregroundWatchPollTimer = null;
       }
-
-      const detachedWatchStatusBeforeStop = await getDetachedWatchStatus();
-      const shouldHandoffForegroundWatch =
-        startedForegroundWatch && !detachedWatchStatusBeforeStop.running;
-
       await stopForegroundWatch();
-
-      if (shouldHandoffForegroundWatch) {
-        const activeLease = await getActiveWatchLease();
-        if (!activeLease.active) {
-          await watchProcessManager.startDetached({
-            autoSwitch: true,
-            debug: false,
-          }).catch((error) => {
-            debugLog?.(`tui: failed to hand off to detached watch: ${(error as Error).message}`);
-          });
-        }
-      }
     },
   };
 }

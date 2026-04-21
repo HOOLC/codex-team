@@ -20,7 +20,7 @@ import {
   formatRemainingPercent,
   formatResetAt,
   formatUsagePercent,
-  isWindowUnavailable,
+  isAccountFullyUnavailable,
   normalizePlusScore,
   orderListAccounts,
   toQuotaEtaSummary,
@@ -34,6 +34,12 @@ import {
 } from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
 import type { WatchProcessManager } from "../watch/process.js";
+import { createProxyProcessManager, type ProxyProcessManager } from "../proxy/process.js";
+import {
+  cleanupStaleDaemonPortConflict,
+  createDaemonProcessManager,
+} from "../daemon/process.js";
+import { appendDaemonFeatureTags } from "../daemon/display.js";
 import type { WatchLeaseManager } from "../watch/lease.js";
 import {
   computeWatchHistoryEta,
@@ -54,12 +60,23 @@ import {
 import { performManualSwitch } from "./switch.js";
 import { getUsage } from "../cli/spec.js";
 import { type RunnerOptions, type RunnerResult } from "../codex-cli-runner.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME, PROXY_EMAIL, PROXY_USER_ID } from "../proxy/constants.js";
+import { buildProxyQuotaAggregate } from "../proxy/quota.js";
+import { readProxyState } from "../proxy/state.js";
 import {
   deleteAccountForTui,
   exportShareBundleForTui,
   importShareBundleForTui,
   previewShareBundleForTui,
 } from "./tui-share.js";
+import { enableProxyMode } from "./proxy.js";
+import {
+  disableAutoswitchMode,
+  enableAutoswitchMode,
+  readAutoswitchStatus,
+} from "./autoswitch.js";
+import type { DaemonProcessManager } from "../daemon/process.js";
+import { triggerDaemonAuthRefresh } from "../daemon/trigger.js";
 import {
   createAccountDashboardExternalUpdateFeed,
   resolveCurrentManagedAccountLabel,
@@ -79,6 +96,10 @@ function describeCurrentListStatus(
 ): string {
   if (!status.exists) {
     return "Current auth: missing";
+  }
+
+  if (status.account_id === PROXY_ACCOUNT_ID) {
+    return "Current proxy account: proxy";
   }
 
   if (status.matched_accounts.length === 0) {
@@ -187,7 +208,7 @@ function formatDateTimeWithRelative(
 
 function formatWindowResetForList(
   window: { reset_at?: string | null } | null | undefined,
-  now: Date,
+  _now: Date,
 ): string {
   if (!window?.reset_at) {
     return "-";
@@ -198,24 +219,14 @@ function formatWindowResetForList(
     return "-";
   }
 
-  if (timestamp <= now.getTime()) {
-    return "now";
-  }
-
-  return formatRelativeOffsetCompact(timestamp - now.getTime());
+  return dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
 }
 
 function formatWindowResetForDetail(
   window: { reset_at?: string | null } | null | undefined,
-  now: Date,
+  _now: Date,
 ): string {
-  if (!window?.reset_at) {
-    return "-";
-  }
-
-  const absolute = dayjs.utc(window.reset_at).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
-  const relative = formatRelativeOffsetLabel(window.reset_at, now);
-  return relative ? `${absolute} (${relative})` : absolute;
+  return formatWindowResetForList(window, _now);
 }
 
 function toQuotaSummary(account: ManagedAccount, refreshed: AccountQuotaSummary | null): AccountQuotaSummary {
@@ -247,6 +258,8 @@ function describeCurrentHeader(
 ): string {
   const currentLabel = !status.exists
     ? "missing"
+    : status.account_id === PROXY_ACCOUNT_ID
+      ? "proxy"
     : status.matched_accounts.length === 1
       ? status.matched_accounts[0]
       : status.matched_accounts.length > 1
@@ -305,28 +318,21 @@ function buildAccountDetailLines(options: {
     now,
   } = options;
   const etaSummary = toQuotaEtaSummary(eta);
-  const maskedIdentity = maskAccountId(account.identity);
   const formattedScore = colorizeScore(formatRemainingPercent(score), score);
   const formattedFiveHour = formatUsagePercent(account.five_hour);
   const formattedOneWeek = formatUsagePercent(account.one_week);
   const formattedRefresh = colorizeRefreshStatus(account.status, account.status);
   const formattedReason = colorizeReason(reasonLabel, account.status);
-  const score1h = candidate ? normalizePlusScore(candidate.score_1h) : null;
-  const projectedOneWeek1h = candidate ? normalizePlusScore(candidate.projected_1w_1h) : null;
+  const score1h = candidate ? normalizePlusScore(candidate.score_1h, account.plan_type) : null;
+  const projectedOneWeek1h = candidate ? normalizePlusScore(candidate.projected_1w_1h, account.plan_type) : null;
+  const isProxyAccount = accountMeta?.auth_mode === "proxy";
 
-  return [
+  const lines = [
     `Email: ${accountMeta?.email ?? "-"}`,
     `Auth: ${accountMeta?.auth_mode ?? "-"}`,
     `Fetched: ${formatDateTime(account.fetched_at)}`,
     `Refresh: ${formattedRefresh}`,
     `Reason: ${formattedReason}`,
-    "",
-    `Identity: ${maskedIdentity}`,
-    `Account: ${maskAccountId(account.account_id)}`,
-    `User: ${account.user_id ? maskAccountId(account.user_id) : "-"}`,
-    `Bottleneck: ${formatBottleneck(eta)}`,
-    `Joined: ${formatDateTime(accountMeta?.created_at)}`,
-    `Switched: ${formatDateTimeWithRelative(accountMeta?.last_switched_at ?? null, now)}`,
     "",
     `Score: ${formattedScore}`,
     `ETA: ${formatEtaLabel(eta)}`,
@@ -334,6 +340,27 @@ function buildAccountDetailLines(options: {
     `1W used: ${formattedOneWeek}`,
     `Next reset: ${nextResetDetailLabel}`,
     `Availability: ${availabilityLabel}`,
+  ];
+
+  if (!isProxyAccount) {
+    lines.push(
+      "",
+      `Identity: ${account.identity}`,
+      `Account: ${account.account_id}`,
+      `User: ${account.user_id ?? "-"}`,
+      `Bottleneck: ${formatBottleneck(eta)}`,
+      `Joined: ${formatDateTime(accountMeta?.created_at)}`,
+      `Switched: ${formatDateTimeWithRelative(accountMeta?.last_switched_at ?? null, now)}`,
+    );
+  } else {
+    lines.push(
+      "",
+      `Pool: auto-switch eligible accounts`,
+      `Bottleneck: ${formatBottleneck(eta)}`,
+    );
+  }
+
+  lines.push(
     "",
     `ETA 5H->1W: ${etaSummary ? formatEtaSummary({ ...etaSummary, hours: etaSummary.eta_5h_eq_1w_hours }) : "-"}`,
     `ETA 1W: ${etaSummary ? formatEtaSummary({ ...etaSummary, hours: etaSummary.eta_1w_hours }) : "-"}`,
@@ -345,49 +372,70 @@ function buildAccountDetailLines(options: {
     `5H:1W: ${candidate ? String(candidate.five_hour_to_one_week_ratio) : "-"}`,
     `5H reset: ${formatResetAt(account.five_hour)}`,
     `1W reset: ${formatResetAt(account.one_week)}`,
-  ];
+  );
+
+  return lines;
 }
 
 function buildDashboardSnapshot(options: {
   accounts: ManagedAccount[];
   current: Awaited<ReturnType<AccountStore["getCurrentStatus"]>>;
+  daemonStatus: Awaited<ReturnType<DaemonProcessManager["getStatus"]>>;
   failures: Array<{ name: string; error: string }>;
   warnings: string[];
   watchHistory: Awaited<ReturnType<ReturnType<typeof createWatchHistoryStore>["read"]>>;
   usageSummary: Awaited<ReturnType<typeof loadFreshLocalUsageSummary>> | null;
   refreshedByName?: Map<string, AccountQuotaSummary>;
+  proxySummary?: AccountQuotaSummary | null;
+  proxyAggregate?: Awaited<ReturnType<typeof buildProxyQuotaAggregate>> | null;
+  useProxyAggregate?: boolean;
   debugLog?: DebugLogger;
 }): AccountDashboardSnapshot {
   const allAccounts = options.accounts.map((account) =>
     toQuotaSummary(account, options.refreshedByName?.get(account.name) ?? null),
   );
+  const displayAccounts = options.proxySummary
+    ? [options.proxySummary, ...allAccounts]
+    : allAccounts;
+  const summaryAccounts = allAccounts;
   const now = new Date();
   const etaByName = new Map(
-    allAccounts.map((account) => [
+    displayAccounts.map((account) => [
       account.name,
-      computeWatchHistoryEta(options.watchHistory, toWatchEtaTarget(account), now),
+      computeWatchHistoryEta(
+        options.watchHistory,
+        account.name === PROXY_ACCOUNT_NAME && options.proxyAggregate
+          ? options.proxyAggregate.watchEtaTarget
+          : toWatchEtaTarget(account),
+        now,
+      ),
     ] as const),
   );
-  const showEtaColumn = allAccounts.some((account) => (
+  const showEtaColumn = displayAccounts.some((account) => (
     formatEtaLabel(etaByName.get(account.name)) !== "-"
   ));
-  const orderedAccounts = orderListAccounts(allAccounts);
+  const orderedAccounts = options.proxySummary
+    ? [options.proxySummary, ...orderListAccounts(allAccounts)]
+    : orderListAccounts(allAccounts);
   const currentAccounts = new Set(options.current.matched_accounts);
-  const { summaryLine, poolLine } = buildListSummary(allAccounts);
-  const latestFetchedAt = allAccounts
+  if (options.current.account_id === PROXY_ACCOUNT_ID) {
+    currentAccounts.add(PROXY_ACCOUNT_NAME);
+  }
+  const { summaryLine, poolLine } = buildListSummary(summaryAccounts);
+  const latestFetchedAt = displayAccounts
     .map((account) => account.fetched_at)
     .filter((value): value is string => typeof value === "string")
     .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
-  const usableCount = allAccounts.filter((account) => deriveAvailability(account) === "available").length;
+  const usableCount = summaryAccounts.filter((account) => deriveAvailability(account) === "available").length;
   const accountMetaByName = new Map(options.accounts.map((account) => [account.name, account] as const));
 
   options.debugLog?.(
-    `tui: accounts=${allAccounts.length} failures=${options.failures.length} warnings=${options.warnings.length} current_matches=${options.current.matched_accounts.length} watch_history_samples=${options.watchHistory.length}`,
+    `tui: accounts=${displayAccounts.length} proxy=${options.proxySummary ? "yes" : "no"} failures=${options.failures.length} warnings=${options.warnings.length} current_matches=${options.current.matched_accounts.length} watch_history_samples=${options.watchHistory.length}`,
   );
 
   return {
-    headerLine: describeCurrentHeader(options.current, usableCount, allAccounts.length, latestFetchedAt),
-    currentStatusLine: describeCurrentListStatus(options.current),
+    headerLine: describeCurrentHeader(options.current, usableCount, summaryAccounts.length, latestFetchedAt),
+    currentStatusLine: appendDaemonFeatureTags(describeCurrentListStatus(options.current), options.daemonStatus),
     summaryLine,
     poolLine,
     usageSummary: options.usageSummary,
@@ -397,19 +445,42 @@ function buildDashboardSnapshot(options: {
     accounts: orderedAccounts.map((account) => {
       const candidate = toAutoSwitchCandidate(account);
       const eta = etaByName.get(account.name);
-      const score = candidate ? normalizePlusScore(candidate.current_score) : null;
+      const score = candidate ? normalizePlusScore(candidate.current_score, account.plan_type) : null;
       const nextResetWindow = candidate ? selectCurrentNextResetWindow(account, candidate) : null;
       const nextResetLabel = formatWindowResetForList(nextResetWindow, now);
       const nextResetDetailLabel = formatWindowResetForDetail(nextResetWindow, now);
       const availabilityLabel = deriveAvailability(account);
       const reasonLabel = buildReasonLabel(account, eta);
       const accountMeta = accountMetaByName.get(account.name);
+      const isProxyAccount =
+        account.name === PROXY_ACCOUNT_NAME && account.account_id === PROXY_ACCOUNT_ID;
+      const accountMetaForDetail = accountMeta ?? (isProxyAccount
+        ? {
+            name: PROXY_ACCOUNT_NAME,
+            auth_mode: "proxy",
+            account_id: PROXY_ACCOUNT_ID,
+            user_id: PROXY_USER_ID,
+            identity: account.identity,
+            email: PROXY_EMAIL,
+            created_at: "",
+            updated_at: "",
+            last_switched_at: null,
+            quota: {
+              status: account.status,
+            },
+            authPath: "",
+            metaPath: "",
+            configPath: null,
+            duplicateAccountId: false,
+            auto_switch_eligible: true,
+          } satisfies ManagedAccount
+        : undefined);
 
       return {
         name: account.name,
         autoSwitchEligible: account.auto_switch_eligible ?? true,
-        planLabel: account.plan_type ?? "-",
-        identityLabel: maskAccountId(account.identity),
+        planLabel: isProxyAccount ? "" : (account.plan_type ?? "-"),
+        identityLabel: isProxyAccount ? "" : maskAccountId(account.identity),
         availabilityLabel,
         current: currentAccounts.has(account.name),
         score,
@@ -418,20 +489,20 @@ function buildDashboardSnapshot(options: {
         nextResetLabel,
         fiveHourLabel: formatUsagePercent(account.five_hour),
         oneWeekLabel: formatUsagePercent(account.one_week),
-        authModeLabel: accountMeta?.auth_mode ?? "-",
-        emailLabel: accountMeta?.email ?? "-",
+        authModeLabel: accountMetaForDetail?.auth_mode ?? "-",
+        emailLabel: accountMetaForDetail?.email ?? "-",
         accountIdLabel: maskAccountId(account.account_id),
         userIdLabel: account.user_id ? maskAccountId(account.user_id) : "-",
-        joinedAtLabel: formatDateTime(accountMeta?.created_at),
-        lastSwitchedAtLabel: formatDateTime(accountMeta?.last_switched_at ?? null),
+        joinedAtLabel: formatDateTime(accountMetaForDetail?.created_at),
+        lastSwitchedAtLabel: formatDateTime(accountMetaForDetail?.last_switched_at ?? null),
         fetchedAtLabel: formatDateTime(account.fetched_at),
         refreshStatusLabel: account.status,
         bottleneckLabel: formatBottleneck(eta),
         reasonLabel,
-        oneWeekBlocked: isWindowUnavailable(account.one_week),
+        oneWeekBlocked: isAccountFullyUnavailable(account),
         detailLines: buildAccountDetailLines({
           account,
-          accountMeta,
+          accountMeta: accountMetaForDetail,
           availabilityLabel,
           score,
           eta,
@@ -447,45 +518,89 @@ function buildDashboardSnapshot(options: {
 
 export async function buildAccountDashboardSnapshot(options: {
   store: AccountStore;
+  daemonProcessManager?: DaemonProcessManager;
   debugLog?: DebugLogger;
 }): Promise<AccountDashboardSnapshot> {
+  const daemonProcessManager =
+    options.daemonProcessManager ?? createDaemonProcessManager(options.store.paths.codexTeamDir);
+  void triggerDaemonAuthRefresh({
+    store: options.store,
+    daemonProcessManager,
+    ensureDaemon: false,
+    source: "tui-refresh",
+  }).catch((error) => {
+    options.debugLog?.(`tui: failed to queue background auth refresh: ${(error as Error).message}`);
+  });
   const result = await options.store.refreshAllQuotas(undefined, {
     quotaClientMode: "list-fast",
     allowCachedQuotaFallback: true,
   });
   const { accounts, warnings: accountWarnings } = await options.store.listAccounts();
   const current = await options.store.getCurrentStatus();
+  const daemonStatus = await daemonProcessManager.getStatus();
   const watchHistory = await readWatchHistory(options.store, new Date());
   const usageSummary = await loadFreshLocalUsageSummary(options.store);
   const refreshedByName = new Map(result.successes.map((account) => [account.name, account] as const));
+  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
+  const proxyAggregate = await buildProxyQuotaAggregate({
+    store: options.store,
+    includeWhenDisabled: true,
+  });
   return buildDashboardSnapshot({
     accounts,
     current,
+    daemonStatus,
     failures: result.failures,
     warnings: [...accountWarnings, ...result.warnings],
     watchHistory,
     usageSummary,
     refreshedByName,
+    proxySummary: proxyAggregate?.summary ?? null,
+    proxyAggregate,
+    useProxyAggregate: proxyAggregate !== null
+      && (proxyState?.enabled === true || current.account_id === PROXY_ACCOUNT_ID),
     debugLog: options.debugLog,
   });
 }
 
 export async function buildCachedAccountDashboardSnapshot(options: {
   store: AccountStore;
+  daemonProcessManager?: DaemonProcessManager;
   debugLog?: DebugLogger;
 }): Promise<AccountDashboardSnapshot> {
+  const daemonProcessManager =
+    options.daemonProcessManager ?? createDaemonProcessManager(options.store.paths.codexTeamDir);
+  void triggerDaemonAuthRefresh({
+    store: options.store,
+    daemonProcessManager,
+    ensureDaemon: false,
+    source: "tui-open",
+  }).catch((error) => {
+    options.debugLog?.(`tui: failed to queue background auth refresh: ${(error as Error).message}`);
+  });
   const { accounts, warnings } = await options.store.listAccounts();
   const current = await options.store.getCurrentStatus();
+  const daemonStatus = await daemonProcessManager.getStatus();
   const watchHistory = await readWatchHistory(options.store, new Date());
   const usageSummary = await loadCachedLocalUsageSummary(options.store);
+  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
+  const proxyAggregate = await buildProxyQuotaAggregate({
+    store: options.store,
+    includeWhenDisabled: true,
+  });
 
   return buildDashboardSnapshot({
     accounts,
     current,
+    daemonStatus,
     failures: [],
     warnings,
     watchHistory,
     usageSummary,
+    proxySummary: proxyAggregate?.summary ?? null,
+    proxyAggregate,
+    useProxyAggregate: proxyAggregate !== null
+      && (proxyState?.enabled === true || current.account_id === PROXY_ACCOUNT_ID),
     debugLog: options.debugLog,
   });
 }
@@ -494,7 +609,9 @@ export async function handleTuiCommand(options: {
   positionals: string[];
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
+  daemonProcessManager?: DaemonProcessManager;
   watchProcessManager: WatchProcessManager;
+  proxyProcessManager?: ProxyProcessManager;
   watchLeaseManager?: WatchLeaseManager;
   streams: CliStreams;
   runCodexCli: (options: RunnerOptions) => Promise<RunnerResult>;
@@ -520,6 +637,10 @@ export async function handleTuiCommand(options: {
   }
 
   const runDashboardTuiImpl = options.runDashboardTuiImpl ?? runAccountDashboardTui;
+  const daemonProcessManager =
+    options.daemonProcessManager ?? createDaemonProcessManager(options.store.paths.codexTeamDir);
+  const proxyProcessManager =
+    options.proxyProcessManager ?? createProxyProcessManager(options.store.paths.codexTeamDir);
   let nextInitialQuery = initialQuery;
   let queuedExternalUpdate: AccountDashboardExternalUpdate | null = null;
 
@@ -527,6 +648,7 @@ export async function handleTuiCommand(options: {
     const silentStatusStream = new PassThrough() as unknown as NodeJS.WriteStream;
     const initialSnapshot = await buildCachedAccountDashboardSnapshot({
       store: options.store,
+      daemonProcessManager,
       debugLog: options.debugLog,
     });
     const externalUpdateFeed = createAccountDashboardExternalUpdateFeed();
@@ -565,11 +687,35 @@ export async function handleTuiCommand(options: {
         subscribeExternalUpdates: externalUpdateFeed.subscribe,
         loadSnapshot: async () => await buildAccountDashboardSnapshot({
           store: options.store,
+          daemonProcessManager,
           debugLog: options.debugLog,
         }),
+        triggerBackgroundRefresh: async (refreshOptions) => {
+          await triggerDaemonAuthRefresh({
+            store: options.store,
+            daemonProcessManager,
+            ensureDaemon: refreshOptions.ensureDaemon,
+            source: refreshOptions.source,
+          });
+        },
+        cleanupStaleDaemonProcess: async (conflict) => {
+          await cleanupStaleDaemonPortConflict(conflict);
+        },
         switchAccount: async (name, switchOptions) => {
           localSwitchInFlightRef.value = true;
           try {
+            if (name === PROXY_ACCOUNT_NAME) {
+              await enableProxyMode({
+                store: options.store,
+                proxyProcessManager,
+                debug: false,
+              });
+              currentManagedAccountRef.value = PROXY_ACCOUNT_NAME;
+              return {
+                statusMessage: 'Switched to "proxy".',
+                warningMessages: [],
+              };
+            }
             const { result, desktopForceWarning } = await performManualSwitch({
               name,
               force: switchOptions.force,
@@ -678,6 +824,31 @@ export async function handleTuiCommand(options: {
               ? `Removed auto-switch protection from "${account.name}".`
               : `Protected "${account.name}" from auto-switch target selection.`,
             preferredName: account.name,
+          };
+        },
+        toggleAutoswitch: async () => {
+          const status = await readAutoswitchStatus({
+            daemonProcessManager,
+          });
+          if (status.enabled) {
+            await disableAutoswitchMode({
+              store: options.store,
+              daemonProcessManager,
+            });
+            return {
+              statusMessage: "Disabled autoswitch.",
+              preferredName: null,
+            };
+          }
+
+          await enableAutoswitchMode({
+            store: options.store,
+            daemonProcessManager,
+            debug: false,
+          });
+          return {
+            statusMessage: "Enabled autoswitch.",
+            preferredName: null,
           };
         },
       });

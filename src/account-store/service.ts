@@ -11,6 +11,7 @@ import {
   QuotaSnapshot,
   getSnapshotAccountId,
   getSnapshotIdentity,
+  getSnapshotTokenExpiresAt,
   getSnapshotUserId,
   parseAuthSnapshot,
   parseSnapshotMeta,
@@ -46,8 +47,10 @@ import type {
 import {
   extractChatGPTAuth,
   fetchQuotaSnapshot,
+  refreshChatGPTAuthTokens,
   type QuotaClientMode,
 } from "../quota-client.js";
+import { appendEventLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
 export type {
   AccountQuotaSummary,
   CurrentAccountStatus,
@@ -60,7 +63,7 @@ export type {
   UpdateAccountResult,
 } from "./types.js";
 
-const LIST_CACHED_QUOTA_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const LIST_CACHED_QUOTA_MAX_AGE_MS = Number.POSITIVE_INFINITY;
 
 interface RefreshQuotaOptions {
   quotaClientMode?: QuotaClientMode;
@@ -70,6 +73,12 @@ interface RefreshQuotaOptions {
 
 function isFiniteTimestamp(value: string | undefined): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function hasQuotaWindowSnapshot(
+  window: QuotaSnapshot["five_hour"] | QuotaSnapshot["one_week"],
+): boolean {
+  return typeof window?.used_percent === "number" && typeof window.window_seconds === "number";
 }
 
 export class AccountStore {
@@ -128,11 +137,15 @@ export class AccountStore {
   ): { quota: QuotaSnapshot; warning: string } | null {
     const cachedQuota = account.quota;
     const cachedFetchedAt = cachedQuota.fetched_at;
-    if (cachedQuota.status === "error" || !isFiniteTimestamp(cachedFetchedAt)) {
+    if (
+      !isFiniteTimestamp(cachedFetchedAt) ||
+      (!hasQuotaWindowSnapshot(cachedQuota.five_hour) &&
+        !hasQuotaWindowSnapshot(cachedQuota.one_week))
+    ) {
       return null;
     }
     const cachedFetchedAtMs = Date.parse(cachedFetchedAt);
-    if (now.getTime() - cachedFetchedAtMs > maxAgeMs) {
+    if (Number.isFinite(maxAgeMs) && now.getTime() - cachedFetchedAtMs > maxAgeMs) {
       return null;
     }
 
@@ -477,7 +490,6 @@ export class AccountStore {
 
     try {
       const result = await fetchQuotaSnapshot(snapshot, {
-        homeDir: this.paths.homeDir,
         fetchImpl: this.fetchImpl,
         now,
         mode: options.quotaClientMode,
@@ -510,8 +522,22 @@ export class AccountStore {
           options.cachedQuotaMaxAgeMs ?? LIST_CACHED_QUOTA_MAX_AGE_MS,
         );
         if (fallback) {
+          meta.updated_at = now.toISOString();
+          meta.quota = fallback.quota;
+          await this.repository.writeAccountMeta(name, meta);
+          await appendEventLog(this.paths.codexTeamDir, buildEventPayload({
+            component: "quota",
+            event: "quota.refresh.used_stale_snapshot",
+            trigger: "cli",
+            level: "warn",
+            fields: {
+              account_name: account.name,
+              cached_fetched_at: account.quota.fetched_at ?? null,
+              error: shortenErrorMessage(refreshError.message),
+            },
+          }));
           return {
-            account,
+            account: await this.repository.readManagedAccount(name),
             quota: fallback.quota,
             warning: fallback.warning,
           };
@@ -536,6 +562,72 @@ export class AccountStore {
       };
       await this.repository.writeAccountMeta(name, meta);
       throw new Error(`Failed to refresh quota for "${name}": ${refreshError.message}`);
+    }
+  }
+
+  async refreshAuthForAccount(
+    name: string,
+    options: {
+      now?: Date;
+    } = {},
+  ): Promise<{
+    account: ManagedAccount;
+    authSnapshot: AuthSnapshot;
+    expires_at: string | null;
+  }> {
+    ensureAccountName(name);
+    await this.repository.ensureLayout();
+
+    const account = await this.repository.readManagedAccount(name);
+    const meta = parseSnapshotMeta(await readJsonFile(account.metaPath));
+    const snapshot = await readAuthSnapshotFile(account.authPath);
+    const now = options.now ?? new Date();
+
+    if (snapshot.auth_mode !== "chatgpt") {
+      meta.last_auth_refresh_at = now.toISOString();
+      meta.last_auth_refresh_status = "skipped";
+      meta.last_auth_refresh_error = "auth refresh is only supported for chatgpt auth.";
+      meta.auth_refresh_fail_count = 0;
+      meta.updated_at = now.toISOString();
+      await this.repository.writeAccountMeta(name, meta);
+      return {
+        account: await this.repository.readManagedAccount(name),
+        authSnapshot: snapshot,
+        expires_at: getSnapshotTokenExpiresAt(snapshot),
+      };
+    }
+
+    try {
+      const refreshedSnapshot = await refreshChatGPTAuthTokens(snapshot, {
+        fetchImpl: this.fetchImpl,
+        now,
+      });
+      await this.repository.writeAccountAuthSnapshot(name, refreshedSnapshot);
+      await this.repository.syncCurrentAuthIfMatching(refreshedSnapshot);
+
+      meta.auth_mode = refreshedSnapshot.auth_mode;
+      meta.account_id = getSnapshotAccountId(refreshedSnapshot);
+      meta.user_id = getSnapshotUserId(refreshedSnapshot);
+      meta.updated_at = now.toISOString();
+      meta.last_auth_refresh_at = now.toISOString();
+      meta.last_auth_refresh_status = "ok";
+      meta.last_auth_refresh_error = null;
+      meta.auth_refresh_fail_count = 0;
+      await this.repository.writeAccountMeta(name, meta);
+
+      return {
+        account: await this.repository.readManagedAccount(name),
+        authSnapshot: refreshedSnapshot,
+        expires_at: getSnapshotTokenExpiresAt(refreshedSnapshot),
+      };
+    } catch (error) {
+      meta.updated_at = now.toISOString();
+      meta.last_auth_refresh_at = now.toISOString();
+      meta.last_auth_refresh_status = "error";
+      meta.last_auth_refresh_error = (error as Error).message;
+      meta.auth_refresh_fail_count = (meta.auth_refresh_fail_count ?? 0) + 1;
+      await this.repository.writeAccountMeta(name, meta);
+      throw error;
     }
   }
 

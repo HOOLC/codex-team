@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -22,6 +22,7 @@ import {
 } from "./test-helpers.js";
 import {
   captureWritable,
+  createDaemonProcessManagerStub,
   createDesktopLauncherStub,
 } from "./cli-fixtures.js";
 
@@ -181,13 +182,17 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm --version");
     expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
     expect(output).toContain("codexm doctor [--json]");
-    expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
+    expect(output).toContain("codexm list [name] [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]");
+    expect(output).toContain("codexm launch [name] [--auto] [--json]");
+    expect(output).toContain("codexm daemon <start|status|stop> [--json]");
+    expect(output).toContain("codexm autoswitch <enable|disable|status> [--json]");
     expect(output).toContain("codexm protect <name> [--json]");
     expect(output).toContain("codexm unprotect <name> [--json]");
     expect(output).toContain("codexm overlay <create|delete|gc> ...");
-    expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    expect(output).toContain("codexm watch [--no-auto-switch]");
+    expect(output).toContain("codexm proxy <enable|disable|status|stop> [--json]");
     expect(output).toContain("codexm tui [query]");
-    expect(output).toContain("codexm run [--account <name>] [-- ...codexArgs]");
+    expect(output).toContain("codexm run [--account <name>|--proxy] [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(output).toContain("Command aliases: ls=list");
@@ -272,6 +277,9 @@ describe("CLI Read Commands", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        startIsolatedQuotaHistorySamplerImpl: () => ({
+          stop: async () => undefined,
+        }),
         runCodexCli: async (options) => {
           isolatedCodexHome = options.env?.CODEX_HOME ?? "";
           runnerOptions = {
@@ -377,7 +385,8 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("-v");
       expect(script).toContain("run");
       expect(script).toContain("--with-api-key");
-      expect(script).toContain("--detach");
+      expect(script).toContain("autoswitch");
+      expect(script).not.toContain("--detach");
       expect(script).toContain("run");
       expect(stderr.read()).toBe("");
     } finally {
@@ -1180,6 +1189,96 @@ wire_api = "responses"
     }
   });
 
+  test("list --refresh returns quickly and enqueues a daemon auth refresh", async () => {
+    const homeDir = await createTempHome();
+    let ensureConfigArgs: Record<string, unknown> | null = null;
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-list-refresh");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 12,
+                limit_window_seconds: 18_000,
+                reset_at: Math.floor(Date.parse("2026-04-18T05:00:00.000Z") / 1000),
+              },
+              secondary_window: {
+                used_percent: 34,
+                limit_window_seconds: 604_800,
+                reset_at: Math.floor(Date.parse("2026-04-25T00:00:00.000Z") / 1000),
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: true,
+              balance: "0",
+            },
+          }),
+      });
+      await store.saveCurrentAccount("refresh-main");
+
+      const exitCode = await runCli(["list", "--refresh"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+          ensureConfig: async (config) => {
+            ensureConfigArgs = config;
+            return {
+              action: "started",
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:00:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: false,
+                auto_switch: false,
+                proxy: false,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: false,
+              },
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      let requestFiles: string[] = [];
+      const requestsDir = join(homeDir, ".codex-team", "daemon-requests");
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        requestFiles = await readdir(requestsDir)
+          .then((entries) => entries.filter((entry) => entry.endsWith(".json") && !entry.startsWith(".")))
+          .catch(() => []);
+        if (requestFiles.length > 0) {
+          break;
+        }
+      }
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: false,
+      });
+      expect(requestFiles).toHaveLength(1);
+      const request = await readFile(join(requestsDir, requestFiles[0] ?? ""), "utf8");
+      expect(request).toContain('"type":"auth-refresh-now"');
+      expect(request).toContain('"source":"list-refresh"');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("marks the current account in list text output while keeping the table aligned", async () => {
     const homeDir = await createTempHome();
 
@@ -1261,8 +1360,9 @@ wire_api = "responses"
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
-      expect(lines[1]).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x2");
-      expect(lines[2]).toBe("Available: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
+      expect(lines[1]).toBe("Daemon: off | Proxy: off | Autoswitch: off");
+      expect(lines[2]).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x2");
+      expect(lines[3]).toBe("Available: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
       expect(output).not.toContain("CREDITS");
       expect(output).not.toContain("AVAILABLE");
       expect(output).toContain("ETA");
@@ -1589,7 +1689,7 @@ wire_api = "responses"
       expect(listCode).toBe(0);
 
       const output = listStdout.read();
-      expect(output).toContain("\u001b[30m\u001b[41m* quota-weekly-blocked");
+      expect(output).not.toContain("\u001b[30m\u001b[41m* quota-weekly-blocked");
       expect(output).not.toContain("\u001b[30m\u001b[41m  quota-five-hour-blocked");
       expect(output).toContain("\u001b[1m\u001b[93m85%\u001b[0m");
       expect(output).toContain("\u001b[1m\u001b[93m15%\u001b[0m");
@@ -1732,6 +1832,116 @@ wire_api = "responses"
 
       expect(dataRows[0]).toContain("* weekly-bottleneck-sooner");
       expect(dataRows[1]).toContain("five-hour-bottleneck-later");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output keeps stale tags and decimal used columns aligned", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const saveStore = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: accountId === "acct-cli-decimal" ? 64.6 : 100,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 300,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: accountId === "acct-cli-decimal" ? 27.4 : 88,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-decimal");
+      await runCli(["save", "quota-decimal", "--json"], {
+        store: saveStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-integer");
+      await runCli(["save", "quota-integer", "--json"], {
+        store: saveStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await runCli(["list"], {
+        store: saveStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStore = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          throw new Error("network down");
+        },
+      });
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store: listStore,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const output = listStdout.read();
+      expect(output).toContain("quota-decimal [stale]");
+      expect(output).toContain("64.6%");
+      expect(output).toContain("27.4%");
+      expect(output).toContain('Warning: quota-decimal using cached quota from');
+      expect(output).toContain('Warning: quota-integer using cached quota from');
+
+      const plainOutput = output.replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const headerTopIndex =
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+          ? tableStartIndex - 1
+          : tableStartIndex;
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 5);
+      const decimalRow = tableLines.find((line) => line.includes("quota-decimal [stale]"));
+      const integerRow = tableLines.find((line) => line.includes("quota-integer [stale]"));
+
+      expect(decimalRow).toBeDefined();
+      expect(integerRow).toBeDefined();
+
+      const used5hColumn = tableLines[1]?.indexOf("5H") ?? -1;
+      const used1wColumn = tableLines[1]?.indexOf("1W") ?? -1;
+      expect(
+        new Set([
+          labelEnd(decimalRow ?? "", "64.6%", used5hColumn),
+          labelEnd(integerRow ?? "", "100%", used5hColumn),
+        ]).size,
+      ).toBe(1);
+      expect(
+        new Set([
+          labelEnd(decimalRow ?? "", "27.4%", used1wColumn),
+          labelEnd(integerRow ?? "", "88%", used1wColumn),
+        ]).size,
+      ).toBe(1);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1976,8 +2186,9 @@ wire_api = "responses"
       expect(output).toContain("1W RESET AT");
       expect(output).toContain("quota-plus");
       expect(output).toContain("quota-team");
-      expect(output).toContain("600%");
-      expect(output).toContain("1000%");
+      expect(output).toContain("60%");
+      expect(output).not.toContain("600%");
+      expect(output).not.toContain("1000%");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2146,8 +2357,9 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
 
-      expect(lines[1]).toBe("Accounts: 1/3 usable | blocked: 1W 2, 5H 0 | plus x2, team x1");
-      expect(lines[2]).toBe("Available: bottleneck 0.12 | 5H->1W 0.12 | 1W 0.7 (plus 1W)");
+      expect(lines[1]).toBe("Daemon: off | Proxy: off | Autoswitch: off");
+      expect(lines[2]).toBe("Accounts: 1/3 usable | blocked: 1W 2, 5H 0 | plus x2, team x1");
+      expect(lines[3]).toBe("Available: bottleneck 0.12 | 5H->1W 0.12 | 1W 0.7 (plus 1W)");
       expect(plainOutput).toContain("blocked-team");
       expect(plainOutput).toContain("blocked-plus");
     } finally {

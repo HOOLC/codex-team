@@ -1,5 +1,7 @@
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { SpawnOptions } from "node:child_process";
 
 import { describe, expect, test } from "@rstest/core";
 
@@ -7,6 +9,7 @@ import {
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
   createCodexDesktopLauncher,
 } from "../src/desktop/launcher.js";
+import { launchManagedDesktopProcess } from "../src/desktop/process.js";
 import { cleanupTempHome, createTempHome } from "./test-helpers.js";
 
 describe("codex-desktop-launch", () => {
@@ -57,6 +60,51 @@ describe("codex-desktop-launch", () => {
     } finally {
       await cleanupTempHome(homeDir);
     }
+  });
+
+  test("launches managed Desktop through open so app updates can relaunch cleanly", async () => {
+    let spawnFile = "";
+    let spawnArgs: string[] = [];
+    let spawnOptions: { detached?: boolean; stdio?: string } | null = null;
+    let unrefCalled = false;
+
+    await launchManagedDesktopProcess(
+      {
+        appPath: "/Applications/Codex.app",
+        binaryPath: "/Applications/Codex.app/Contents/MacOS/Codex",
+        args: [`--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`],
+      },
+      ((file: string, args: readonly string[] = [], options: SpawnOptions = {}) => {
+        spawnFile = file;
+        spawnArgs = [...args];
+        spawnOptions = {
+          detached: options.detached,
+          stdio: typeof options.stdio === "string" ? options.stdio : undefined,
+        };
+
+        const child = new EventEmitter() as EventEmitter & { unref(): void };
+        child.unref = () => {
+          unrefCalled = true;
+        };
+        queueMicrotask(() => {
+          child.emit("spawn");
+        });
+        return child as never;
+      }) as never,
+    );
+
+    expect(spawnFile).toBe("open");
+    expect(spawnArgs).toEqual([
+      "-na",
+      "/Applications/Codex.app",
+      "--args",
+      `--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`,
+    ]);
+    expect(spawnOptions).toEqual({
+      detached: true,
+      stdio: "ignore",
+    });
+    expect(unrefCalled).toBe(true);
   });
 
   test("lists running Codex Desktop processes from ps output", async () => {

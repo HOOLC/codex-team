@@ -10,6 +10,7 @@ import {
   type AccountDashboardExternalUpdate,
   type AccountDashboardSnapshot,
 } from "../src/tui/index.js";
+import { StaleDaemonProcessError } from "../src/daemon/process.js";
 import { setPlatformForTesting } from "../src/platform.js";
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
@@ -301,11 +302,10 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("5H");
     expect(screen).toContain("1W");
     expect(screen).toContain("NEXT RESET");
-    expect(screen).toContain(">* beta [P]");
+    expect(screen).toContain("beta [stale");
     expect(screen).toContain("alpha");
     expect(screen).toContain("Email: beta@example.com");
     expect(screen).toContain("beta [current] [protected]");
-    expect(screen).toContain("Joined: 2026-03-20 09:00");
     expect(screen).toContain("Fetched: 2026-04-16 13:20");
     expect(screen).toContain("Bottleneck: 5H");
     expect(screen).toContain("filter:");
@@ -313,7 +313,199 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("o run");
     expect(screen).toContain("D rel");
     expect(screen).toContain("e/E exp");
-    expect(screen).toContain("q quit");
+  });
+
+  test("keeps wide header columns aligned with account rows", () => {
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot: createSnapshot("alpha"),
+        state: createInitialAccountDashboardState(),
+        width: 120,
+        height: 28,
+      }),
+    );
+    const lines = screen.split("\n");
+    const headerLine = lines.find((line) => line.includes("NAME") && line.includes("IDENTITY"));
+    const alphaRow = lines.find((line) => line.includes(">* alpha"));
+
+    expect(headerLine).toBeDefined();
+    expect(alphaRow).toBeDefined();
+    expect(headerLine?.indexOf("NAME")).toBe(alphaRow?.indexOf("alpha"));
+  });
+
+  test("centers the USED group label over 5H and 1W", () => {
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot: createSnapshot("alpha"),
+        state: createInitialAccountDashboardState(),
+        width: 120,
+        height: 28,
+      }),
+    );
+    const lines = screen.split("\n");
+    const usedLine = lines.find((line) => line.includes("USED") && !line.includes("Usage:"));
+    const headerLine = lines.find(
+      (line) => line.includes("NEXT RESET") && line.includes("5H") && line.includes("1W"),
+    );
+
+    expect(usedLine).toBeDefined();
+    expect(headerLine).toBeDefined();
+    const usedStart = usedLine?.indexOf("USED") ?? -1;
+    const fiveHourStart = headerLine?.indexOf("5H") ?? -1;
+    const oneWeekStart = headerLine?.indexOf("1W", Math.max(0, fiveHourStart + 1)) ?? -1;
+
+    expect(usedStart).toBeGreaterThanOrEqual(0);
+    expect(fiveHourStart).toBeGreaterThanOrEqual(0);
+    expect(oneWeekStart).toBeGreaterThanOrEqual(0);
+    expect(Math.abs((usedStart + 1.5) - (((fiveHourStart + 0.5) + (oneWeekStart + 0.5)) / 2))).toBeLessThanOrEqual(1);
+  });
+
+  test("keeps 0% score visible on an unselected fully exhausted row", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.accounts[2] = {
+      ...snapshot.accounts[2]!,
+      scoreLabel: "\u001B[1m\u001B[31m0%\u001B[0m",
+      fiveHourLabel: "\u001B[1m\u001B[31m100%\u001B[0m",
+      oneWeekLabel: "\u001B[1m\u001B[31m100%\u001B[0m",
+    };
+    const screen = renderAccountDashboardScreen({
+      snapshot,
+      state: {
+        ...createInitialAccountDashboardState(),
+        selected: 0,
+      },
+      width: 120,
+      height: 28,
+    });
+
+    expect(screen).toContain("\u001B[30m\u001B[41m   gamma");
+    expect(screen).not.toContain("\u001B[1m\u001B[31m0%\u001B[0m");
+    const blockedRow = stripAnsi(screen).split("\n").find((line) => line.includes("gamma"));
+    expect(blockedRow).toBeDefined();
+    expect(blockedRow ?? "").toContain("gamma");
+    expect(blockedRow ?? "").toContain("0%");
+    expect(blockedRow ?? "").toContain("100%");
+  });
+
+  test("renders proxy rows without plan or identity and keeps decimal used labels visible", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.accounts.unshift({
+      name: "proxy",
+      planLabel: "",
+      identityLabel: "",
+      availabilityLabel: "available",
+      current: false,
+      autoSwitchEligible: true,
+        score: 73.4,
+        scoreLabel: "73.4%",
+        etaLabel: "1.2h",
+        nextResetLabel: "04-16 18:10",
+        fiveHourLabel: "64.6%",
+        oneWeekLabel: "100.0%",
+        authModeLabel: "proxy",
+        emailLabel: "proxy@codexm.local",
+        accountIdLabel: "-",
+      userIdLabel: "-",
+      joinedAtLabel: "-",
+      lastSwitchedAtLabel: "-",
+      fetchedAtLabel: "2026-04-16 13:20",
+      refreshStatusLabel: "stale",
+      bottleneckLabel: "5H",
+      reasonLabel: "cached quota after refresh failure",
+      oneWeekBlocked: false,
+      detailLines: [
+        "Email: proxy@codexm.local",
+        "Auth: proxy",
+        "Fetched: 2026-04-16 13:20",
+        "Refresh: stale",
+        "Reason: cached quota after refresh failure",
+        "",
+        "Pool: auto-switch eligible accounts",
+        "Bottleneck: 5H",
+        "",
+        "Score: 73.4%",
+        "ETA: 1.2h",
+        "5H used: 64.6%",
+        "1W used: 100.0%",
+        "Next reset: 04-16 18:10",
+      ],
+    });
+
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot,
+        state: createInitialAccountDashboardState(),
+        width: 120,
+        height: 28,
+      }),
+    );
+    const proxyRow = screen.split("\n").find((line) => line.includes("proxy [stale]"));
+
+    expect(proxyRow).toBeDefined();
+    expect(proxyRow).not.toContain(" pro ");
+    expect(screen).toContain("64.6%");
+    expect(screen).toContain("100.0%");
+    expect(screen).toContain("Pool: auto-switch eligible accounts");
+    expect(screen).not.toContain("Identity: proxy");
+    expect(screen).not.toContain("p prot");
+  });
+
+  test("caps list name growth on wide terminals and leaves extra width to the detail pane", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.accounts[0] = {
+      ...snapshot.accounts[0]!,
+      name: "very-long-account-name-that-should-stop-growing-after-threshold",
+      identityLabel: "acct-very-long-user-name:user-very-long-user-name",
+      detailLines: [
+        "Email: alpha@example.com",
+        "Auth: chatgpt",
+        "Fetched: 2026-04-16 13:23",
+        "Refresh: ok",
+        "Reason: available",
+        "",
+        "Identity: acct-very-long-user-name:user-very-long-user-name",
+        "Account: acct-very-long-user-name",
+        "User: user-very-long-user-name",
+        "Bottleneck: 1W",
+        "Joined: 2026-03-18 12:30",
+        "Switched: 2026-04-16 13:24",
+        "",
+        "Score: 88%",
+        "ETA: 8.2h",
+        "5H used: 18%",
+        "1W used: 42%",
+        "Next reset: 04-16 19:30",
+      ],
+    };
+
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot,
+        state: createInitialAccountDashboardState(),
+        width: 170,
+        height: 28,
+      }),
+    );
+
+    expect(screen).toContain("very-long-account-na..");
+    expect(screen).toContain("Identity: acct-very-long-user-name:user-very-long-user-name");
+  });
+
+  test("summarizes refresh failures instead of showing the raw backend error in the status line", () => {
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot: createSnapshot("beta"),
+        state: {
+          ...createInitialAccountDashboardState(),
+          selected: 1,
+        },
+        width: 120,
+        height: 28,
+      }),
+    );
+
+    expect(screen).toContain("Refresh failures: 1 account. Showing available data.");
+    expect(screen).not.toContain('Failure: gamma: Failed to refresh quota for "gamma": 429');
   });
 
   test("toggles auto-switch protection from the dashboard with p", async () => {
@@ -352,6 +544,49 @@ describe("Account Dashboard TUI", () => {
     expect(latestDashboardFrame(stdout.read())).toContain(
       'Removed auto-switch protection from "beta".',
     );
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+  });
+
+  test("toggles autoswitch from the dashboard with a and refreshes the snapshot", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let toggleCalls = 0;
+    let loadCalls = 0;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => {
+        loadCalls += 1;
+        return createSnapshot("alpha");
+      },
+      switchAccount: async () => ({
+        statusMessage: 'Switched to "alpha".',
+        warningMessages: [],
+      }),
+      toggleAutoswitch: async () => {
+        toggleCalls += 1;
+        return {
+          statusMessage: "Enabled autoswitch.",
+          preferredName: null,
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("a");
+    await flushLoop();
+    await flushLoop();
+
+    expect(toggleCalls).toBe(1);
+    expect(loadCalls).toBeGreaterThanOrEqual(2);
+    expect(latestDashboardFrame(stdout.read())).toContain("Enabled autoswitch.");
 
     stdin.emitInput("q");
     await expect(tuiPromise).resolves.toMatchObject({
@@ -665,6 +900,168 @@ describe("Account Dashboard TUI", () => {
       action: "open-isolated-codex",
     });
     expect(switchedNames).toEqual(["beta"]);
+  });
+
+  test("treats the proxy row as a selectable target", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const switchedNames: string[] = [];
+    const proxySnapshot = createSnapshot("alpha");
+    proxySnapshot.accounts = [
+      {
+        name: "proxy",
+        planLabel: "",
+        identityLabel: "",
+        availabilityLabel: "available",
+        current: false,
+        autoSwitchEligible: true,
+        score: 92,
+        scoreLabel: "92%",
+        etaLabel: "9.1h",
+        nextResetLabel: "04-16 19:30",
+        fiveHourLabel: "8%",
+        oneWeekLabel: "12%",
+        authModeLabel: "proxy",
+        emailLabel: "proxy@codexm.local",
+        accountIdLabel: "",
+        userIdLabel: "",
+        joinedAtLabel: "-",
+        lastSwitchedAtLabel: "-",
+        fetchedAtLabel: "2026-04-16 13:23",
+        refreshStatusLabel: "ok",
+        bottleneckLabel: "1W",
+        reasonLabel: "available",
+        oneWeekBlocked: false,
+        detailLines: [
+          "Email: proxy@codexm.local",
+          "Auth: proxy",
+          "Fetched: 2026-04-16 13:23",
+          "Refresh: ok",
+          "Reason: available",
+        ],
+      },
+      ...proxySnapshot.accounts,
+    ];
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => proxySnapshot,
+      switchAccount: async (name) => {
+        switchedNames.push(name);
+        return {
+          statusMessage: `Switched to "${name}".`,
+          warningMessages: [],
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("\r");
+    await flushLoop();
+    await flushLoop();
+
+    expect(switchedNames).toEqual(["proxy"]);
+    expect(latestDashboardFrame(stdout.read())).toContain('Switched to "proxy".');
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+  });
+
+  test("confirms stale proxy cleanup and retries the proxy switch", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const cleanedPids: number[] = [];
+    const switchedNames: string[] = [];
+    const proxySnapshot = createSnapshot("alpha");
+    proxySnapshot.accounts = [
+      {
+        name: "proxy",
+        planLabel: "",
+        identityLabel: "",
+        availabilityLabel: "available",
+        current: false,
+        autoSwitchEligible: true,
+        score: 92,
+        scoreLabel: "92%",
+        etaLabel: "9.1h",
+        nextResetLabel: "04-16 19:30",
+        fiveHourLabel: "8%",
+        oneWeekLabel: "12%",
+        authModeLabel: "proxy",
+        emailLabel: "proxy@codexm.local",
+        accountIdLabel: "",
+        userIdLabel: "",
+        joinedAtLabel: "-",
+        lastSwitchedAtLabel: "-",
+        fetchedAtLabel: "2026-04-16 13:23",
+        refreshStatusLabel: "ok",
+        bottleneckLabel: "1W",
+        reasonLabel: "available",
+        oneWeekBlocked: false,
+        detailLines: [
+          "Email: proxy@codexm.local",
+          "Auth: proxy",
+          "Fetched: 2026-04-16 13:23",
+          "Refresh: ok",
+          "Reason: available",
+        ],
+      },
+      ...proxySnapshot.accounts,
+    ];
+    let firstAttempt = true;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => proxySnapshot,
+      cleanupStaleDaemonProcess: async (conflict) => {
+        cleanedPids.push(conflict.pid);
+      },
+      switchAccount: async (name) => {
+        if (name === "proxy" && firstAttempt) {
+          firstAttempt = false;
+          throw new StaleDaemonProcessError({
+            host: "127.0.0.1",
+            port: 14555,
+            pid: 8846,
+            command: "node /opt/homebrew/bin/codexm proxy serve --host 127.0.0.1 --port 14555",
+            kind: "proxy",
+          });
+        }
+
+        switchedNames.push(name);
+        return {
+          statusMessage: `Switched to "${name}".`,
+          warningMessages: [],
+        };
+      },
+    });
+
+    await flushLoop();
+    stdin.emitInput("\r");
+    await flushLoop();
+    expect(latestDashboardFrame(stdout.read())).toContain("Stop stale codexm proxy process 8846");
+
+    stdin.emitInput("y");
+    await flushLoop();
+    await flushLoop();
+    await flushLoop();
+
+    expect(cleanedPids).toEqual([8846]);
+    expect(switchedNames).toEqual(["proxy"]);
+    expect(latestDashboardFrame(stdout.read())).toContain('Switched to "proxy".');
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
   });
 
   test("keeps the dashboard open after opening Desktop", async () => {
@@ -1028,6 +1425,63 @@ describe("Account Dashboard TUI", () => {
     }
   });
 
+  test("allows browsing the list while a write operation is still running", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let resolveSwitch: (() => void) | null = null;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async () => {
+        await new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        });
+        return {
+          statusMessage: 'Switched to "beta".',
+          warningMessages: [],
+        };
+      },
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("j");
+      await flushLoop();
+      stdin.emitInput("\r");
+      await flushLoop();
+      stdin.emitInput("j");
+      await flushLoop();
+
+      const busyFrame = latestDashboardFrame(stdout.read());
+      expect(busyFrame).toContain(">  gamma");
+
+      if (!resolveSwitch) {
+        throw new Error("Expected switch to be pending.");
+      }
+      const finishSwitch: () => void = resolveSwitch;
+      finishSwitch();
+      await flushLoop();
+      await flushLoop();
+      stdin.emitInput("q");
+
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } catch (error) {
+      const finishSwitch = resolveSwitch as unknown as (() => void) | null;
+      if (finishSwitch) {
+        finishSwitch();
+      }
+      stdin.emitInput("q");
+      await tuiPromise;
+      throw error;
+    }
+  });
+
   test("waits for a queued refresh to settle before exiting", async () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();
@@ -1224,6 +1678,45 @@ describe("Account Dashboard TUI", () => {
     expect(frame).toContain("beta");
     expect(frame).toContain("Initial refresh failed");
     expect(frame).toContain("network unavailable");
+
+    stdin.emitInput("q");
+    await expect(tuiPromise).resolves.toMatchObject({
+      code: 0,
+      action: "quit",
+    });
+  });
+
+  test("keeps the last good dashboard snapshot visible after refresh fails", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let loadCount = 0;
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => {
+        loadCount += 1;
+        if (loadCount === 1) {
+          return createSnapshot("alpha");
+        }
+        throw new Error("chatgpt.com/backend-api/wham/usage 503");
+      },
+      switchAccount: async (name) => ({
+        statusMessage: `Switched to "${name}".`,
+        warningMessages: [],
+      }),
+    });
+
+    await flushLoop();
+    stdin.emitInput("r");
+    await flushLoop();
+    await flushLoop();
+
+    const frame = latestDashboardFrame(stdout.read());
+    expect(frame).toContain("alpha");
+    expect(frame).toContain("beta");
+    expect(frame).toContain("Refresh failed: chatgpt.com/backend-api/wham/usage 503");
 
     stdin.emitInput("q");
     await expect(tuiPromise).resolves.toMatchObject({
@@ -1976,7 +2469,7 @@ describe("Account Dashboard TUI", () => {
     }
   });
 
-  test("hands foreground watch off to a detached watch on quit", async () => {
+  test("quitting the dashboard stops the foreground watch without detached handoff", async () => {
     const homeDir = await createTempHome();
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();
@@ -2061,7 +2554,7 @@ describe("Account Dashboard TUI", () => {
       await expect(tuiPromise).resolves.toBe(0);
       expect(foregroundWatchStarts).toBe(1);
       expect(foregroundWatchAborts).toBe(1);
-      expect(detachedStarts).toEqual([{ autoSwitch: true, debug: false }]);
+      expect(detachedStarts).toEqual([]);
     } finally {
       if (!settled && tuiPromise) {
         stdin.emitInput("q");
@@ -2292,7 +2785,9 @@ describe("Account Dashboard TUI", () => {
       });
 
       expect(snapshot.headerLine).toContain("codexm | current alpha");
-      expect(snapshot.currentStatusLine).toBe("Current managed account: alpha");
+      expect(snapshot.currentStatusLine).toBe(
+        "Current managed account: alpha | [daemon:off] [proxy:off] [autoswitch:off]",
+      );
       expect(snapshot.summaryLine).toBe("Accounts: 2/3 usable | blocked: 1W 0, 5H 0 | plus x2, pro x1");
       expect(snapshot.poolLine).toContain("Available: bottleneck");
       expect(snapshot.warnings).toEqual(["beta using cached quota"]);
@@ -2306,12 +2801,15 @@ describe("Account Dashboard TUI", () => {
       expect(snapshot.accounts[1]?.lastSwitchedAtLabel).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
       expect(snapshot.accounts[1]?.detailLines).toEqual(
         expect.arrayContaining([
+          "Identity: acct-alpha:user-alpha",
+          "Account: acct-alpha",
+          "User: user-alpha",
           expect.stringMatching(/^Joined: \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/),
           expect.stringMatching(/^Switched: .*ago\)$/),
-          expect.stringMatching(/^Next reset: .*\((?:in .+|.+ ago|now)\)$/),
+          expect.stringMatching(/^Next reset: \d{2}-\d{2} \d{2}:\d{2}$/),
         ]),
       );
-      expect(snapshot.accounts[1]?.nextResetLabel).toMatch(/^(?:now|[0-9.]+[mhd])$/);
+      expect(snapshot.accounts[1]?.nextResetLabel).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/);
       expect(snapshot.accounts[0]).toMatchObject({
         planLabel: "pro",
         emailLabel: "beta@example.com",
@@ -2497,6 +2995,13 @@ describe("Account Dashboard TUI", () => {
         emailLabel: "beta@example.com",
         refreshStatusLabel: "stale",
       });
+      expect(snapshot.accounts[1]?.detailLines).toEqual(
+        expect.arrayContaining([
+          "Identity: acct-beta:user-beta",
+          "Account: acct-beta",
+          "User: user-beta",
+        ]),
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }

@@ -11,7 +11,7 @@ import {
   formatRemainingPercent,
   formatResetAt,
   formatUsagePercent,
-  isWindowUnavailable,
+  isAccountFullyUnavailable,
   normalizePlusScore,
   stripAnsi,
   toQuotaEtaSummary,
@@ -19,6 +19,7 @@ import {
 } from "./quota-display.js";
 import { buildListSummary } from "./quota-summary.js";
 import { rankListCandidates, selectCurrentNextResetWindow, toAutoSwitchCandidate } from "./quota-ranking.js";
+import { PROXY_ACCOUNT_ID } from "../proxy/constants.js";
 import type {
   AutoSwitchCandidate,
   CurrentListStatusLike,
@@ -157,6 +158,10 @@ function describeCurrentListStatus(status: CurrentListStatusLike): string {
     return "Current auth: missing";
   }
 
+  if (status.account_id === PROXY_ACCOUNT_ID) {
+    return "Current proxy account: proxy";
+  }
+
   if (status.matched_accounts.length === 0) {
     return "Current auth: unmanaged";
   }
@@ -178,8 +183,8 @@ export function describeAutoSwitchSelection(
     dryRun
       ? `Best account: "${candidate.name}" (${maskAccountId(candidate.identity)}).`
       : `Auto-switched to "${candidate.name}" (${maskAccountId(candidate.identity)}).`,
-    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
-    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score, candidate.plan_type))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h, candidate.plan_type))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -201,8 +206,8 @@ export function describeAutoSwitchSelection(
 export function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings: string[]): string {
   const lines = [
     `Current account "${candidate.name}" (${maskAccountId(candidate.identity)}) is already the best available account.`,
-    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
-    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score, candidate.plan_type))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h, candidate.plan_type))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -226,11 +231,14 @@ function describeQuotaAccounts(
     verbose?: boolean;
     etaByName?: Map<string, WatchHistoryEtaContext>;
     usageLine?: string | null;
+    daemonFeatureLine?: string | null;
+    summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {
   if (accounts.length === 0) {
     const lines = [
       describeCurrentListStatus(currentStatus),
+      ...(options.daemonFeatureLine ? [options.daemonFeatureLine] : []),
       ...(options.usageLine ? [options.usageLine] : []),
       "No saved accounts.",
     ];
@@ -275,14 +283,17 @@ function describeQuotaAccounts(
   const rows = orderedAccounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
-    const currentScore = candidate ? normalizePlusScore(candidate.current_score) : null;
+    const currentScore = candidate ? normalizePlusScore(candidate.current_score, account.plan_type) : null;
     const nextResetAt = candidate
       ? formatResetAt(selectCurrentNextResetWindow(account, candidate))
       : "-";
+    const displayName = account.status === "stale"
+      ? `${account.name} [stale]`
+      : account.name;
     const row: Record<string, string> = {
-      name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
+      name: `${currentAccounts.has(account.name) ? "*" : " "} ${displayName}`,
       account_id: compactTableIdentity(maskAccountId(account.identity), "IDENTITY".length),
-      plan_type: account.plan_type ?? "-",
+      plan_type: account.account_id === PROXY_ACCOUNT_ID ? "" : (account.plan_type ?? "-"),
       eta: formatEtaSummary(eta),
       score: colorizeScore(formatRemainingPercent(currentScore), currentScore),
       five_hour: formatUsagePercent(account.five_hour),
@@ -302,7 +313,7 @@ function describeQuotaAccounts(
       row.projected_5h_in_1w_units_1h = candidate
         ? formatRawScore(candidate.projected_5h_in_1w_units_1h)
         : "-";
-      const score1h = candidate ? normalizePlusScore(candidate.score_1h) : null;
+      const score1h = candidate ? normalizePlusScore(candidate.score_1h, account.plan_type) : null;
       row.score_1h = candidate
         ? colorizeScore(formatRemainingPercent(score1h), score1h)
         : "-";
@@ -317,10 +328,7 @@ function describeQuotaAccounts(
         : "-";
     }
 
-    if (isWindowUnavailable(account.one_week)) {
-      for (const key of Object.keys(row)) {
-        row[key] = stripAnsi(row[key]);
-      }
+    if (isAccountFullyUnavailable(account)) {
       row.__row_style = "red-bg";
     }
 
@@ -375,10 +383,11 @@ function describeQuotaAccounts(
   }
 
   const table = formatTable(rows, columns);
-  const { summaryLine, poolLine } = buildListSummary(accounts);
+  const { summaryLine, poolLine } = buildListSummary(options.summaryAccounts ?? accounts);
 
   const lines = [
     describeCurrentListStatus(currentStatus),
+    ...(options.daemonFeatureLine ? [options.daemonFeatureLine] : []),
     summaryLine,
     poolLine,
     ...(options.usageLine ? [options.usageLine] : []),
@@ -403,6 +412,8 @@ export function describeQuotaRefresh(
     verbose?: boolean;
     etaByName?: Map<string, WatchHistoryEtaContext>;
     usageLine?: string | null;
+    daemonFeatureLine?: string | null;
+    summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {
   const lines: string[] = [];

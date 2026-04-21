@@ -11,8 +11,9 @@ import {
   restoreLaunchBackup,
 } from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
-import type { WatchProcessManager } from "../watch/process.js";
-import { ensureDetachedWatch } from "../watch/detached.js";
+import type { DaemonProcessManager } from "../daemon/process.js";
+import { defaultDaemonState } from "../daemon/state.js";
+import { proxyBackendBaseUrl, proxyOpenAIBaseUrl, resolveProxyPort } from "../proxy/constants.js";
 import {
   describeBusySwitchLock,
   resolveManagedAccountByName,
@@ -37,7 +38,7 @@ export async function handleLaunchCommand(options: {
   debug: boolean;
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
-  watchProcessManager: WatchProcessManager;
+  daemonProcessManager: DaemonProcessManager;
   streams: CliStreams;
   debugLog: (message: string) => void;
 }): Promise<number> {
@@ -47,20 +48,17 @@ export async function handleLaunchCommand(options: {
     debug,
     store,
     desktopLauncher,
-    watchProcessManager,
+    daemonProcessManager,
     streams,
     debugLog,
   } = options;
 
   const name = parsed.positionals[0] ?? null;
   const auto = parsed.flags.has("--auto");
-  const watch = parsed.flags.has("--watch");
-  const noAutoSwitch = parsed.flags.has("--no-auto-switch");
 
   if (
     parsed.positionals.length > 1 ||
-    (auto && name) ||
-    (noAutoSwitch && !watch)
+    (auto && name)
   ) {
     throw new Error(`Usage: ${getUsage("launch")}`);
   }
@@ -82,7 +80,6 @@ export async function handleLaunchCommand(options: {
   }
 
   const warnings: string[] = [];
-  const watchAutoSwitch = !noAutoSwitch;
   const appPath = await desktopLauncher.findInstalledApp();
   if (!appPath) {
     throw new Error("Codex Desktop not found at /Applications/Codex.app.");
@@ -200,15 +197,24 @@ export async function handleLaunchCommand(options: {
     );
   }
 
-  let detachedWatchResult:
-    | Awaited<ReturnType<typeof ensureDetachedWatch>>
-    | null = null;
-  if (watch) {
-    detachedWatchResult = await ensureDetachedWatch(watchProcessManager, {
-      autoSwitch: watchAutoSwitch,
-      debug,
-    });
-  }
+  const currentDaemonState = (await daemonProcessManager.getStatus()).state
+    ?? defaultDaemonState(store.paths.codexTeamDir);
+  const daemonHost = currentDaemonState.host;
+  const daemonPort = resolveProxyPort({
+    env: process.env,
+    fallback: currentDaemonState.port,
+  });
+  const daemonResult = await daemonProcessManager.ensureConfig({
+    stayalive: true,
+    watch: currentDaemonState.watch,
+    auto_switch: currentDaemonState.watch ? currentDaemonState.auto_switch : false,
+    proxy: currentDaemonState.proxy,
+    host: daemonHost,
+    port: daemonPort,
+    debug: currentDaemonState.debug || debug,
+    base_url: proxyBackendBaseUrl(daemonHost, daemonPort),
+    openai_base_url: proxyOpenAIBaseUrl(daemonHost, daemonPort),
+  });
 
   if (json) {
     writeJson(streams.stdout, {
@@ -226,16 +232,15 @@ export async function handleLaunchCommand(options: {
       launched_with_current_auth: switchedAccount === null,
       app_path: appPath,
       relaunched: runningApps.length > 0,
-      watch:
-        detachedWatchResult === null
-          ? null
-          : {
-              action: detachedWatchResult.action,
-              pid: detachedWatchResult.state.pid,
-              started_at: detachedWatchResult.state.started_at,
-              log_path: detachedWatchResult.state.log_path,
-              auto_switch: detachedWatchResult.state.auto_switch,
-            },
+      daemon: {
+        action: daemonResult.action,
+        pid: daemonResult.state.pid,
+        started_at: daemonResult.state.started_at,
+        log_path: daemonResult.state.log_path,
+        stayalive: daemonResult.state.stayalive,
+        autoswitch: daemonResult.state.auto_switch,
+        proxy: daemonResult.state.proxy,
+      },
       warnings,
     });
   } else {
@@ -252,18 +257,13 @@ export async function handleLaunchCommand(options: {
         ? `Launched Codex Desktop with "${switchedAccount.name}" (${maskAccountId(switchedAccount.identity)}).\n`
         : "Launched Codex Desktop with current auth.\n",
     );
-    if (detachedWatchResult) {
-      if (detachedWatchResult.action === "reused") {
-        streams.stdout.write(
-          `Background watch already running (pid ${detachedWatchResult.state.pid}).\n`,
-        );
-      } else {
-        streams.stdout.write(
-          `Started background watch (pid ${detachedWatchResult.state.pid}).\n`,
-        );
-      }
-      streams.stdout.write(`Log: ${detachedWatchResult.state.log_path}\n`);
-    }
+    const daemonStatusMessage = daemonResult.action === "reused"
+      ? `Background daemon already running (pid ${daemonResult.state.pid}).`
+      : daemonResult.action === "restarted"
+        ? `Restarted background daemon (pid ${daemonResult.state.pid}).`
+        : `Started background daemon (pid ${daemonResult.state.pid}).`;
+    streams.stdout.write(`${daemonStatusMessage}\n`);
+    streams.stdout.write(`Log: ${daemonResult.state.log_path}\n`);
     for (const warning of warnings) {
       streams.stdout.write(`Warning: ${warning}\n`);
     }
@@ -276,7 +276,6 @@ export async function handleWatchCommand(options: {
   parsed: ParsedArgs;
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
-  watchProcessManager: WatchProcessManager;
   streams: CliStreams;
   interruptSignal?: AbortSignal;
   debug: boolean;
@@ -290,7 +289,6 @@ export async function handleWatchCommand(options: {
     parsed,
     store,
     desktopLauncher,
-    watchProcessManager,
     streams,
     interruptSignal,
     debug,
@@ -306,47 +304,11 @@ export async function handleWatchCommand(options: {
   }
 
   const autoSwitch = !parsed.flags.has("--no-auto-switch");
-  const detach = parsed.flags.has("--detach");
-  const status = parsed.flags.has("--status");
-  const stop = parsed.flags.has("--stop");
-  const modeCount = [detach, status, stop].filter(Boolean).length;
-
-  if (modeCount > 1 || ((status || stop) && parsed.flags.has("--no-auto-switch"))) {
+  if (parsed.flags.has("--detach") || parsed.flags.has("--status") || parsed.flags.has("--stop")) {
     throw new Error(`Usage: ${getUsage("watch")}`);
   }
 
-  if (status) {
-    const watchStatus = await watchProcessManager.getStatus();
-    if (!watchStatus.running || !watchStatus.state) {
-      streams.stdout.write("Watch: not running\n");
-    } else {
-      streams.stdout.write(`Watch: running (pid ${watchStatus.state.pid})\n`);
-      streams.stdout.write(`Started at: ${watchStatus.state.started_at}\n`);
-      streams.stdout.write(
-        `Auto-switch: ${watchStatus.state.auto_switch ? "enabled" : "disabled"}\n`,
-      );
-      streams.stdout.write(`Log: ${watchStatus.state.log_path}\n`);
-    }
-    return 0;
-  }
-
-  if (stop) {
-    const stopResult = await watchProcessManager.stop();
-    if (!stopResult.stopped || !stopResult.state) {
-      streams.stdout.write("Watch: not running\n");
-    } else {
-      streams.stdout.write(`Stopped background watch (pid ${stopResult.state.pid}).\n`);
-    }
-    return 0;
-  }
-
   const desktopRunning = await desktopLauncher.isManagedDesktopRunning();
-  if (!desktopRunning && detach) {
-    throw new Error(
-      "Detached CLI watch is not yet supported. Run \"codexm watch\" in the foreground instead.",
-    );
-  }
-
   if (!desktopRunning) {
     return await runCliWatchSession({
       store,
@@ -360,16 +322,6 @@ export async function handleWatchCommand(options: {
       managedDesktopWaitStatusDelayMs,
       managedDesktopWaitStatusIntervalMs,
     });
-  }
-
-  if (detach) {
-    const detachedState = await watchProcessManager.startDetached({
-      autoSwitch,
-      debug,
-    });
-    streams.stdout.write(`Started background watch (pid ${detachedState.pid}).\n`);
-    streams.stdout.write(`Log: ${detachedState.log_path}\n`);
-    return 0;
   }
 
   return await runManagedDesktopWatchSession({

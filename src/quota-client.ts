@@ -461,7 +461,7 @@ async function requestUsage(
   );
 }
 
-async function refreshChatGPTAuthTokens(
+export async function refreshChatGPTAuthTokens(
   snapshot: AuthSnapshot,
   options: QuotaClientOptions,
 ): Promise<AuthSnapshot> {

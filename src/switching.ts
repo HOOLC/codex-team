@@ -18,6 +18,7 @@ import {
   toCliQuotaSummaryFromRuntimeQuota,
   type AutoSwitchCandidate,
 } from "./cli/quota.js";
+import { appendEventLog, buildEventPayload, shortenErrorMessage } from "./logging.js";
 
 export interface AutoSwitchSelection {
   refreshResult: Awaited<ReturnType<AccountStore["refreshAllQuotas"]>>;
@@ -305,6 +306,17 @@ export async function performAutoSwitch(
 
   options.debugLog?.(`switch: mode=auto dry_run=${options.dryRun} force=${options.force}`);
   const { refreshResult, selected, candidates, quota, warnings } = selection;
+  await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.autoswitch.selected",
+    trigger: "cli",
+    fields: {
+      target_account_name: selected.name,
+      candidate_count: candidates.length,
+      dry_run: options.dryRun,
+      force: options.force,
+    },
+  }));
   if (options.dryRun) {
     options.debugLog?.(
       `switch: auto-selected target=${selected.name} candidates=${candidates.length} warnings=${warnings.length} dry_run=true`,
@@ -325,6 +337,15 @@ export async function performAutoSwitch(
     selected.available === "available" &&
     currentStatus.matched_accounts.includes(selected.name)
   ) {
+    await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+      component: "switch",
+      event: "account.autoswitch.skipped",
+      trigger: "cli",
+      fields: {
+        account_name: selected.name,
+        reason: "already-best",
+      },
+    }));
     options.debugLog?.(
       `switch: auto-selected target=${selected.name} candidates=${candidates.length} skipped=already_current_best`,
     );
@@ -339,7 +360,23 @@ export async function performAutoSwitch(
     };
   }
 
-  const result = await store.switchAccount(selected.name);
+  let result: Awaited<ReturnType<AccountStore["switchAccount"]>>;
+  try {
+    result = await store.switchAccount(selected.name);
+  } catch (error) {
+    await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+      component: "switch",
+      event: "account.switch.failed",
+      trigger: "cli",
+      level: "error",
+      errorMessageShort: shortenErrorMessage((error as Error).message),
+      fields: {
+        target_account_name: selected.name,
+        mode: "auto",
+      },
+    }));
+    throw error;
+  }
   for (const warning of warnings) {
     result.warnings.push(warning);
   }
@@ -356,6 +393,16 @@ export async function performAutoSwitch(
   options.debugLog?.(
     `switch: completed mode=auto target=${result.account.name} candidates=${candidates.length} warnings=${result.warnings.length}`,
   );
+  await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.switch.completed",
+    trigger: "cli",
+    fields: {
+      target_account_name: result.account.name,
+      mode: "auto",
+      warning_count: result.warnings.length,
+    },
+  }));
 
   return {
     refreshResult,

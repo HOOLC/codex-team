@@ -41,6 +41,9 @@ export interface WatchHistoryTargetSnapshot {
   available: string | null;
   five_hour: WatchHistoryWindowSnapshot | null;
   one_week: WatchHistoryWindowSnapshot | null;
+  remaining_5h?: number | null;
+  remaining_1w?: number | null;
+  remaining_5h_eq_1w?: number | null;
 }
 
 export type WatchHistoryEtaStatus =
@@ -385,12 +388,39 @@ function normalizeTargetSnapshot(raw: unknown): WatchHistoryTargetSnapshot {
     typeof candidate.available === "string" || candidate.available === null
       ? candidate.available
       : null;
+  const remaining5h =
+    typeof candidate.remaining_5h === "number"
+      ? candidate.remaining_5h
+      : typeof candidate.remaining5h === "number"
+        ? candidate.remaining5h
+        : undefined;
+  const remaining1w =
+    typeof candidate.remaining_1w === "number"
+      ? candidate.remaining_1w
+      : typeof candidate.remaining1w === "number"
+        ? candidate.remaining1w
+        : undefined;
+  const remaining5hEq1w =
+    typeof candidate.remaining_5h_eq_1w === "number"
+      ? candidate.remaining_5h_eq_1w
+      : typeof candidate.remaining5hEq1w === "number"
+        ? candidate.remaining5hEq1w
+        : undefined;
 
   return {
     plan_type: planType,
     available,
     five_hour: normalizeWindowInput(candidate.five_hour ?? candidate.fiveHour),
     one_week: normalizeWindowInput(candidate.one_week ?? candidate.oneWeek),
+    ...(typeof remaining5h === "number" && Number.isFinite(remaining5h)
+      ? { remaining_5h: roundToTwo(clampPercent(remaining5h)) }
+      : {}),
+    ...(typeof remaining1w === "number" && Number.isFinite(remaining1w)
+      ? { remaining_1w: roundToTwo(Math.max(0, remaining1w)) }
+      : {}),
+    ...(typeof remaining5hEq1w === "number" && Number.isFinite(remaining5hEq1w)
+      ? { remaining_5h_eq_1w: roundToTwo(Math.max(0, remaining5hEq1w)) }
+      : {}),
   };
 }
 
@@ -677,17 +707,24 @@ function computeRemainingPercent(window: WatchHistoryWindowSnapshot | null): num
 }
 
 function computeRemainingContext(target: WatchHistoryTargetSnapshot, planType: string | null) {
-  const remaining5h = computeRemainingPercent(target.five_hour);
-  const remaining1w = computeRemainingPercent(target.one_week);
+  const remaining5h =
+    typeof target.remaining_5h === "number"
+      ? roundToTwo(clampPercent(target.remaining_5h))
+      : computeRemainingPercent(target.five_hour);
+  const remaining1wPercent = computeRemainingPercent(target.one_week);
 
   const remaining5hEq1w =
-    remaining5h === null
-      ? null
-      : convertFiveHourPercentToWeeklyEquivalent(remaining5h, planType ?? target.plan_type);
+    typeof target.remaining_5h_eq_1w === "number"
+      ? roundToTwo(Math.max(0, target.remaining_5h_eq_1w))
+      : remaining5h === null
+        ? null
+        : convertFiveHourPercentToWeeklyEquivalent(remaining5h, planType ?? target.plan_type);
   const remaining1wEq =
-    remaining1w === null
-      ? null
-      : convertOneWeekPercentToPlusWeeklyUnits(remaining1w, planType ?? target.plan_type);
+    typeof target.remaining_1w === "number"
+      ? roundToTwo(Math.max(0, target.remaining_1w))
+      : remaining1wPercent === null
+        ? null
+        : convertOneWeekPercentToPlusWeeklyUnits(remaining1wPercent, planType ?? target.plan_type);
 
   const hasAnyRemaining =
     typeof remaining5hEq1w === "number" || typeof remaining1wEq === "number";

@@ -58,9 +58,11 @@
     "@rslib/core": "^0.20.0",
     "@rstest/core": "^0.9.3",
     "@types/node": "^24.5.2",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "dayjs": "^1.11.20"
+    "dayjs": "^1.11.20",
+    "ws": "^8.18.3"
   }
 }

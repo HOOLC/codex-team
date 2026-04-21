@@ -2,6 +2,7 @@ import { type AccountStore } from "../account-store/index.js";
 import { type CliQuotaSummary, toCliQuotaSummary } from "../cli/quota.js";
 import { shouldSkipManagedDesktopRefresh } from "../desktop/managed-state.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
+import { appendEventLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
 import {
   describeBusySwitchLock,
   refreshManagedDesktopAfterSwitch,
@@ -34,6 +35,15 @@ export async function performManualSwitch(
   options: PerformManualSwitchOptions,
 ): Promise<PerformManualSwitchResult> {
   options.debugLog?.(`switch: mode=manual target=${options.name} force=${options.force}`);
+  await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.switch.started",
+    trigger: "cli",
+    fields: {
+      target_account_name: options.name,
+      force: options.force,
+    },
+  }));
   const switchCommand = `switch ${options.name}`;
   const lock = await tryAcquireSwitchLock(options.store, switchCommand);
   if (!lock.acquired) {
@@ -70,6 +80,19 @@ export async function performManualSwitch(
         }
       }
       return switched;
+    } catch (error) {
+      await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+        component: "switch",
+        event: "account.switch.failed",
+        trigger: "cli",
+        level: "error",
+        errorMessageShort: shortenErrorMessage((error as Error).message),
+        fields: {
+          target_account_name: options.name,
+          force: options.force,
+        },
+      }));
+      throw error;
     } finally {
       await lock.release();
     }
@@ -90,6 +113,16 @@ export async function performManualSwitch(
   options.debugLog?.(
     `switch: completed target=${result.account.name} warnings=${result.warnings.length} quota_refreshed=${quota !== null}`,
   );
+  await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.switch.completed",
+    trigger: "cli",
+    fields: {
+      target_account_name: result.account.name,
+      warning_count: result.warnings.length,
+      quota_refreshed: quota !== null,
+    },
+  }));
 
   return {
     result,

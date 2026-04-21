@@ -12,6 +12,9 @@ import {
   ensureDirectory,
   pathExists,
 } from "../account-store/storage.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME, PROXY_EMAIL } from "../proxy/constants.js";
+import { buildProxyConfig } from "../proxy/config.js";
+import { createSyntheticProxyAuthSnapshot } from "../proxy/synthetic-auth.js";
 import { toCliQuotaSummaryFromRuntimeQuota } from "../cli/quota.js";
 import { createCodexDirectClient } from "../codex-direct-client.js";
 import { createCliProcessManager } from "../watch/cli-watcher.js";
@@ -40,6 +43,20 @@ export interface PreparedCodexOverlay {
 
 export interface PreparedIsolatedCodexRun {
   account: ManagedAccount;
+  authFilePath: string;
+  codexHomePath: string;
+  env: NodeJS.ProcessEnv;
+  runId: string;
+  sessionsDirPath: string;
+  cleanup(): Promise<void>;
+}
+
+export interface PreparedIsolatedProxyRun {
+  account: {
+    name: string;
+    account_id: string;
+    email: string;
+  };
   authFilePath: string;
   codexHomePath: string;
   env: NodeJS.ProcessEnv;
@@ -187,6 +204,22 @@ async function writeOverlayConfig(sourceConfigPath: string, targetConfigPath: st
   await atomicWriteFile(targetConfigPath, forceFileAuthStore(rawConfig), FILE_MODE);
 }
 
+async function writeProxyOverlayConfig(
+  sourceConfigPath: string,
+  targetConfigPath: string,
+  backendBaseUrl: string,
+  openAIBaseUrl: string,
+): Promise<void> {
+  const rawConfig = (await pathExists(sourceConfigPath))
+    ? await readFile(sourceConfigPath, "utf8")
+    : null;
+  await atomicWriteFile(
+    targetConfigPath,
+    forceFileAuthStore(buildProxyConfig(rawConfig, backendBaseUrl, openAIBaseUrl)),
+    FILE_MODE,
+  );
+}
+
 async function resolveOverlayPath(store: AccountStore, ref: string): Promise<string | null> {
   if (ref.includes("/") || ref.startsWith(".")) {
     return ref;
@@ -233,6 +266,72 @@ export async function prepareIsolatedCodexRun(options: {
     runId: overlay.runId,
     sessionsDirPath: join(overlay.codexHomePath, "sessions"),
     cleanup: overlay.cleanup,
+  };
+}
+
+export async function prepareIsolatedProxyRun(options: {
+  backendBaseUrl: string;
+  openAIBaseUrl: string;
+  baseEnv?: NodeJS.ProcessEnv;
+  store: AccountStore;
+}): Promise<PreparedIsolatedProxyRun> {
+  const overlaysBaseDir = join(options.store.paths.codexTeamDir, RUN_OVERLAYS_DIR_NAME);
+  await ensureDirectory(overlaysBaseDir, DIRECTORY_MODE);
+  await pruneStaleRunOverlays(overlaysBaseDir);
+
+  const runId = `${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const overlayDir = join(overlaysBaseDir, PROXY_ACCOUNT_NAME, runId);
+  await ensureDirectory(overlayDir, DIRECTORY_MODE);
+  await linkSharedEntries(options.store.paths.codexDir, overlayDir);
+
+  const authFilePath = join(overlayDir, "auth.json");
+  await atomicWriteFile(
+    authFilePath,
+    `${JSON.stringify(createSyntheticProxyAuthSnapshot(), null, 2)}\n`,
+    FILE_MODE,
+  );
+
+  const configPath = join(overlayDir, "config.toml");
+  await writeProxyOverlayConfig(
+    options.store.paths.currentConfigPath,
+    configPath,
+    options.backendBaseUrl,
+    options.openAIBaseUrl,
+  );
+
+  const metadata: OverlayMetadata = {
+    accountName: PROXY_ACCOUNT_NAME,
+    createdAt: new Date().toISOString(),
+    pid: process.pid,
+    ownerPid: process.pid,
+    runId,
+  };
+  await atomicWriteFile(
+    join(overlayDir, OVERLAY_METADATA_FILE_NAME),
+    `${JSON.stringify(metadata, null, 2)}\n`,
+    FILE_MODE,
+  );
+
+  const env: NodeJS.ProcessEnv = {
+    ...(options.baseEnv ?? process.env),
+    CODEX_HOME: overlayDir,
+  };
+  delete env.CODEX_SQLITE_HOME;
+
+  return {
+    account: {
+      name: PROXY_ACCOUNT_NAME,
+      account_id: PROXY_ACCOUNT_ID,
+      email: PROXY_EMAIL,
+    },
+    authFilePath,
+    codexHomePath: overlayDir,
+    env,
+    runId,
+    sessionsDirPath: join(overlayDir, "sessions"),
+    async cleanup() {
+      await removeDirectoryIfPresent(overlayDir);
+    },
   };
 }
 

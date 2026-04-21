@@ -9,7 +9,23 @@ export async function createTempHome(): Promise<string> {
 }
 
 export async function cleanupTempHome(homeDir: string): Promise<void> {
-  await rm(homeDir, { recursive: true, force: true });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(homeDir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (
+        attempt === 4 ||
+        (nodeError.code !== "ENOTEMPTY" &&
+          nodeError.code !== "EBUSY" &&
+          nodeError.code !== "EPERM")
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
 }
 
 function encodeJwt(payload: Record<string, unknown>): string {
@@ -146,4 +162,27 @@ export function installFetchMock(
   return () => {
     globalThis.fetch = originalFetch;
   };
+}
+
+export async function withEnvVar<T>(
+  name: string,
+  value: string | undefined,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const previous = process.env[name];
+  if (typeof value === "string") {
+    process.env[name] = value;
+  } else {
+    delete process.env[name];
+  }
+
+  try {
+    return await callback();
+  } finally {
+    if (typeof previous === "string") {
+      process.env[name] = previous;
+    } else {
+      delete process.env[name];
+    }
+  }
 }

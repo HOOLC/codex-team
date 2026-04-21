@@ -1,4 +1,5 @@
 import type { AccountQuotaSummary } from "../account-store/index.js";
+import { PROXY_ACCOUNT_ID } from "../proxy/constants.js";
 import { computeAvailability } from "./quota-core.js";
 import { toAutoSwitchCandidate } from "./quota-ranking.js";
 
@@ -24,6 +25,7 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
   summaryLine: string;
   poolLine: string;
 } {
+  const realAccounts = accounts.filter((account) => account.account_id !== PROXY_ACCOUNT_ID);
   const planCounts = new Map<string, number>();
   let usableCount = 0;
   let oneWeekBlockedCount = 0;
@@ -33,7 +35,7 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
   let hasPoolFiveHour = false;
   let hasPoolOneWeek = false;
 
-  for (const account of accounts) {
+  for (const account of realAccounts) {
     const plan = account.plan_type ?? "unknown";
     planCounts.set(plan, (planCounts.get(plan) ?? 0) + 1);
 
@@ -72,7 +74,7 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
 
   const blockedSegment = `blocked: 1W ${oneWeekBlockedCount}, 5H ${fiveHourBlockedCount}`;
 
-  const summaryLine = `Accounts: ${usableCount}/${accounts.length} usable | ${blockedSegment}${
+  const summaryLine = `Accounts: ${usableCount}/${realAccounts.length} usable | ${blockedSegment}${
     plansSegment ? ` | ${plansSegment}` : ""
   }`;
 
