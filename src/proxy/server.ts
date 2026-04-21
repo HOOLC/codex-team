@@ -636,6 +636,22 @@ function normalizeResponseOutputItem(item: unknown): unknown | null {
     return normalizeResponseOutputMessageItem(record);
   }
 
+  if (type === "function_call") {
+    if (
+      typeof record.call_id !== "string"
+      || typeof record.name !== "string"
+      || typeof record.arguments !== "string"
+    ) {
+      return null;
+    }
+    return {
+      type,
+      call_id: record.call_id,
+      name: record.name,
+      arguments: record.arguments,
+    };
+  }
+
   if (type === "function_call_output" || type === "mcp_tool_call_output") {
     if (typeof record.call_id !== "string" || record.output === undefined) {
       return null;

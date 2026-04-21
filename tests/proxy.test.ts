@@ -1496,6 +1496,18 @@ describe("codexm proxy", () => {
               },
             }));
             socket.send(JSON.stringify({
+              type: "response.output_item.done",
+              output_index: 1,
+              item: {
+                id: "fc_1",
+                type: "function_call",
+                call_id: "call_replay",
+                name: "lookup",
+                arguments: "{\"query\":\"hello\"}",
+                status: "completed",
+              },
+            }));
+            socket.send(JSON.stringify({
               type: "response.completed",
               response: {
                 id: "resp_1",
@@ -1598,8 +1610,9 @@ describe("codexm proxy", () => {
           previous_response_id: "resp_1",
           input: [
             {
-              role: "user",
-              content: [{ type: "input_text", text: "second" }],
+              type: "function_call_output",
+              call_id: "call_replay",
+              output: "{\"result\":\"ok\"}",
             },
           ],
         });
@@ -1618,10 +1631,22 @@ describe("codexm proxy", () => {
           model: "gpt-5.4",
         });
         expect(upstreamConnections[1]?.bodies[0]?.previous_response_id).toBeUndefined();
-        expect((upstreamConnections[1]?.bodies[0]?.input as unknown[] | undefined)?.length).toBe(3);
-        expect((upstreamConnections[1]?.bodies[0]?.input as Array<Record<string, unknown>> | undefined)?.[1]).toEqual({
+        const replayedInput = upstreamConnections[1]?.bodies[0]?.input as Array<Record<string, unknown>> | undefined;
+        expect(replayedInput?.length).toBe(4);
+        expect(replayedInput?.[1]).toEqual({
           role: "assistant",
           content: [{ type: "output_text", text: "one" }],
+        });
+        expect(replayedInput?.[2]).toEqual({
+          type: "function_call",
+          call_id: "call_replay",
+          name: "lookup",
+          arguments: "{\"query\":\"hello\"}",
+        });
+        expect(replayedInput?.[3]).toEqual({
+          type: "function_call_output",
+          call_id: "call_replay",
+          output: "{\"result\":\"ok\"}",
         });
 
         downstream.close();
