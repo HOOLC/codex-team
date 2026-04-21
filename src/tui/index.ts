@@ -42,7 +42,6 @@ const WIDE_DETAIL_PREFERRED_WIDTH = 40;
 const WIDE_NAME_MIN_WIDTH = 10;
 const WIDE_NAME_PREFERRED_WIDTH = 22;
 const WIDE_IDENTITY_MIN_WIDTH = 8;
-const WIDE_IDENTITY_MAX_WIDTH = 14;
 const WIDE_PLAN_MIN_WIDTH = 4;
 const WIDE_PLAN_MAX_WIDTH = 6;
 const WIDE_SCORE_MIN_WIDTH = 5;
@@ -471,12 +470,9 @@ function getWideColumnWidths(
       ...accounts.map((account) => Math.min(visibleWidth(displayAccountName(account)), WIDE_NAME_PREFERRED_WIDTH)),
     ),
   );
-  const desiredIdentityWidth = Math.min(
-    WIDE_IDENTITY_MAX_WIDTH,
-    Math.max(
-      WIDE_IDENTITY_MIN_WIDTH,
-      ...accounts.map((account) => Math.min(visibleWidth(account.identityLabel), WIDE_IDENTITY_MAX_WIDTH)),
-    ),
+  const desiredIdentityWidth = Math.max(
+    WIDE_IDENTITY_MIN_WIDTH,
+    ...accounts.map((account) => visibleWidth(account.identityLabel)),
   );
   const flexibleWidth = Math.max(
     WIDE_NAME_MIN_WIDTH + WIDE_IDENTITY_MIN_WIDTH,
@@ -521,13 +517,9 @@ function getWideColumnWidths(
   remainingFlexibleWidth -= appliedIdentityGrowth;
 
   if (remainingFlexibleWidth > 0) {
-    const extraIdentityGrowth = Math.min(remainingFlexibleWidth, WIDE_IDENTITY_MAX_WIDTH - identityWidth);
+    const extraIdentityGrowth = remainingFlexibleWidth;
     identityWidth += extraIdentityGrowth;
     remainingFlexibleWidth -= extraIdentityGrowth;
-  }
-
-  if (remainingFlexibleWidth > 0) {
-    nameWidth += Math.min(remainingFlexibleWidth, WIDE_NAME_PREFERRED_WIDTH - nameWidth);
   }
 
   return {
@@ -943,7 +935,7 @@ function renderCompactListRow(
   ].join("");
 
   const secondSegments = [
-    includeIdentity ? compactIdentity(account.identityLabel, Math.max(8, Math.min(14, width / 4))) : null,
+    includeIdentity ? compactIdentity(account.identityLabel, Math.max(8, Math.min(24, Math.floor(width / 3)))) : null,
     `5H ${account.fiveHourLabel}`,
     `1W ${account.oneWeekLabel}`,
     includeReset ? account.nextResetLabel : null,
@@ -1878,8 +1870,10 @@ export async function runAccountDashboardTui(
 
     const reloadingCurrentAccount =
       selected.current && optionsForAction.force && optionsForAction.after === null;
+    const togglingProxy =
+      selected.authModeLabel === "proxy" && optionsForAction.after === null && !reloadingCurrentAccount;
 
-    if (selected.current && !reloadingCurrentAccount) {
+    if (selected.current && !reloadingCurrentAccount && !togglingProxy) {
       if (optionsForAction.after === "open-codex") {
         finish("open-codex", {
           preferredName: selected.name,
@@ -1916,6 +1910,10 @@ export async function runAccountDashboardTui(
       controller,
       label: reloadingCurrentAccount
         ? `reloading "${selected.name}"`
+        : togglingProxy
+          ? selected.current
+            ? "disabling proxy"
+            : "enabling proxy"
         : optionsForAction.after === "open-codex"
         ? `opening Codex TUI for "${selected.name}"`
         : optionsForAction.after === "open-isolated-codex"
@@ -1928,6 +1926,10 @@ export async function runAccountDashboardTui(
     };
     busyMessage = reloadingCurrentAccount
       ? `Reloading "${selected.name}"...`
+      : togglingProxy
+        ? selected.current
+          ? "Disabling proxy..."
+          : "Enabling proxy..."
       : optionsForAction.after === "open-codex"
       ? `Switching to "${selected.name}" and opening Codex TUI...`
       : optionsForAction.after === "open-isolated-codex"

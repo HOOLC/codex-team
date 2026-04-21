@@ -22,7 +22,9 @@ import {
 import {
   cleanupTempHome,
   createTempHome,
+  jsonResponse,
   writeProxyRequestLog,
+  writeCurrentAuth,
 } from "./test-helpers.js";
 import {
   captureWritable,
@@ -1317,6 +1319,174 @@ describe("Account Dashboard TUI", () => {
       expect(launchCalls).toEqual(["/Applications/Codex.app"]);
     } finally {
       restorePlatform();
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("refreshes the managed Desktop session after enabling proxy from the dashboard", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-direct", "chatgpt", "plus", "user-direct");
+      const store = createAccountStore(homeDir);
+      const proxyState = {
+        pid: 23456,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "2026-04-21T10:00:00.000Z",
+        log_path: `${homeDir}/.codex-team/logs/proxy.log`,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: true,
+      };
+
+      const result = await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub(),
+        proxyProcessManager: {
+          startDetached: async () => proxyState,
+          getStatus: async () => ({
+            running: true,
+            state: proxyState,
+          }),
+          stop: async () => ({
+            running: false,
+            state: proxyState,
+            stopped: false,
+          }),
+          disable: async () => ({
+            running: false,
+            state: proxyState,
+            stopped: false,
+          }),
+        },
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        runDashboardTuiImpl: async (options) => {
+          await options.switchAccount("proxy", { force: true });
+          return {
+            code: 0,
+            action: "quit",
+          };
+        },
+      });
+
+      expect(result).toBe(0);
+      expect(applyManagedSwitchCalls).toEqual([{ force: true, signal: undefined, timeoutMs: 120_000 }]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("disables proxy from the dashboard when the proxy row is already current", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+    let actionResult: { statusMessage?: string; warningMessages?: string[] } | null = null;
+
+    try {
+      const { writeSyntheticProxyRuntime } = await import("../src/proxy/config.js");
+      const { writeProxyState } = await import("../src/proxy/state.js");
+
+      await writeCurrentAuth(homeDir, "acct-direct", "chatgpt", "plus", "user-direct");
+      const store = createAccountStore(homeDir);
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const proxyState = await writeSyntheticProxyRuntime({
+        store,
+        state: {
+          pid: 23456,
+          host: "127.0.0.1",
+          port: 14555,
+          started_at: "2026-04-21T10:00:00.000Z",
+          log_path: `${homeDir}/.codex-team/logs/proxy.log`,
+          base_url: "http://127.0.0.1:14555/backend-api",
+          openai_base_url: "http://127.0.0.1:14555/v1",
+          debug: false,
+        },
+      });
+      await writeProxyState(store.paths.codexTeamDir, proxyState);
+
+      const result = await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub(),
+        proxyProcessManager: {
+          startDetached: async () => proxyState,
+          getStatus: async () => ({
+            running: true,
+            state: proxyState,
+          }),
+          stop: async () => ({
+            running: false,
+            state: proxyState,
+            stopped: false,
+          }),
+          disable: async () => ({
+            running: false,
+            state: proxyState,
+            stopped: false,
+          }),
+        },
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        runDashboardTuiImpl: async (options) => {
+          actionResult = await options.switchAccount("proxy", { force: false });
+          return {
+            code: 0,
+            action: "quit",
+          };
+        },
+      });
+
+      expect(result).toBe(0);
+      expect(actionResult).toMatchObject({
+        statusMessage: "Disabled proxy.",
+      });
+      expect(applyManagedSwitchCalls).toEqual([{ force: false, signal: undefined, timeoutMs: 120_000 }]);
+    } finally {
       await cleanupTempHome(homeDir);
     }
   });
@@ -3090,6 +3260,101 @@ describe("Account Dashboard TUI", () => {
     }
   });
 
+  test("only surfaces proxy last-upstream markers in dashboard snapshots when proxy mode is enabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const { writeProxyState } = await import("../src/proxy/state.js");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 18,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 900,
+                reset_at: 1_777_000_000,
+              },
+              secondary_window: {
+                used_percent: 42,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 90_000,
+                reset_at: 1_777_090_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "7",
+            },
+          }),
+      });
+      await writeCurrentAuth(homeDir, "acct-alpha");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await writeProxyRequestLog(homeDir, [{
+        ts: "2026-04-21T10:15:00.000Z",
+        selected_account_name: "alpha",
+        selected_auth_mode: "chatgpt",
+      }]);
+
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 0,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "",
+        log_path: join(store.paths.codexTeamDir, "logs", "proxy.log"),
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: false,
+      });
+
+      const disabledSnapshot = await buildAccountDashboardSnapshot({
+        store,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }) as never,
+      });
+      expect(disabledSnapshot.accounts.find((account) => account.name === "proxy")?.proxyLastUpstreamLabel ?? null).toBeNull();
+      expect(disabledSnapshot.accounts.find((account) => account.name === "alpha")?.proxyUpstreamActive ?? false).toBe(false);
+
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 12345,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "2026-04-21T10:00:00.000Z",
+        log_path: join(store.paths.codexTeamDir, "logs", "proxy.log"),
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: true,
+      });
+
+      const enabledSnapshot = await buildAccountDashboardSnapshot({
+        store,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }) as never,
+      });
+      const enabledProxyRow = enabledSnapshot.accounts.find((account) => account.name === "proxy");
+      expect(enabledProxyRow?.proxyLastUpstreamLabel ?? "").toContain("alpha (chatgpt");
+      expect(enabledSnapshot.accounts.find((account) => account.name === "alpha")?.proxyUpstreamActive).toBe(true);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("keeps the proxy row visible in dashboard snapshots even when proxy mode is off", async () => {
     const homeDir = await createTempHome();
 
@@ -3198,12 +3463,12 @@ describe("Account Dashboard TUI", () => {
         authModeLabel: "proxy",
         current: false,
       });
-      expect(snapshot.accounts[0]?.proxyLastUpstreamLabel).toMatch(/^alpha \(chatgpt,/u);
+      expect(snapshot.accounts[0]?.proxyLastUpstreamLabel ?? null).toBeNull();
       expect(snapshot.accounts[1]).toMatchObject({
         name: "alpha",
-        proxyUpstreamActive: true,
+        proxyUpstreamActive: false,
       });
-      expect(snapshot.accounts[0]?.detailLines).toEqual(
+      expect(snapshot.accounts[0]?.detailLines ?? []).not.toEqual(
         expect.arrayContaining([
           expect.stringMatching(/^Last upstream: alpha \(chatgpt,/u),
         ]),

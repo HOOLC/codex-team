@@ -119,6 +119,36 @@ describe("CLI Share Commands", () => {
     }
   });
 
+  test("refuses to export the synthetic proxy account", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const outputPath = join(homeDir, "proxy-share.codexm.json");
+
+      await mkdir(join(homeDir, ".codex"), { recursive: true, mode: 0o700 });
+      await writeFile(
+        join(homeDir, ".codex", "auth.json"),
+        `${JSON.stringify(createSyntheticProxyAuthSnapshot(new Date("2026-04-21T10:00:00.000Z")), null, 2)}\n`,
+      );
+
+      const exitCode = await runCli(["export", "--output", outputPath], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('The synthetic "proxy" account cannot be exported.');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("exports a managed apikey account with its config snapshot", async () => {
     const homeDir = await createTempHome();
 
@@ -213,6 +243,38 @@ describe("CLI Share Commands", () => {
         },
       });
       expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-before-import");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("refuses to import a share bundle into the reserved proxy name", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const bundlePath = join(homeDir, "incoming-share.codexm.json");
+      await writeShareBundle(bundlePath, {
+        authSnapshot: createAuthPayload("acct-imported", "chatgpt", "pro", "user-imported"),
+        profile: {
+          account_id: "acct-imported",
+          user_id: "user-imported",
+          email: "acct-imported@example.com",
+          plan: "pro",
+        },
+      });
+
+      const exitCode = await runCli(["import", bundlePath, "--name", "proxy"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('"proxy" is reserved for the synthetic proxy account');
     } finally {
       await cleanupTempHome(homeDir);
     }

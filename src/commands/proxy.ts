@@ -105,6 +105,14 @@ export async function disableProxyMode(options: {
     state,
   });
   const stopped = await options.proxyProcessManager.disable();
+  const disabledState = stopped.state ?? state;
+  if (disabledState) {
+    await writeProxyState(options.store.paths.codexTeamDir, {
+      ...disabledState,
+      pid: 0,
+      enabled: false,
+    });
+  }
   await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
     component: "proxy",
     event: "proxy.disable.completed",

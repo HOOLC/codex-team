@@ -39,6 +39,7 @@ import {
   formatProxyUpstreamSelectionLabel,
   readLatestProxyUpstreamSelection,
 } from "../proxy/request-log.js";
+import { readProxyState } from "../proxy/state.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { describeDaemonFeatureLine } from "../daemon/display.js";
 import { triggerDaemonAuthRefresh } from "../daemon/trigger.js";
@@ -678,10 +679,14 @@ export async function handleListCommand(options: {
   });
   const proxyAggregate = options.targetName
     ? null
-    : await buildProxyQuotaAggregate({ store: options.store });
+    : await buildProxyQuotaAggregate({
+        store: options.store,
+        includeWhenDisabled: true,
+      });
   const proxySummary = proxyAggregate?.summary ?? null;
+  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
   const now = new Date();
-  const proxyLastUpstream = proxySummary
+  const proxyLastUpstream = proxySummary && proxyState?.enabled === true
     ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
     : null;
   const proxyLastUpstreamLine = proxyLastUpstream

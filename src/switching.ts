@@ -9,7 +9,7 @@ import type {
   CodexDesktopLauncher,
   RuntimeQuotaSnapshot,
 } from "./desktop/launcher.js";
-import { isSyntheticProxyRuntimeActive, markProxyRoutingDisabled } from "./proxy/runtime.js";
+import { isSyntheticProxyRuntimeActive, restoreSyntheticProxyRuntime } from "./proxy/runtime.js";
 import {
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
 } from "./desktop/launcher.js";
@@ -366,7 +366,12 @@ export async function performAutoSwitch(
     const proxyModeWasActive = await isSyntheticProxyRuntimeActive(store);
     result = await store.switchAccount(selected.name);
     if (proxyModeWasActive) {
-      await markProxyRoutingDisabled(store);
+      const proxyRetained = await restoreSyntheticProxyRuntime(store);
+      if (!proxyRetained) {
+        result.warnings.push(
+          `Proxy was active, but codexm could not restore the proxy runtime after auto-switching to "${selected.name}". Direct auth is active locally.`,
+        );
+      }
     }
   } catch (error) {
     await appendEventLog(store.paths.codexTeamDir, buildEventPayload({

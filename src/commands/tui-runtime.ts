@@ -19,6 +19,7 @@ import {
   type AccountDashboardExternalUpdate,
 } from "../tui/index.js";
 import { type RunnerOptions, type RunnerResult } from "../codex-cli-runner.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
 
 export type DebugLogger = (message: string) => void;
 
@@ -78,6 +79,9 @@ export async function resolveCurrentManagedAccountLabel(
 ): Promise<string | null> {
   try {
     const current = await store.getCurrentStatus();
+    if (current.account_id === PROXY_ACCOUNT_ID) {
+      return PROXY_ACCOUNT_NAME;
+    }
     return current.matched_accounts.length === 1 ? current.matched_accounts[0] : null;
   } catch {
     return null;

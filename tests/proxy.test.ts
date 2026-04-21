@@ -8,6 +8,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createAccountStore } from "../src/account-store/index.js";
 import { decodeJwtPayload, getSnapshotAccountId, getSnapshotEmail, getSnapshotUserId } from "../src/auth-snapshot.js";
 import type { RunnerOptions } from "../src/codex-cli-runner.js";
+import { writeDaemonState } from "../src/daemon/state.js";
 import { runCli } from "../src/main.js";
 import { PROXY_PORT_ENV_VAR } from "../src/proxy/constants.js";
 import { formatProxyUpstreamSelectionLabel } from "../src/proxy/request-log.js";
@@ -609,7 +610,7 @@ describe("codexm proxy", () => {
     }
   });
 
-  test("switching away from synthetic proxy clears live proxy wiring and marks proxy mode disabled", async () => {
+  test("switching direct account while proxy is active preserves live proxy wiring and keeps proxy enabled", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -650,10 +651,10 @@ describe("codexm proxy", () => {
       expect(currentConfig).toContain('model = "gpt-5.4"');
       expect(currentConfig).toContain("[projects.main]");
       expect(currentConfig).toContain('preferred_auth_method = "chatgpt"');
-      expect(currentConfig).not.toContain("chatgpt_base_url");
-      expect(currentConfig).not.toContain("openai_base_url");
+      expect(currentConfig).toContain('chatgpt_base_url = "http://127.0.0.1:14555/backend-api"');
+      expect(currentConfig).toContain('openai_base_url = "http://127.0.0.1:14555/v1"');
       expect(currentConfig).not.toContain("codexm_proxy");
-      expect((await readProxyState(store.paths.codexTeamDir))?.enabled).toBe(false);
+      expect((await readProxyState(store.paths.codexTeamDir))?.enabled).toBe(true);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1118,6 +1119,109 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy uses the manually selected direct account when autoswitch is off", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { writeSyntheticProxyRuntime } = await import("../src/proxy/config.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "pro", "user-beta"));
+      await writeQuotaMeta(
+        (await store.getManagedAccount("alpha")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 5, one_week_used: 10 },
+      );
+      await writeQuotaMeta(
+        (await store.getManagedAccount("beta")).metaPath,
+        { status: "ok", plan_type: "pro", five_hour_used: 60, one_week_used: 65 },
+      );
+
+      await store.switchAccount("beta");
+      const proxyRuntimeState = await writeSyntheticProxyRuntime({
+        store,
+        state: {
+          pid: 12345,
+          host: "127.0.0.1",
+          port: 14555,
+          started_at: "2026-04-18T00:00:00.000Z",
+          log_path: "/tmp/codexm-proxy.log",
+          base_url: "http://127.0.0.1:14555/backend-api",
+          openai_base_url: "http://127.0.0.1:14555/v1",
+          debug: false,
+        },
+      });
+      await writeProxyState(store.paths.codexTeamDir, proxyRuntimeState);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      const forwardedBodies: Array<Record<string, unknown>> = [];
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (_url, init) => {
+          forwardedBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return sseResponse([
+            {
+              type: "response.completed",
+              response: {
+                id: "resp_manual",
+                object: "response",
+                model: "gpt-5.4",
+                output: [],
+              },
+            },
+          ]);
+        },
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const response = await fetch(`${server.baseUrl}/v1/responses`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            input: "hello",
+          }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(forwardedBodies).toHaveLength(1);
+      } finally {
+        await server.close();
+      }
+
+      expect(requestLogs.at(-1)).toMatchObject({
+        selected_account_name: "beta",
+        selected_auth_mode: "chatgpt",
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("proxy synthetic usage rounds fractional aggregate percents for Desktop compatibility", async () => {
     const { buildProxyUsagePayload } = await import("../src/proxy/quota.js");
 
@@ -1277,6 +1381,20 @@ describe("codexm proxy", () => {
         (await store.getManagedAccount("beta")).metaPath,
         { status: "ok", plan_type: "plus", five_hour_used: 20, one_week_used: 20 },
       );
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
 
       upstreamWs.on("connection", (socket, request) => {
         const connection = {
@@ -1878,6 +1996,7 @@ describe("codexm proxy", () => {
         .split("\n")
         .find((line) => line.includes("cod..oxy"));
       expect(proxyLine).toBeDefined();
+      expect((proxyLine ?? "").trimStart().startsWith("*")).toBe(true);
       expect(proxyLine ?? "").not.toContain("@ proxy");
       expect(proxyLine ?? "").not.toContain(" pro ");
 
@@ -1936,6 +2055,57 @@ describe("codexm proxy", () => {
         `Last upstream: ${proxyLastUpstreamLabel}`,
       );
       expect((dashboard.accounts[0]?.detailLines ?? []).map(stripAnsi)).toContain("Score: 88%");
+
+      const disableStdout = captureWritable();
+      const disableCode = await runCli(["proxy", "disable", "--json"], {
+        store,
+        stdout: disableStdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+      expect(disableCode).toBe(0);
+
+      const disabledTextListStdout = captureWritable();
+      const disabledTextListCode = await runCli(["list"], {
+        store,
+        stdout: disabledTextListStdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+      expect(disabledTextListCode).toBe(0);
+      const disabledTextListOutput = stripAnsi(disabledTextListStdout.read());
+      expect(disabledTextListOutput).not.toContain("Proxy last upstream:");
+      expect(disabledTextListOutput).not.toMatch(/^[ *]@\s+real-main\b/m);
+      const disabledProxyLine = disabledTextListOutput
+        .split("\n")
+        .find((line) => line.includes("cod..oxy"));
+      expect(disabledProxyLine).toBeDefined();
+      expect((disabledProxyLine ?? "").trimStart().startsWith("*")).toBe(false);
+
+      const disabledListStdout = captureWritable();
+      const disabledListCode = await runCli(["list", "--json"], {
+        store,
+        stdout: disabledListStdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+      expect(disabledListCode).toBe(0);
+      const disabledListPayload = JSON.parse(disabledListStdout.read()) as {
+        proxy: { name: string } | null;
+        proxy_last_upstream: { account_name: string; auth_mode: string; label: string | null } | null;
+        successes: Array<{ name: string; is_current: boolean }>;
+      };
+      expect(disabledListPayload.proxy).toMatchObject({
+        name: "proxy",
+      });
+      expect(disabledListPayload.proxy_last_upstream).toBeNull();
+      expect(disabledListPayload.successes[0]).toMatchObject({
+        name: "proxy",
+        is_current: false,
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

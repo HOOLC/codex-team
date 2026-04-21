@@ -19,7 +19,7 @@ import {
 } from "./quota-display.js";
 import { buildListSummary } from "./quota-summary.js";
 import { rankListCandidates, selectCurrentNextResetWindow, toAutoSwitchCandidate } from "./quota-ranking.js";
-import { PROXY_ACCOUNT_ID } from "../proxy/constants.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
 import type {
   AutoSwitchCandidate,
   CurrentListStatusLike,
@@ -253,6 +253,9 @@ function describeQuotaAccounts(
   }
 
   const currentAccounts = new Set(currentStatus.matched_accounts);
+  if (currentStatus.account_id === PROXY_ACCOUNT_ID) {
+    currentAccounts.add(PROXY_ACCOUNT_NAME);
+  }
   const rankedCandidates = rankListCandidates(accounts);
   const autoSwitchCandidates = new Map(
     accounts

@@ -16,6 +16,7 @@ import {
   createTempHome,
   jsonResponse,
   textResponse,
+  writeProxyRequestLog,
   writeCurrentApiKeyAuth,
   writeCurrentAuth,
   writeCurrentConfig,
@@ -1158,6 +1159,12 @@ wire_api = "responses"
         },
         successes: [
           {
+            name: "proxy",
+            is_current: false,
+            available: "available",
+            refresh_status: "ok",
+          },
+          {
             name: "quota-main",
             is_current: true,
             available: "available",
@@ -1493,7 +1500,10 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 5);
+      const dataRows = lines
+        .slice(tableStartIndex + 2)
+        .filter((line) => !line.includes("proxy"))
+        .slice(0, 3);
 
       expect(dataRows[0]).toContain("beta");
       expect(dataRows[1]).toContain("*  gamma");
@@ -1712,7 +1722,7 @@ wire_api = "responses"
         tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
           ? tableStartIndex - 1
           : tableStartIndex;
-      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 9);
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 12);
       const weeklyBlockedRow = tableLines.find((line) => line.includes("quota-weekly-blocked"));
       const fiveHourBlockedRow = tableLines.find((line) => line.includes("quota-five-hour-blocked"));
       const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
@@ -1831,7 +1841,10 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+      const dataRows = lines
+        .slice(tableStartIndex + 2)
+        .filter((line) => !line.includes("proxy"))
+        .slice(0, 2);
 
       expect(dataRows[0]).toContain("*  weekly-bottleneck-sooner");
       expect(dataRows[1]).toContain("five-hour-bottleneck-later");
@@ -1924,7 +1937,7 @@ wire_api = "responses"
         tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
           ? tableStartIndex - 1
           : tableStartIndex;
-      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 5);
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 7);
       const decimalRow = tableLines.find((line) => line.includes("quota-decimal [stale]"));
       const integerRow = tableLines.find((line) => line.includes("quota-integer [stale]"));
 
@@ -2015,7 +2028,10 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+      const dataRows = lines
+        .slice(tableStartIndex + 2)
+        .filter((line) => !line.includes("proxy"))
+        .slice(0, 2);
 
       expect(dataRows[0]).toContain("five-hour-blocked-sooner");
       expect(dataRows[1]).toContain("weekly-blocked-later");
@@ -2093,8 +2109,8 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
-      const dataRows = tableLines.slice(2);
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 6);
+      const dataRows = tableLines.slice(2).filter((line) => !line.includes("proxy"));
       const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
       const bothBlockedRow = dataRows.find((line) => line.includes("both-blocked-later"));
 
@@ -2478,6 +2494,119 @@ wire_api = "responses"
       expect(debugOutput).toContain("[debug] list: observed_5h_1w_ratio window=24h plan=plus");
       expect(debugOutput).not.toContain("dimension=bucket");
       expect(debugOutput).not.toContain("[debug] warning: list observed_5h_1w_ratio_mismatch window=24h plan=plus");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list only shows proxy last-upstream metadata when proxy routing is enabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const { writeProxyState } = await import("../src/proxy/state.js");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 18,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 900,
+                reset_at: 1_777_000_000,
+              },
+              secondary_window: {
+                used_percent: 42,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 90_000,
+                reset_at: 1_777_090_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "7",
+            },
+          }),
+      });
+      await writeCurrentAuth(homeDir, "acct-alpha");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await writeProxyRequestLog(homeDir, [{
+        ts: "2026-04-21T10:15:00.000Z",
+        selected_account_name: "alpha",
+        selected_auth_mode: "chatgpt",
+      }]);
+
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 0,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "",
+        log_path: join(store.paths.codexTeamDir, "logs", "proxy.log"),
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: false,
+      });
+
+      const disabledStdout = captureWritable();
+      const disabledCode = await runCli(["list", "--json"], {
+        store,
+        stdout: disabledStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(disabledCode).toBe(0);
+      expect(JSON.parse(disabledStdout.read())).toMatchObject({
+        proxy: {
+          name: "proxy",
+        },
+        proxy_last_upstream: null,
+        successes: [
+          {
+            name: "proxy",
+            is_current: false,
+          },
+          {
+            name: "alpha",
+            is_current: true,
+          },
+        ],
+      });
+
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 12345,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "2026-04-21T10:00:00.000Z",
+        log_path: join(store.paths.codexTeamDir, "logs", "proxy.log"),
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: true,
+      });
+
+      const enabledStdout = captureWritable();
+      const enabledCode = await runCli(["list", "--json"], {
+        store,
+        stdout: enabledStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(enabledCode).toBe(0);
+      expect(JSON.parse(enabledStdout.read())).toMatchObject({
+        proxy: {
+          name: "proxy",
+        },
+        proxy_last_upstream: {
+          account_name: "alpha",
+          auth_mode: "chatgpt",
+        },
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

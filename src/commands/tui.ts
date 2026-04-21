@@ -67,13 +67,14 @@ import {
   readLatestProxyUpstreamSelection,
   type ProxyLastUpstreamSelection,
 } from "../proxy/request-log.js";
+import { readProxyState } from "../proxy/state.js";
 import {
   deleteAccountForTui,
   exportShareBundleForTui,
   importShareBundleForTui,
   previewShareBundleForTui,
 } from "./tui-share.js";
-import { enableProxyMode } from "./proxy.js";
+import { disableProxyMode, enableProxyMode } from "./proxy.js";
 import {
   disableAutoswitchMode,
   enableAutoswitchMode,
@@ -81,6 +82,7 @@ import {
 } from "./autoswitch.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { triggerDaemonAuthRefresh } from "../daemon/trigger.js";
+import { refreshManagedDesktopAfterSwitch } from "../switching.js";
 import {
   createAccountDashboardExternalUpdateFeed,
   resolveCurrentManagedAccountLabel,
@@ -525,6 +527,7 @@ export async function buildAccountDashboardSnapshot(options: {
   const { accounts, warnings: accountWarnings } = await options.store.listAccounts();
   const current = await options.store.getCurrentStatus();
   const daemonStatus = await daemonProcessManager.getStatus();
+  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
   const watchHistory = await readWatchHistory(options.store, new Date());
   const usageSummary = await loadFreshLocalUsageSummary(options.store);
   const refreshedByName = new Map(result.successes.map((account) => [account.name, account] as const));
@@ -532,7 +535,9 @@ export async function buildAccountDashboardSnapshot(options: {
     store: options.store,
     includeWhenDisabled: true,
   });
-  const proxyLastUpstream = await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir);
+  const proxyLastUpstream = proxyState?.enabled === true
+    ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
+    : null;
   return buildDashboardSnapshot({
     accounts,
     current,
@@ -568,13 +573,16 @@ export async function buildCachedAccountDashboardSnapshot(options: {
   const { accounts, warnings } = await options.store.listAccounts();
   const current = await options.store.getCurrentStatus();
   const daemonStatus = await daemonProcessManager.getStatus();
+  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
   const watchHistory = await readWatchHistory(options.store, new Date());
   const usageSummary = await loadCachedLocalUsageSummary(options.store);
   const proxyAggregate = await buildProxyQuotaAggregate({
     store: options.store,
     includeWhenDisabled: true,
   });
-  const proxyLastUpstream = await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir);
+  const proxyLastUpstream = proxyState?.enabled === true
+    ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
+    : null;
 
   return buildDashboardSnapshot({
     accounts,
@@ -693,18 +701,56 @@ export async function handleTuiCommand(options: {
           localSwitchInFlightRef.value = true;
           try {
             if (name === PROXY_ACCOUNT_NAME) {
+              const proxyCurrentlyActive = currentManagedAccountRef.value === PROXY_ACCOUNT_NAME;
+              const warnings: string[] = [];
+              if (proxyCurrentlyActive && !switchOptions.force) {
+                await disableProxyMode({
+                  store: options.store,
+                  proxyProcessManager,
+                });
+                await refreshManagedDesktopAfterSwitch(
+                  warnings,
+                  options.desktopLauncher,
+                  {
+                    force: false,
+                    signal: switchOptions.signal ?? options.interruptSignal,
+                    statusStream: silentStatusStream,
+                    onStatusMessage: switchOptions.onStatusMessage,
+                    statusDelayMs: options.managedDesktopWaitStatusDelayMs,
+                    statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+                  },
+                );
+                currentManagedAccountRef.value = await resolveCurrentManagedAccountLabel(options.store);
+                return {
+                  statusMessage: "Disabled proxy.",
+                  warningMessages: warnings,
+                };
+              }
+
               await enableProxyMode({
                 store: options.store,
                 proxyProcessManager,
                 debug: false,
               });
+              await refreshManagedDesktopAfterSwitch(
+                warnings,
+                options.desktopLauncher,
+                {
+                  force: switchOptions.force,
+                  signal: switchOptions.signal ?? options.interruptSignal,
+                  statusStream: silentStatusStream,
+                  onStatusMessage: switchOptions.onStatusMessage,
+                  statusDelayMs: options.managedDesktopWaitStatusDelayMs,
+                  statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+                },
+              );
               currentManagedAccountRef.value = PROXY_ACCOUNT_NAME;
               return {
-                statusMessage: 'Switched to "proxy".',
-                warningMessages: [],
+                statusMessage: proxyCurrentlyActive ? "Reloaded proxy." : 'Switched to "proxy".',
+                warningMessages: warnings,
               };
             }
-            const { result, desktopForceWarning } = await performManualSwitch({
+            const { result, desktopForceWarning, proxyRetained } = await performManualSwitch({
               name,
               force: switchOptions.force,
               store: options.store,
@@ -716,10 +762,12 @@ export async function handleTuiCommand(options: {
               managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
               managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
             });
-            currentManagedAccountRef.value = result.account.name;
+            currentManagedAccountRef.value = proxyRetained ? PROXY_ACCOUNT_NAME : result.account.name;
 
             return {
-              statusMessage: `Switched to "${result.account.name}".`,
+              statusMessage: proxyRetained
+                ? `Updated direct account to "${result.account.name}" while proxy remains enabled.`
+                : `Switched to "${result.account.name}".`,
               warningMessages: [
                 ...result.warnings,
                 ...(desktopForceWarning ? [desktopForceWarning] : []),

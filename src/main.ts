@@ -27,7 +27,7 @@ import {
   type ProxyProcessManager,
 } from "./proxy/process.js";
 import { readProxyState } from "./proxy/state.js";
-import { DEFAULT_PROXY_HOST, resolveProxyPort } from "./proxy/constants.js";
+import { DEFAULT_PROXY_HOST, PROXY_ACCOUNT_NAME, resolveProxyPort } from "./proxy/constants.js";
 import {
   createCodexLoginProvider,
   type CodexLoginProvider,
@@ -455,6 +455,11 @@ export async function runCli(
 
         if (!name) {
           throw new Error(`Usage: ${getUsage("switch")}`);
+        }
+        if (name === PROXY_ACCOUNT_NAME) {
+          throw new Error(
+            'Use "codexm proxy enable" or the dashboard proxy row to enable proxy mode.',
+          );
         }
         ensureAccountName(name);
         const { result, quota, desktopForceWarning } = await performManualSwitch({

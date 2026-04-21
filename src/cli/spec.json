@@ -37,7 +37,7 @@
     "codexm list refreshes quota data, shows the current managed account, marks current rows with \"*\", and marks the most recent real proxy upstream row with \"@\" when known; use --refresh to ensure a background auth refresh and --verbose to expand score inputs.",
     "codexm launch starts Codex Desktop on macOS and ensures the shared background daemon is running.",
     "codexm autoswitch enable turns on daemon-backed auto-switching; disable leaves the baseline daemon running.",
-    "codexm proxy enable installs a synthetic ChatGPT auth pointed at the local proxy while preserving the live provider identity; disable restores the previous direct auth/config backup or strips proxy config when no backup is available.",
+    "codexm proxy enable installs a synthetic ChatGPT auth pointed at the local proxy while preserving the live provider identity; when autoswitch is off, the proxy uses the direct account selected by codexm switch instead of disabling proxy.",
     "codexm export writes a share bundle for the current auth or a managed account; codexm import saves a shared bundle without switching current auth.",
     "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, sharing bundles, deleting accounts, undoing the latest import/export/delete, and opening codex or Desktop from the selected account.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
@@ -422,8 +422,8 @@
           {
             "usage": "codexm tui [query]",
             "description": {
-              "en": "explicitly open the account dashboard, optionally with an initial filter",
-              "zh-CN": "显式打开账号面板，可选带初始筛选词"
+              "en": "explicitly open the account dashboard, optionally with an initial filter; Enter on the proxy row toggles proxy on or off",
+              "zh-CN": "显式打开账号面板，可选带初始筛选词；在 proxy 行上按 Enter 会切换 proxy 开关"
             }
           },
           {
@@ -445,8 +445,8 @@
           {
             "usage": "codexm switch <name>",
             "description": {
-              "en": "switch to a saved account",
-              "zh-CN": "切换到指定保存账号"
+              "en": "switch to a saved direct account; with proxy enabled and autoswitch off, this updates the proxy manual upstream",
+              "zh-CN": "切换到指定保存的 direct 账号；若 proxy 已启用且 autoswitch 关闭，这也会更新 proxy 的手动上游账号"
             }
           },
           {

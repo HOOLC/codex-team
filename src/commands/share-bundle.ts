@@ -24,6 +24,12 @@ import {
 import {
   validateConfigSnapshot,
 } from "../account-store/config.js";
+import {
+  PROXY_ACCOUNT_NAME,
+  ensureNotReservedProxyAccountName,
+  isReservedProxyAccountName,
+} from "../proxy/constants.js";
+import { isSyntheticProxyAuthSnapshot } from "../proxy/synthetic-auth.js";
 
 type DebugLogger = (message: string) => void;
 
@@ -119,6 +125,11 @@ export async function exportShareBundle(options: {
       throw new Error("Current ~/.codex/auth.json does not exist.");
     }
     authSnapshot = parseAuthSnapshot(await readFile(store.paths.currentAuthPath, "utf8"));
+    if (isSyntheticProxyAuthSnapshot(authSnapshot)) {
+      throw new Error(
+        `The synthetic "${PROXY_ACCOUNT_NAME}" account cannot be exported. Export a saved direct account instead, or disable proxy first.`,
+      );
+    }
     if (authSnapshot.auth_mode === "apikey" && (await pathExists(store.paths.currentConfigPath))) {
       configToml = await readFile(store.paths.currentConfigPath, "utf8");
     }
@@ -127,6 +138,11 @@ export async function exportShareBundle(options: {
     const managedName = sourceName;
     if (!managedName) {
       throw new Error("Managed export source is missing an account name.");
+    }
+    if (isReservedProxyAccountName(managedName)) {
+      throw new Error(
+        `The synthetic "${PROXY_ACCOUNT_NAME}" account cannot be exported. Export a saved direct account instead.`,
+      );
     }
     const account = await store.getManagedAccount(managedName);
     authSnapshot = parseAuthSnapshot(await readFile(account.authPath, "utf8"));
@@ -162,6 +178,7 @@ export async function importShareBundle(options: {
   force?: boolean;
 }) {
   ensureAccountName(options.localName);
+  ensureNotReservedProxyAccountName(options.localName, "name an imported managed account");
   const bundle = await readShareBundleFile(options.bundlePath);
   const facts = deriveShareBundleFacts(bundle.auth.auth_json);
 
@@ -278,6 +295,7 @@ export async function handleImportCommand(options: {
     throw new Error(`Usage: ${getUsage("import")}`);
   }
   ensureAccountName(localName);
+  ensureNotReservedProxyAccountName(localName, "name an imported managed account");
 
   const bundlePath = positionals[0];
   const { account } = await importShareBundle({

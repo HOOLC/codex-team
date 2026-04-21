@@ -14,7 +14,7 @@ import { getPlatform } from "../platform.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { defaultDaemonState } from "../daemon/state.js";
 import { proxyBackendBaseUrl, proxyOpenAIBaseUrl, resolveProxyPort } from "../proxy/constants.js";
-import { isSyntheticProxyRuntimeActive, markProxyRoutingDisabled } from "../proxy/runtime.js";
+import { isSyntheticProxyRuntimeActive, restoreSyntheticProxyRuntime } from "../proxy/runtime.js";
 import {
   describeBusySwitchLock,
   resolveManagedAccountByName,
@@ -145,6 +145,12 @@ export async function handleLaunchCommand(options: {
         warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
         switchedAccount = switchResult.account;
         switchBackupPath = switchResult.backup_path;
+        if (proxyModeWasActive && !await restoreSyntheticProxyRuntime(store)) {
+          warnings.push(
+            `Proxy was active, but codexm could not restore the proxy runtime after switching "${targetName}". Direct auth is active locally.`,
+          );
+          proxyModeWasActive = false;
+        }
         debugLog(`launch: pre-switched account=${switchResult.account.name}`);
       } else if (targetName) {
         switchedAccount = await resolveManagedAccountByName(store, targetName);
@@ -165,9 +171,6 @@ export async function handleLaunchCommand(options: {
           );
         }
         await desktopLauncher.writeManagedState(managedState);
-        if (proxyModeWasActive) {
-          await markProxyRoutingDisabled(store);
-        }
         debugLog(
           `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
         );

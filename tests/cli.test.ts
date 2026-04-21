@@ -2119,6 +2119,11 @@ describe("CLI", () => {
       expect(JSON.parse(stdout.read())).toMatchObject({
         successes: [
           {
+            name: "proxy",
+            available: "available",
+            is_current: false,
+          },
+          {
             name: "alpha",
             available: "available",
           },
@@ -2628,6 +2633,25 @@ describe("CLI", () => {
       expect(exitCode).toBe(1);
       expect(stderr.read()).toContain("Account name must match");
       expect(stderr.read()).not.toContain("Another codexm switch or launch operation is already in progress.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch rejects the synthetic proxy account name with a proxy-specific hint", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stderr = captureWritable();
+      const exitCode = await runCli(["switch", "proxy"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain('Use "codexm proxy enable" or the dashboard proxy row to enable proxy mode.');
     } finally {
       await cleanupTempHome(homeDir);
     }

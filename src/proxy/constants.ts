@@ -12,6 +12,18 @@ export const PROXY_PORT_ENV_VAR = "CODEXM_PROXY_PORT";
 export const CHATGPT_UPSTREAM_BASE_URL = "https://chatgpt.com";
 export const OPENAI_UPSTREAM_BASE_URL = "https://api.openai.com/v1";
 
+export function isReservedProxyAccountName(value: string | null | undefined): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === PROXY_ACCOUNT_NAME;
+}
+
+export function ensureNotReservedProxyAccountName(name: string, action: string): void {
+  if (isReservedProxyAccountName(name)) {
+    throw new Error(
+      `"${PROXY_ACCOUNT_NAME}" is reserved for the synthetic proxy account and cannot be used to ${action}.`,
+    );
+  }
+}
+
 function parseProxyPort(raw: string, sourceLabel: string): number {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65_535) {

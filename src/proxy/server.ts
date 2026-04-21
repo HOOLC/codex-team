@@ -10,6 +10,7 @@ import {
   type AuthSnapshot,
 } from "../auth-snapshot.js";
 import { rankAutoSwitchCandidates } from "../cli/quota.js";
+import { readDaemonState } from "../daemon/state.js";
 import { normalizeDisplayedScore } from "../plan-quota-profile.js";
 import { extractChatGPTAuth } from "../quota-client.js";
 import {
@@ -17,6 +18,7 @@ import {
   DEFAULT_PROXY_HOST,
   OPENAI_UPSTREAM_BASE_URL,
 } from "./constants.js";
+import { resolveProxyManualUpstreamAccountName } from "./runtime.js";
 import { isSyntheticProxyBearerToken } from "./synthetic-auth.js";
 import { buildProxyUsagePayloadForStore } from "./quota.js";
 
@@ -242,13 +244,33 @@ function isChatGPTAccount(account: ManagedAccount): boolean {
   return account.auth_mode === "chatgpt";
 }
 
+async function toProxyUpstreamAccount(
+  account: ManagedAccount,
+  selectedCandidate: {
+    current_score: number;
+    plan_type: string | null;
+    available: string | null;
+  } | null,
+): Promise<ProxyUpstreamAccount> {
+  const displayedScore = selectedCandidate
+    ? normalizeDisplayedScore(selectedCandidate.current_score, selectedCandidate.plan_type, { clamp: false })
+    : null;
+  return {
+    account,
+    snapshot: await readAuthSnapshotFile(account.authPath),
+    displayedScore,
+    forceFastServiceTier: selectedCandidate?.available === "unavailable",
+  };
+}
+
 async function selectProxyAccount(
   store: AccountStore,
   preference: "chatgpt" | "apikey" | "any",
 ): Promise<ProxyUpstreamAccount | null> {
-  const [{ accounts }, quotaList] = await Promise.all([
+  const [{ accounts }, quotaList, daemonState] = await Promise.all([
     store.listAccounts(),
     store.listQuotaSummaries(),
+    readDaemonState(store.paths.codexTeamDir),
   ]);
   const eligibleAccounts = accounts.filter((account) => account.auto_switch_eligible !== false);
   const accountByName = new Map(eligibleAccounts.map((account) => [account.name, account] as const));
@@ -268,32 +290,41 @@ async function selectProxyAccount(
     return true;
   };
 
+  const matchingFallbackNames = eligibleAccounts
+    .filter(typeMatches)
+    .map((account) => account.name);
+  const autoswitchEnabled = daemonState?.auto_switch === true;
+  if (!autoswitchEnabled) {
+    const manualAccountName = await resolveProxyManualUpstreamAccountName(store, eligibleAccounts);
+    const selectedName = manualAccountName && matchingFallbackNames.includes(manualAccountName)
+      ? manualAccountName
+      : matchingFallbackNames[0] ?? null;
+    const selectedAccount = selectedName ? accountByName.get(selectedName) ?? null : null;
+    if (!selectedAccount) {
+      return null;
+    }
+
+    const selectedQuota = selectedName ? quotaByName.get(selectedName) ?? null : null;
+    const selectedCandidate = selectedQuota
+      ? rankAutoSwitchCandidates([selectedQuota]).find((candidate) => candidate.name === selectedName) ?? null
+      : null;
+    return await toProxyUpstreamAccount(selectedAccount, selectedCandidate);
+  }
+
   const rankedCandidates = rankAutoSwitchCandidates([...quotaByName.values()])
     .filter((candidate) => {
       const account = accountByName.get(candidate.name);
       return account ? typeMatches(account) : false;
     });
   const rankedCandidateByName = new Map(rankedCandidates.map((candidate) => [candidate.name, candidate] as const));
-  const rankedNames = rankedCandidates.map((candidate) => candidate.name);
-  const fallbackNames = eligibleAccounts
-    .filter(typeMatches)
-    .map((account) => account.name);
-  const selectedName = [...rankedNames, ...fallbackNames][0];
+  const selectedName = [...rankedCandidates.map((candidate) => candidate.name), ...matchingFallbackNames][0];
   const selectedAccount = selectedName ? accountByName.get(selectedName) ?? null : null;
   if (!selectedAccount) {
     return null;
   }
 
   const selectedCandidate = selectedName ? rankedCandidateByName.get(selectedName) ?? null : null;
-  const displayedScore = selectedCandidate
-    ? normalizeDisplayedScore(selectedCandidate.current_score, selectedCandidate.plan_type, { clamp: false })
-    : null;
-  return {
-    account: selectedAccount,
-    snapshot: await readAuthSnapshotFile(selectedAccount.authPath),
-    displayedScore,
-    forceFastServiceTier: selectedCandidate?.available === "unavailable",
-  };
+  return await toProxyUpstreamAccount(selectedAccount, selectedCandidate);
 }
 
 function upstreamChatGPTUrl(pathname: string, search: string): string {
