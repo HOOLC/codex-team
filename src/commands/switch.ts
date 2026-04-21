@@ -3,6 +3,7 @@ import { type CliQuotaSummary, toCliQuotaSummary } from "../cli/quota.js";
 import { shouldSkipManagedDesktopRefresh } from "../desktop/managed-state.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
 import { appendEventLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
+import { isSyntheticProxyRuntimeActive, markProxyRoutingDisabled } from "../proxy/runtime.js";
 import {
   describeBusySwitchLock,
   refreshManagedDesktopAfterSwitch,
@@ -53,7 +54,11 @@ export async function performManualSwitch(
   let desktopForceWarning: string | null = null;
   const result = await (async () => {
     try {
+      const proxyModeWasActive = await isSyntheticProxyRuntimeActive(options.store);
       const switched = await options.store.switchAccount(options.name);
+      if (proxyModeWasActive) {
+        await markProxyRoutingDisabled(options.store);
+      }
       switched.warnings = stripManagedDesktopWarning(switched.warnings);
       const skipDesktopRefresh = await shouldSkipManagedDesktopRefresh(
         options.store,

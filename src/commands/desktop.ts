@@ -14,6 +14,7 @@ import { getPlatform } from "../platform.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { defaultDaemonState } from "../daemon/state.js";
 import { proxyBackendBaseUrl, proxyOpenAIBaseUrl, resolveProxyPort } from "../proxy/constants.js";
+import { isSyntheticProxyRuntimeActive, markProxyRoutingDisabled } from "../proxy/runtime.js";
 import {
   describeBusySwitchLock,
   resolveManagedAccountByName,
@@ -120,6 +121,7 @@ export async function handleLaunchCommand(options: {
 
   let switchedAccount: Awaited<ReturnType<AccountStore["switchAccount"]>>["account"] | null = null;
   let switchBackupPath: string | null = null;
+  let proxyModeWasActive = false;
   const requestedTargetName = name;
 
   if (auto || requestedTargetName) {
@@ -138,6 +140,7 @@ export async function handleLaunchCommand(options: {
       }
       const currentStatus = await store.getCurrentStatus();
       if (targetName && !currentStatus.matched_accounts.includes(targetName)) {
+        proxyModeWasActive = await isSyntheticProxyRuntimeActive(store);
         const switchResult = await store.switchAccount(targetName);
         warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
         switchedAccount = switchResult.account;
@@ -162,6 +165,9 @@ export async function handleLaunchCommand(options: {
           );
         }
         await desktopLauncher.writeManagedState(managedState);
+        if (proxyModeWasActive) {
+          await markProxyRoutingDisabled(store);
+        }
         debugLog(
           `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
         );

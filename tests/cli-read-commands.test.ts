@@ -192,6 +192,8 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm overlay <create|delete|gc> ...");
     expect(output).toContain("codexm watch [--no-auto-switch]");
     expect(output).toContain("codexm proxy <enable|disable|status|stop> [--json]");
+    expect(output).toContain("codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]");
+    expect(output).toContain("codexm proxy disable [--force] [--json]");
     expect(output).toContain("codexm tui [query]");
     expect(output).toContain("codexm run [--account <name>|--proxy] [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");

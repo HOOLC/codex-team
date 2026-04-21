@@ -37,7 +37,7 @@
     "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --refresh to ensure a background auth refresh and --verbose to expand score inputs.",
     "codexm launch starts Codex Desktop on macOS and ensures the shared background daemon is running.",
     "codexm autoswitch enable turns on daemon-backed auto-switching; disable leaves the baseline daemon running.",
-    "codexm proxy enable installs a synthetic ChatGPT auth pointed at the local proxy; disable restores the previous direct auth/config backup or strips proxy config when no backup is available.",
+    "codexm proxy enable installs a synthetic ChatGPT auth pointed at the local proxy while preserving the live provider identity; disable restores the previous direct auth/config backup or strips proxy config when no backup is available.",
     "codexm export writes a share bundle for the current auth or a managed account; codexm import saves a shared bundle without switching current auth.",
     "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, sharing bundles, deleting accounts, undoing the latest import/export/delete, and opening codex or Desktop from the selected account.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
@@ -150,13 +150,13 @@
     },
     {
       "name": "proxy",
-      "flags": ["--dry-run", "--json", "--host", "--port"],
+      "flags": ["--dry-run", "--force", "--json", "--host", "--port"],
       "helpUsages": [
         "codexm proxy <enable|disable|status|stop> [--json]",
-        "codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--json]",
+        "codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]",
         "codexm proxy status [--json]",
         "codexm proxy stop [--json]",
-        "codexm proxy disable [--json]"
+        "codexm proxy disable [--force] [--json]"
       ],
       "usageErrors": {
         "default": "codexm proxy <enable|disable|status|stop> [--json]"

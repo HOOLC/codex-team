@@ -10,7 +10,7 @@ import { decodeJwtPayload, getSnapshotAccountId, getSnapshotEmail, getSnapshotUs
 import type { RunnerOptions } from "../src/codex-cli-runner.js";
 import { runCli } from "../src/main.js";
 import { PROXY_PORT_ENV_VAR } from "../src/proxy/constants.js";
-import { writeProxyState } from "../src/proxy/state.js";
+import { readProxyState, writeProxyState } from "../src/proxy/state.js";
 import {
   cleanupTempHome,
   createAuthPayload,
@@ -300,12 +300,11 @@ describe("codexm proxy", () => {
         email: "proxy@codexm.local",
       });
       const proxyConfig = await readCurrentConfig(homeDir);
-      expect(proxyConfig).toContain('model_provider = "codexm_proxy"');
       expect(proxyConfig).toContain('chatgpt_base_url = "http://127.0.0.1:14555/backend-api"');
       expect(proxyConfig).toContain('openai_base_url = "http://127.0.0.1:14555/v1"');
       expect(proxyConfig).toContain('preferred_auth_method = "chatgpt"');
-      expect(proxyConfig).toContain("[model_providers.codexm_proxy]");
-      expect(proxyConfig).toContain('supports_websockets = true');
+      expect(proxyConfig).not.toContain('model_provider = "codexm_proxy"');
+      expect(proxyConfig).not.toContain("[model_providers.codexm_proxy]");
       expect(proxyConfig).not.toContain("old.example");
 
       const disableStdout = captureWritable();
@@ -470,6 +469,7 @@ describe("codexm proxy", () => {
       } as never);
 
       expect(exitCode).toBe(0);
+      expect(await readCurrentConfig(homeDir)).toContain('chatgpt_base_url = "http://127.0.0.1:14555/backend-api"');
       expect(await readCurrentConfig(homeDir)).toContain('model_provider = "codexm_proxy"');
       expect(getSnapshotAccountId(await readCurrentAuth(homeDir))).toBe("codexm-proxy-account");
     } finally {
@@ -511,10 +511,10 @@ describe("codexm proxy", () => {
     }
   });
 
-  test("proxy config keeps proxy auth keys at TOML top level before later tables", async () => {
-    const { buildProxyConfig } = await import("../src/proxy/config.js");
+  test("live proxy config keeps transport keys at TOML top level before later tables", async () => {
+    const { buildLiveProxyConfig } = await import("../src/proxy/config.js");
 
-    const config = buildProxyConfig(
+    const config = buildLiveProxyConfig(
       [
         'model = "gpt-5"',
         "",
@@ -528,17 +528,9 @@ describe("codexm proxy", () => {
     expect(config).toContain(
       [
         'model = "gpt-5"',
-        'model_provider = "codexm_proxy"',
         'preferred_auth_method = "chatgpt"',
         'chatgpt_base_url = "http://127.0.0.1:14555/backend-api"',
         'openai_base_url = "http://127.0.0.1:14555/v1"',
-        "",
-        "[model_providers.codexm_proxy]",
-        'name = "codexm_proxy"',
-        'base_url = "http://127.0.0.1:14555/v1"',
-        'wire_api = "responses"',
-        "requires_openai_auth = true",
-        "supports_websockets = true",
         "",
         "[marketplaces.openai-bundled]",
       ].join("\n"),
@@ -549,6 +541,120 @@ describe("codexm proxy", () => {
         'preferred_auth_method = "chatgpt"',
       ].join("\n"),
     );
+    expect(config).not.toContain("[model_providers.codexm_proxy]");
+  });
+
+  test("proxy enable refreshes the managed Desktop session and accepts --force", async () => {
+    const homeDir = await createTempHome();
+    const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-direct", "chatgpt", "plus", "user-direct");
+      const store = createAccountStore(homeDir);
+      const proxyProcess = createProxyProcessManagerStub();
+
+      const exitCode = await runCli(["proxy", "enable", "--force", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
+        }),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+
+      expect(exitCode).toBe(0);
+      expect(applyManagedSwitchCalls).toEqual([{ force: true, signal: undefined, timeoutMs: 120_000 }]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy disable emits a force warning when no managed Desktop session is running", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-direct", "chatgpt", "plus", "user-direct");
+      const store = createAccountStore(homeDir);
+      const proxyProcess = createProxyProcessManagerStub({ running: true });
+      await runCli(["proxy", "enable", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+
+      const stderr = captureWritable();
+      const exitCode = await runCli(["proxy", "disable", "--force", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          applyManagedSwitch: async () => false,
+          listRunningApps: async () => [],
+        }),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toContain("Warning: --force is only meaningful with a managed Desktop session.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switching away from synthetic proxy clears live proxy wiring and marks proxy mode disabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-real", "chatgpt", "plus", "user-real");
+      await writeCurrentConfig(
+        homeDir,
+        [
+          'model = "gpt-5.4"',
+          "",
+          "[projects.main]",
+          'path = "/tmp/project"',
+          'preferred_auth_method = "chatgpt"',
+        ].join("\n"),
+      );
+      const store = createAccountStore(homeDir);
+      await store.saveCurrentAccount("real-main");
+      const proxyProcess = createProxyProcessManagerStub();
+
+      const enableCode = await runCli(["proxy", "enable", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+      expect(enableCode).toBe(0);
+
+      const switchCode = await runCli(["switch", "real-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+      expect(switchCode).toBe(0);
+
+      const currentConfig = await readCurrentConfig(homeDir);
+      expect(currentConfig).toContain('model = "gpt-5.4"');
+      expect(currentConfig).toContain("[projects.main]");
+      expect(currentConfig).toContain('preferred_auth_method = "chatgpt"');
+      expect(currentConfig).not.toContain("chatgpt_base_url");
+      expect(currentConfig).not.toContain("openai_base_url");
+      expect(currentConfig).not.toContain("codexm_proxy");
+      expect((await readProxyState(store.paths.codexTeamDir))?.enabled).toBe(false);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
   });
 
   test("run --proxy starts codex in an isolated synthetic proxy runtime", async () => {
@@ -1224,6 +1330,15 @@ describe("codexm proxy", () => {
           ],
         });
         expect(firstEvents.map((event) => event.type)).toContain("response.completed");
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const summaries = await store.listQuotaSummaries();
+          const alpha = summaries.accounts.find((account) => account.name === "alpha");
+          const beta = summaries.accounts.find((account) => account.name === "beta");
+          if (alpha?.five_hour?.used_percent === 100 && beta?.five_hour?.used_percent === 10) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
 
         const secondEvents = await runTurn({
           type: "response.create",

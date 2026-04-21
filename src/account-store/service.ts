@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import {
   copyFile,
+  readFile,
   rename,
   rm,
   stat,
@@ -51,6 +52,9 @@ import {
   type QuotaClientMode,
 } from "../quota-client.js";
 import { appendEventLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
+import { stripProxyRuntimeConfig } from "../proxy/config.js";
+import { resolveProxyDataDir } from "../proxy/state.js";
+import { isSyntheticProxyAuthSnapshot } from "../proxy/synthetic-auth.js";
 export type {
   AccountQuotaSummary,
   CurrentAccountStatus,
@@ -403,10 +407,18 @@ export class AccountStore {
     const account = await this.repository.readManagedAccount(name);
     const warnings: string[] = [];
     let backupPath: string | null = null;
+    let syntheticProxyWasActive = false;
 
     await ensureDirectory(this.paths.codexDir, DIRECTORY_MODE);
 
     if (await pathExists(this.paths.currentAuthPath)) {
+      try {
+        syntheticProxyWasActive = isSyntheticProxyAuthSnapshot(
+          await readAuthSnapshotFile(this.paths.currentAuthPath),
+        );
+      } catch {
+        syntheticProxyWasActive = false;
+      }
       backupPath = join(this.paths.backupsDir, "last-active-auth.json");
       await copyFile(this.paths.currentAuthPath, backupPath);
       await chmodIfPossible(backupPath, FILE_MODE);
@@ -432,9 +444,23 @@ export class AccountStore {
       );
     } else if (await pathExists(this.paths.currentConfigPath)) {
       const currentRawConfig = await readJsonFile(this.paths.currentConfigPath);
+      let configSource = currentRawConfig;
+      if (syntheticProxyWasActive) {
+        const directConfigBackupPath = join(
+          resolveProxyDataDir(this.paths.codexTeamDir),
+          "last-direct-config.toml",
+        );
+        if (await pathExists(directConfigBackupPath)) {
+          configSource = await readFile(directConfigBackupPath, "utf8");
+        }
+      }
+      const sanitizedConfig =
+        syntheticProxyWasActive && configSource === currentRawConfig
+          ? stripProxyRuntimeConfig(sanitizeConfigForAccountAuth(configSource)).join("\n")
+          : sanitizeConfigForAccountAuth(configSource);
       await atomicWriteFile(
         this.paths.currentConfigPath,
-        sanitizeConfigForAccountAuth(currentRawConfig),
+        sanitizedConfig === "" ? "\n" : `${sanitizedConfig.replace(/\n+$/u, "")}\n`,
       );
     }
     const writtenSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);

@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 import { stdin as defaultStdin, stdout as defaultStdout, stderr as defaultStderr } from "node:process";
 import packageJson from "../package.json";
 
-import { getSnapshotAccountId, getSnapshotEmail, maskAccountId, parseAuthSnapshot } from "./auth-snapshot.js";
+import {
+  getSnapshotAccountId,
+  getSnapshotEmail,
+  maskAccountId,
+  parseAuthSnapshot,
+} from "./auth-snapshot.js";
 import {
   AccountStore,
   createAccountStore,
@@ -563,10 +568,15 @@ export async function runCli(
           optionValues: parsed.optionValues,
           flags: parsed.flags,
           stdout: streams.stdout,
+          stderr: streams.stderr,
           debug,
           json,
           proxyProcessManager,
+          desktopLauncher,
+          interruptSignal,
           debugLog,
+          managedDesktopWaitStatusDelayMs,
+          managedDesktopWaitStatusIntervalMs,
         });
       }
 

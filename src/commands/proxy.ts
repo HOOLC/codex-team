@@ -1,4 +1,5 @@
 import type { AccountStore } from "../account-store/index.js";
+import type { CodexDesktopLauncher } from "../desktop/launcher.js";
 import { writeJson } from "../cli/output.js";
 import { getUsage } from "../cli/spec.js";
 import {
@@ -12,8 +13,16 @@ import type { ProxyProcessManager } from "../proxy/process.js";
 import { startProxyServer } from "../proxy/server.js";
 import { readProxyState, writeProxyState, type ProxyProcessState } from "../proxy/state.js";
 import { appendEventLog, appendProxyRequestLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
+import {
+  describeBusySwitchLock,
+  refreshManagedDesktopAfterSwitch,
+  tryAcquireSwitchLock,
+} from "../switching.js";
 
 type DebugLogger = (message: string) => void;
+
+const PROXY_FORCE_WARNING =
+  "Warning: --force is only meaningful with a managed Desktop session.";
 
 function resolveStateForPlan(host: string, port: number): ProxyProcessState {
   return {
@@ -120,10 +129,15 @@ export async function handleProxyCommand(options: {
   optionValues: Map<string, string>;
   flags: Set<string>;
   stdout: NodeJS.WriteStream;
+  stderr: NodeJS.WriteStream;
   debug: boolean;
   json: boolean;
   proxyProcessManager: ProxyProcessManager;
+  desktopLauncher: CodexDesktopLauncher;
+  interruptSignal?: AbortSignal;
   debugLog?: DebugLogger;
+  managedDesktopWaitStatusDelayMs: number;
+  managedDesktopWaitStatusIntervalMs: number;
 }): Promise<number> {
   const subcommand = options.positionals[0];
   if (!subcommand) {
@@ -162,6 +176,7 @@ export async function handleProxyCommand(options: {
     const port = resolveProxyPort({
       cliValue: options.optionValues.get("--port"),
     });
+    const force = options.flags.has("--force");
     const plan = resolveStateForPlan(host, port);
 
     if (options.flags.has("--dry-run")) {
@@ -184,7 +199,14 @@ export async function handleProxyCommand(options: {
       return 0;
     }
 
+    const lock = await tryAcquireSwitchLock(options.store, "proxy enable");
+    if (!lock.acquired) {
+      throw new Error(describeBusySwitchLock(lock.lockPath, lock.owner));
+    }
+
     let enabledState: ProxyProcessState;
+    const warnings: string[] = [];
+    let desktopForceWarning: string | null = null;
     try {
       enabledState = await enableProxyMode({
         store: options.store,
@@ -193,6 +215,20 @@ export async function handleProxyCommand(options: {
         port,
         debug: options.debug,
       });
+      const refreshOutcome = await refreshManagedDesktopAfterSwitch(
+        warnings,
+        options.desktopLauncher,
+        {
+          force,
+          signal: options.interruptSignal,
+          statusStream: options.stderr,
+          statusDelayMs: options.managedDesktopWaitStatusDelayMs,
+          statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+        },
+      );
+      if (force && refreshOutcome === "none") {
+        desktopForceWarning = PROXY_FORCE_WARNING;
+      }
     } catch (error) {
       await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
         component: "proxy",
@@ -203,6 +239,8 @@ export async function handleProxyCommand(options: {
         fields: { host, port },
       }));
       throw error;
+    } finally {
+      await lock.release();
     }
     const payload = {
       ok: true,
@@ -213,21 +251,56 @@ export async function handleProxyCommand(options: {
       base_url: enabledState.base_url,
       openai_base_url: enabledState.openai_base_url,
       log_path: enabledState.log_path,
+      warnings,
     };
     if (options.json) {
       writeJson(options.stdout, payload);
     } else {
       options.stdout.write(`Proxy enabled: ${enabledState.base_url}\n`);
       options.stdout.write(`OpenAI API: ${enabledState.openai_base_url}\n`);
+      for (const warning of warnings) {
+        options.stdout.write(`Warning: ${warning}\n`);
+      }
+    }
+    if (desktopForceWarning) {
+      options.stderr.write(`${desktopForceWarning}\n`);
     }
     return 0;
   }
 
   if (subcommand === "disable") {
-    const { restored, stopped } = await disableProxyMode({
-      store: options.store,
-      proxyProcessManager: options.proxyProcessManager,
-    });
+    const force = options.flags.has("--force");
+    const lock = await tryAcquireSwitchLock(options.store, "proxy disable");
+    if (!lock.acquired) {
+      throw new Error(describeBusySwitchLock(lock.lockPath, lock.owner));
+    }
+
+    let restored: { auth_restored: boolean; config_restored: boolean };
+    let stopped: { running: boolean; state: ProxyProcessState | null; stopped: boolean };
+    const warnings: string[] = [];
+    let desktopForceWarning: string | null = null;
+    try {
+      ({ restored, stopped } = await disableProxyMode({
+        store: options.store,
+        proxyProcessManager: options.proxyProcessManager,
+      }));
+      const refreshOutcome = await refreshManagedDesktopAfterSwitch(
+        warnings,
+        options.desktopLauncher,
+        {
+          force,
+          signal: options.interruptSignal,
+          statusStream: options.stderr,
+          statusDelayMs: options.managedDesktopWaitStatusDelayMs,
+          statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+        },
+      );
+      if (force && refreshOutcome === "none") {
+        desktopForceWarning = PROXY_FORCE_WARNING;
+      }
+    } finally {
+      await lock.release();
+    }
     const payload = {
       ok: true,
       action: "proxy.disable",
@@ -235,11 +308,18 @@ export async function handleProxyCommand(options: {
       stopped: stopped.stopped,
       auth_restored: restored.auth_restored,
       config_restored: restored.config_restored,
+      warnings,
     };
     if (options.json) {
       writeJson(options.stdout, payload);
     } else {
       options.stdout.write("Proxy disabled. Restored previous direct auth/config and removed proxy config when possible.\n");
+      for (const warning of warnings) {
+        options.stdout.write(`Warning: ${warning}\n`);
+      }
+    }
+    if (desktopForceWarning) {
+      options.stderr.write(`${desktopForceWarning}\n`);
     }
     return 0;
   }

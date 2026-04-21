@@ -43,15 +43,32 @@ function stripProxyProviderTable(lines: string[]): string[] {
   return result;
 }
 
-function withoutProxyConfigLines(rawConfig: string | null): string[] {
-  return stripProxyProviderTable(
-    (rawConfig ?? "")
-      .split(/\r?\n/u)
-      .filter((line) => !/^\s*chatgpt_base_url\s*=/u.test(line))
-      .filter((line) => !/^\s*openai_base_url\s*=/u.test(line))
-      .filter((line) => !/^\s*preferred_auth_method\s*=/u.test(line))
-      .filter((line) => !/^\s*model_provider\s*=/u.test(line)),
-  );
+export function stripProxyRuntimeConfig(
+  rawConfig: string | null,
+  options: {
+    removeChatGPTBaseUrl?: boolean;
+    removeOpenAIBaseUrl?: boolean;
+    removePreferredAuthMethod?: boolean;
+    removeModelProvider?: boolean;
+    removeProxyProviderTable?: boolean;
+  } = {},
+): string[] {
+  const {
+    removeChatGPTBaseUrl = true,
+    removeOpenAIBaseUrl = true,
+    removePreferredAuthMethod = true,
+    removeModelProvider = true,
+    removeProxyProviderTable = true,
+  } = options;
+
+  const filteredLines = (rawConfig ?? "")
+    .split(/\r?\n/u)
+    .filter((line) => !removeChatGPTBaseUrl || !/^\s*chatgpt_base_url\s*=/u.test(line))
+    .filter((line) => !removeOpenAIBaseUrl || !/^\s*openai_base_url\s*=/u.test(line))
+    .filter((line) => !removePreferredAuthMethod || !/^\s*preferred_auth_method\s*=/u.test(line))
+    .filter((line) => !removeModelProvider || !/^\s*model_provider\s*=/u.test(line));
+
+  return removeProxyProviderTable ? stripProxyProviderTable(filteredLines) : filteredLines;
 }
 
 function trimTrailingBlankLines(lines: string[]): string[] {
@@ -63,7 +80,7 @@ function trimTrailingBlankLines(lines: string[]): string[] {
 }
 
 function sanitizeProxyConfig(rawConfig: string | null): string | null {
-  const sanitizedLines = trimTrailingBlankLines(withoutProxyConfigLines(rawConfig));
+  const sanitizedLines = trimTrailingBlankLines(stripProxyRuntimeConfig(rawConfig));
   if (sanitizedLines.length === 0) {
     return null;
   }
@@ -82,27 +99,14 @@ function buildProxyProviderLines(openAIBaseUrl: string): string[] {
   ];
 }
 
-export function buildProxyConfig(
-  rawConfig: string | null,
-  backendBaseUrl: string,
-  openAIBaseUrl: string,
-): string {
-  const lines = withoutProxyConfigLines(rawConfig);
-  const proxyLines = [
-    `model_provider = "${PROXY_MODEL_PROVIDER_ID}"`,
-    'preferred_auth_method = "chatgpt"',
-    `chatgpt_base_url = "${backendBaseUrl}"`,
-    `openai_base_url = "${openAIBaseUrl}"`,
-  ];
-  const providerLines = buildProxyProviderLines(openAIBaseUrl);
+function insertTopLevelProxyLines(lines: string[], proxyLines: string[], trailingLines: string[] = []): string {
   const firstTableIndex = lines.findIndex((line) => /^\s*\[[^\]]+\]\s*$/u.test(line));
 
   if (firstTableIndex === -1) {
     return `${[
       ...trimTrailingBlankLines(lines),
       ...proxyLines,
-      "",
-      ...providerLines,
+      ...(trailingLines.length > 0 ? ["", ...trailingLines] : []),
     ].join("\n")}\n`;
   }
 
@@ -111,11 +115,42 @@ export function buildProxyConfig(
   return `${[
     ...beforeTable,
     ...proxyLines,
-    "",
-    ...providerLines,
+    ...(trailingLines.length > 0 ? ["", ...trailingLines] : []),
     "",
     ...fromFirstTable,
   ].join("\n")}\n`;
+}
+
+export function buildLiveProxyConfig(
+  rawConfig: string | null,
+  backendBaseUrl: string,
+  openAIBaseUrl: string,
+): string {
+  const lines = stripProxyRuntimeConfig(rawConfig);
+  const proxyLines = [
+    'preferred_auth_method = "chatgpt"',
+    `chatgpt_base_url = "${backendBaseUrl}"`,
+    `openai_base_url = "${openAIBaseUrl}"`,
+  ];
+
+  return insertTopLevelProxyLines(lines, proxyLines);
+}
+
+export function buildProxyConfig(
+  rawConfig: string | null,
+  backendBaseUrl: string,
+  openAIBaseUrl: string,
+): string {
+  const lines = stripProxyRuntimeConfig(rawConfig);
+  const proxyLines = [
+    `model_provider = "${PROXY_MODEL_PROVIDER_ID}"`,
+    'preferred_auth_method = "chatgpt"',
+    `chatgpt_base_url = "${backendBaseUrl}"`,
+    `openai_base_url = "${openAIBaseUrl}"`,
+  ];
+  const providerLines = buildProxyProviderLines(openAIBaseUrl);
+
+  return insertTopLevelProxyLines(lines, proxyLines, providerLines);
 }
 
 async function currentAuthIsSynthetic(store: AccountStore): Promise<boolean> {
@@ -168,7 +203,7 @@ export async function writeSyntheticProxyRuntime(options: {
   );
   await atomicWriteFile(
     options.store.paths.currentConfigPath,
-    buildProxyConfig(rawConfig, options.state.base_url, options.state.openai_base_url),
+    buildLiveProxyConfig(rawConfig, options.state.base_url, options.state.openai_base_url),
     FILE_MODE,
   );
 
