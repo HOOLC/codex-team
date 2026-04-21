@@ -734,6 +734,41 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy synthetic usage rounds fractional aggregate percents for Desktop compatibility", async () => {
+    const { buildProxyUsagePayload } = await import("../src/proxy/quota.js");
+
+    const usage = buildProxyUsagePayload({
+      name: "proxy",
+      account_id: "codexm-proxy-account",
+      user_id: "codexm-proxy",
+      identity: "codexm-proxy-account:codexm-proxy",
+      auto_switch_eligible: true,
+      plan_type: "pro",
+      credits_balance: null,
+      status: "ok",
+      fetched_at: "2026-04-21T06:31:18.767Z",
+      error_message: null,
+      unlimited: true,
+      five_hour: {
+        used_percent: 35.7,
+        window_seconds: 18_000,
+        reset_after_seconds: 12_052,
+        reset_at: "2026-04-21T09:15:41.000Z",
+      },
+      one_week: {
+        used_percent: 10.7,
+        window_seconds: 604_800,
+        reset_after_seconds: 581_524,
+        reset_at: "2026-04-27T23:00:13.000Z",
+      },
+    });
+
+    expect(usage.rate_limit.primary_window?.used_percent).toBe(36);
+    expect(usage.rate_limit.secondary_window?.used_percent).toBe(11);
+    expect(Number.isInteger(usage.rate_limit.primary_window?.used_percent)).toBe(true);
+    expect(Number.isInteger(usage.rate_limit.secondary_window?.used_percent)).toBe(true);
+  });
+
   test("proxy server adapts chat completions through ChatGPT codex responses", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");

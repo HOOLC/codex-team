@@ -55,6 +55,10 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
+function toUsagePercent(value: number): number {
+  return Math.round(clampPercent(value));
+}
+
 function eligibleForProxyPool(account: AccountQuotaSummary): boolean {
   return account.auto_switch_eligible !== false
     && computeAvailability(account) === "available";
@@ -225,7 +229,9 @@ function toUsageWindowPayload(window: QuotaWindowSnapshot | null): UsageWindowPa
       : undefined;
 
   return {
-    used_percent: window.used_percent,
+    // Codex Desktop currently expects integer used_percent values from
+    // /backend-api/wham/usage and rejects floating-point payloads.
+    used_percent: toUsagePercent(window.used_percent),
     limit_window_seconds: window.window_seconds,
     ...(window.reset_after_seconds !== undefined
       ? { reset_after_seconds: window.reset_after_seconds }
