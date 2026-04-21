@@ -33,6 +33,7 @@ import {
   createCodexDirectClient,
   type CodexDirectClient,
 } from "../codex-direct-client.js";
+import { hasExhaustedRateLimitSignal } from "../quota-exhaustion-signals.js";
 
 import type {
   RuntimeQuotaSnapshot,
@@ -240,27 +241,6 @@ function normalizeDirectAccountSnapshot(value: unknown): RuntimeAccountSnapshot 
     requires_openai_auth:
       typeof value.requiresOpenaiAuth === "boolean" ? value.requiresOpenaiAuth : null,
   };
-}
-
-function hasExhaustedRateLimit(value: unknown, depth = 0): boolean {
-  if (depth > 8) {
-    return false;
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((entry) => hasExhaustedRateLimit(entry, depth + 1));
-  }
-
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  const usedPercent = value.usedPercent ?? value.used_percent;
-  if (typeof usedPercent === "number" && usedPercent >= 100) {
-    return true;
-  }
-
-  return Object.values(value).some((entry) => hasExhaustedRateLimit(entry, depth + 1));
 }
 
 async function delay(ms: number): Promise<void> {
@@ -517,7 +497,7 @@ export function createCliProcessManager(options: {
             if (currentJson !== lastQuotaJson) {
               lastQuotaJson = currentJson;
 
-              const shouldAutoSwitch = hasExhaustedRateLimit(rawResult);
+              const shouldAutoSwitch = hasExhaustedRateLimitSignal(rawResult);
 
               if (onQuotaSignal) {
                 await onQuotaSignal({

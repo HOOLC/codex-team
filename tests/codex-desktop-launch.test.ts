@@ -1246,7 +1246,7 @@ describe("codex-desktop-launch", () => {
     }
   });
 
-  test("emits quota signals from bridge-level mcp notifications with usageLimitExceeded", async () => {
+  test("emits quota signals from bridge-level mcp notifications with usage_limit_exceeded", async () => {
     const homeDir = await createTempHome();
     const statePath = join(homeDir, ".codex-team", "desktop-state.json");
     const quotaSignals: Array<{ requestId: string; reason: string; bodySnippet: string | null }> =
@@ -1305,7 +1305,7 @@ describe("codex-desktop-launch", () => {
                             {
                               type: "string",
                               value:
-                                '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}}',
+                                '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codex_error_info":"usage_limit_exceeded"}}}}',
                             },
                           ],
                         },
@@ -1355,7 +1355,7 @@ describe("codex-desktop-launch", () => {
           requestId: "rpc:notification:error",
           reason: "rpc_notification",
           bodySnippet:
-            '{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}',
+            '{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codex_error_info":"usage_limit_exceeded"}}}',
         },
       ]);
     } finally {

@@ -254,6 +254,16 @@ async function writeQuotaMeta(
   await writeFile(accountMetaPath, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
 }
 
+async function writeProxyManualUpstreamAuth(homeDir: string, authPath: string): Promise<void> {
+  const proxyDir = join(homeDir, ".codex-team", "proxy");
+  await mkdir(proxyDir, { recursive: true });
+  await writeFile(
+    join(proxyDir, "last-direct-auth.json"),
+    await readFile(authPath, "utf8"),
+    "utf8",
+  );
+}
+
 describe("codexm proxy", () => {
   test("proxy enable writes synthetic ChatGPT auth and disable restores direct auth", async () => {
     const homeDir = await createTempHome();
@@ -2411,6 +2421,466 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy websocket auto-replays quota failures before output starts when autoswitch is enabled", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    const upstreamHttp = createServer();
+    const upstreamWs = new WebSocketServer({ server: upstreamHttp });
+    const upstreamConnections: Array<{
+      accountId: string | null;
+      bodies: Record<string, unknown>[];
+    }> = [];
+    const requestLogs: Array<Record<string, unknown>> = [];
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        upstreamHttp.once("error", reject);
+        upstreamHttp.listen(0, "127.0.0.1", () => {
+          upstreamHttp.off("error", reject);
+          resolve();
+        });
+      });
+      const upstreamAddress = upstreamHttp.address();
+      const upstreamPort = typeof upstreamAddress === "object" && upstreamAddress ? upstreamAddress.port : 0;
+      const upstreamUrl = `ws://127.0.0.1:${upstreamPort}/backend-api/codex/responses`;
+
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "plus", "user-beta"));
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      upstreamWs.on("connection", (socket, request) => {
+        const connection = {
+          accountId: typeof request.headers["chatgpt-account-id"] === "string"
+            ? request.headers["chatgpt-account-id"]
+            : null,
+          bodies: [] as Record<string, unknown>[],
+        };
+        upstreamConnections.push(connection);
+        socket.on("message", (raw) => {
+          const body = JSON.parse(raw.toString()) as Record<string, unknown>;
+          connection.bodies.push(body);
+          if (connection.accountId === "acct-alpha") {
+            socket.send(JSON.stringify({
+              type: "response.created",
+              response: { id: "resp_fail" },
+            }));
+            socket.send(JSON.stringify({
+              type: "response.failed",
+              error: {
+                codex_error_info: "usage_limit_exceeded",
+                message: "You've hit your usage limit.",
+              },
+              response: {
+                id: "resp_fail",
+                output: [],
+              },
+            }));
+            return;
+          }
+
+          socket.send(JSON.stringify({
+            type: "response.created",
+            response: { id: "resp_retry" },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              id: "msg_retry",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "retried" }],
+            },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: "resp_retry",
+              output: [],
+            },
+          }));
+        });
+      });
+
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        connectWebSocketImpl: async (options) => await new Promise<WebSocket>((resolve, reject) => {
+          const socket = new WebSocket(upstreamUrl, {
+            headers: options.headers,
+            perMessageDeflate: false,
+          });
+          socket.once("open", () => resolve(socket));
+          socket.once("error", reject);
+        }),
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const downstream = new WebSocket(`${server.openaiBaseUrl.replace(/^http/u, "ws")}/responses`, {
+          headers: {
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          perMessageDeflate: false,
+        });
+        await waitForWebSocketOpen(downstream);
+
+        const events = await sendWebSocketTurnAndCollectTerminal(downstream, {
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        });
+
+        expect(events.map((event) => event.type)).toEqual([
+          "response.created",
+          "response.output_item.done",
+          "response.completed",
+        ]);
+        expect(upstreamConnections.map((connection) => connection.accountId)).toEqual(["acct-alpha", "acct-beta"]);
+        expect((await readAuthSnapshotFile(join(homeDir, ".codex-team", "proxy", "last-direct-auth.json"))).tokens?.account_id)
+          .toBe("acct-beta");
+        expect(
+          requestLogs.find((entry) => entry.route === "/v1/responses" && entry.status_code === 200),
+        ).toMatchObject({
+          selected_account_name: "beta",
+          replay_count: 1,
+          replayed_from_account_names: ["alpha"],
+        });
+
+        downstream.close();
+        await waitForWebSocketClose(downstream);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      for (const client of upstreamWs.clients) {
+        client.terminate();
+      }
+      upstreamWs.close();
+      await new Promise<void>((resolve) => upstreamHttp.close(() => resolve()));
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy websocket still replays after protocol prelude events when user-visible output has not started", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    const upstreamHttp = createServer();
+    const upstreamWs = new WebSocketServer({ server: upstreamHttp });
+    const upstreamConnections: Array<string | null> = [];
+    const requestLogs: Array<Record<string, unknown>> = [];
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        upstreamHttp.once("error", reject);
+        upstreamHttp.listen(0, "127.0.0.1", () => {
+          upstreamHttp.off("error", reject);
+          resolve();
+        });
+      });
+      const upstreamAddress = upstreamHttp.address();
+      const upstreamPort = typeof upstreamAddress === "object" && upstreamAddress ? upstreamAddress.port : 0;
+      const upstreamUrl = `ws://127.0.0.1:${upstreamPort}/backend-api/codex/responses`;
+
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "plus", "user-beta"));
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      upstreamWs.on("connection", (socket, request) => {
+        upstreamConnections.push(typeof request.headers["chatgpt-account-id"] === "string"
+          ? request.headers["chatgpt-account-id"]
+          : null);
+        socket.on("message", () => {
+          if (typeof request.headers["chatgpt-account-id"] === "string" && request.headers["chatgpt-account-id"] === "acct-alpha") {
+            socket.send(JSON.stringify({
+              type: "response.created",
+              response: { id: "resp_prelude_fail" },
+            }));
+            socket.send(JSON.stringify({
+              type: "response.output_item.added",
+              output_index: 0,
+              item: {
+                id: "msg_placeholder",
+                type: "message",
+                role: "assistant",
+                content: [],
+              },
+            }));
+            socket.send(JSON.stringify({
+              type: "response.failed",
+              error: {
+                codex_error_info: "usage_limit_exceeded",
+                message: "You've hit your usage limit.",
+              },
+              response: {
+                id: "resp_prelude_fail",
+                output: [],
+              },
+            }));
+            return;
+          }
+
+          socket.send(JSON.stringify({
+            type: "response.created",
+            response: { id: "resp_prelude_retry" },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              id: "msg_prelude_retry",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "retried after prelude" }],
+            },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: "resp_prelude_retry",
+              output: [],
+            },
+          }));
+        });
+      });
+
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        connectWebSocketImpl: async (options) => await new Promise<WebSocket>((resolve, reject) => {
+          const socket = new WebSocket(upstreamUrl, {
+            headers: options.headers,
+            perMessageDeflate: false,
+          });
+          socket.once("open", () => resolve(socket));
+          socket.once("error", reject);
+        }),
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const downstream = new WebSocket(`${server.openaiBaseUrl.replace(/^http/u, "ws")}/responses`, {
+          headers: {
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          perMessageDeflate: false,
+        });
+        await waitForWebSocketOpen(downstream);
+
+        const events = await sendWebSocketTurnAndCollectTerminal(downstream, {
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        });
+
+        expect(events.map((event) => event.type)).toEqual([
+          "response.created",
+          "response.output_item.done",
+          "response.completed",
+        ]);
+        expect(upstreamConnections).toEqual(["acct-alpha", "acct-beta"]);
+        expect(
+          requestLogs.find((entry) => entry.route === "/v1/responses" && entry.status_code === 200),
+        ).toMatchObject({
+          selected_account_name: "beta",
+          replay_count: 1,
+          replayed_from_account_names: ["alpha"],
+        });
+
+        downstream.close();
+        await waitForWebSocketClose(downstream);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      for (const client of upstreamWs.clients) {
+        client.terminate();
+      }
+      upstreamWs.close();
+      await new Promise<void>((resolve) => upstreamHttp.close(() => resolve()));
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy websocket does not auto-replay after downstream output has started", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    const upstreamHttp = createServer();
+    const upstreamWs = new WebSocketServer({ server: upstreamHttp });
+    const upstreamConnections: Array<string | null> = [];
+    const requestLogs: Array<Record<string, unknown>> = [];
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        upstreamHttp.once("error", reject);
+        upstreamHttp.listen(0, "127.0.0.1", () => {
+          upstreamHttp.off("error", reject);
+          resolve();
+        });
+      });
+      const upstreamAddress = upstreamHttp.address();
+      const upstreamPort = typeof upstreamAddress === "object" && upstreamAddress ? upstreamAddress.port : 0;
+      const upstreamUrl = `ws://127.0.0.1:${upstreamPort}/backend-api/codex/responses`;
+
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "plus", "user-beta"));
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      upstreamWs.on("connection", (socket, request) => {
+        upstreamConnections.push(typeof request.headers["chatgpt-account-id"] === "string"
+          ? request.headers["chatgpt-account-id"]
+          : null);
+        socket.on("message", () => {
+          socket.send(JSON.stringify({
+            type: "response.created",
+            response: { id: "resp_partial" },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              id: "msg_partial",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "partial" }],
+            },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.failed",
+            error: {
+              code: "insufficient_quota",
+              message: "Insufficient quota.",
+            },
+            response: {
+              id: "resp_partial",
+              output: [],
+            },
+          }));
+        });
+      });
+
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        connectWebSocketImpl: async (options) => await new Promise<WebSocket>((resolve, reject) => {
+          const socket = new WebSocket(upstreamUrl, {
+            headers: options.headers,
+            perMessageDeflate: false,
+          });
+          socket.once("open", () => resolve(socket));
+          socket.once("error", reject);
+        }),
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const downstream = new WebSocket(`${server.openaiBaseUrl.replace(/^http/u, "ws")}/responses`, {
+          headers: {
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          perMessageDeflate: false,
+        });
+        await waitForWebSocketOpen(downstream);
+
+        const events = await sendWebSocketTurnAndCollectTerminal(downstream, {
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        });
+
+        expect(events.map((event) => event.type)).toEqual([
+          "response.created",
+          "response.output_item.done",
+          "response.failed",
+        ]);
+        expect(upstreamConnections).toEqual(["acct-alpha"]);
+        expect((await readAuthSnapshotFile(join(homeDir, ".codex-team", "proxy", "last-direct-auth.json"))).tokens?.account_id)
+          .toBe("acct-alpha");
+        expect(
+          requestLogs.find((entry) => entry.route === "/v1/responses" && entry.status_code === 502),
+        ).toMatchObject({
+          selected_account_name: "alpha",
+          replay_count: 0,
+        });
+
+        downstream.close();
+        await waitForWebSocketClose(downstream);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      for (const client of upstreamWs.clients) {
+        client.terminate();
+      }
+      upstreamWs.close();
+      await new Promise<void>((resolve) => upstreamHttp.close(() => resolve()));
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("proxy websocket injects service_tier priority for exhausted synthetic turns", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");
@@ -2497,6 +2967,250 @@ describe("codexm proxy", () => {
       }
       upstreamWs.close();
       await new Promise<void>((resolve) => upstreamHttp.close(() => resolve()));
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy auto-replays buffered REST requests after quota exhaustion and persists the new upstream", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "plus", "user-beta"));
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      const forwarded: Array<{ url: string; accountId: string | null; body: Record<string, unknown> }> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (url, init) => {
+          const headers = new Headers(init?.headers);
+          const accountId = headers.get("ChatGPT-Account-Id");
+          const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          forwarded.push({
+            url: String(url),
+            accountId,
+            body,
+          });
+          if (accountId === "acct-alpha") {
+            return jsonResponse({
+              error: {
+                codex_error_info: "usage_limit_exceeded",
+                message: "You've hit your usage limit.",
+              },
+            }, 429);
+          }
+          return sseResponse([
+            {
+              type: "response.created",
+              response: {
+                id: "resp_retry_rest",
+                object: "response",
+                model: "gpt-5.4",
+                output: [],
+              },
+            },
+            {
+              type: "response.output_item.done",
+              output_index: 0,
+              item: {
+                id: "msg_retry_rest",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "REST OK" }],
+              },
+            },
+            {
+              type: "response.completed",
+              response: {
+                id: "resp_retry_rest",
+                object: "response",
+                model: "gpt-5.4",
+                output: [],
+              },
+            },
+          ]);
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const headers = {
+          "content-type": "application/json",
+          authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+        };
+
+        const responses = await fetch(`${server.baseUrl}/v1/responses`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ model: "gpt-5.4", input: "hello", stream: false }),
+        });
+        expect(responses.status).toBe(200);
+        expect(await responses.json()).toMatchObject({
+          id: "resp_retry_rest",
+          output_text: "REST OK",
+        });
+        expect(forwarded.slice(-2).map((entry) => entry.accountId)).toEqual(["acct-alpha", "acct-beta"]);
+
+        await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+        const chat = await fetch(`${server.baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            messages: [{ role: "user", content: "hello" }],
+            stream: false,
+          }),
+        });
+        expect(chat.status).toBe(200);
+        expect(await chat.json()).toMatchObject({
+          choices: [{ message: { content: "REST OK" } }],
+        });
+        expect(forwarded.slice(-2).map((entry) => entry.accountId)).toEqual(["acct-alpha", "acct-beta"]);
+
+        await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+        const completion = await fetch(`${server.baseUrl}/v1/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            prompt: "hello",
+            stream: false,
+          }),
+        });
+        expect(completion.status).toBe(200);
+        expect(await completion.json()).toMatchObject({
+          choices: [{ text: "REST OK" }],
+        });
+        expect(forwarded.slice(-2).map((entry) => entry.accountId)).toEqual(["acct-alpha", "acct-beta"]);
+        expect((await readAuthSnapshotFile(join(homeDir, ".codex-team", "proxy", "last-direct-auth.json"))).tokens?.account_id)
+          .toBe("acct-beta");
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy auto-replays buffered API-key REST requests after quota exhaustion", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot(
+        "api-one",
+        {
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "sk-one",
+        },
+        {
+          rawConfig: 'base_url = "https://api.example.test/v1"\nmodel_provider = "openai"\n',
+        },
+      );
+      await store.addAccountSnapshot(
+        "api-two",
+        {
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "sk-two",
+        },
+        {
+          rawConfig: 'base_url = "https://api.example.test/v1"\nmodel_provider = "openai"\n',
+        },
+      );
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("api-one")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      const authorizations: string[] = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (_url, init) => {
+          const authorization = new Headers(init?.headers).get("authorization") ?? "";
+          authorizations.push(authorization);
+          if (authorization === "Bearer sk-one") {
+            return jsonResponse({
+              error: {
+                code: "insufficient_quota",
+                message: "Insufficient quota.",
+              },
+            }, 429);
+          }
+          return jsonResponse({
+            id: "chatcmpl_retry_api",
+            object: "chat.completion",
+            model: "gpt-4.1",
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: "API OK" },
+                finish_reason: "stop",
+              },
+            ],
+          });
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const response = await fetch(`${server.baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-4.1",
+            messages: [{ role: "user", content: "hello" }],
+            stream: false,
+          }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          choices: [{ message: { content: "API OK" } }],
+        });
+        expect(authorizations).toEqual(["Bearer sk-one", "Bearer sk-two"]);
+        expect((await readAuthSnapshotFile(join(homeDir, ".codex-team", "proxy", "last-direct-auth.json"))).OPENAI_API_KEY)
+          .toBe("sk-two");
+      } finally {
+        await server.close();
+      }
+    } finally {
       await cleanupTempHome(homeDir);
     }
   });

@@ -420,6 +420,44 @@ describe("createCliProcessManager", () => {
       expect(signals.length).toBeGreaterThanOrEqual(1);
     });
 
+    test("marks snake_case exhausted rate-limit snapshots as auto-switchable", async () => {
+      const signals: Array<{ shouldAutoSwitch: boolean }> = [];
+      const controller = new AbortController();
+
+      const manager = createCliProcessManager({
+        createDirectClientImpl: createMockDirectClient({
+          rate_limits: {
+            primary: {
+              used_percent: 100,
+              window_duration_mins: 300,
+            },
+          },
+        }),
+        pollIntervalMs: 50,
+      });
+
+      const watchPromise = manager.watchCliQuotaSignals({
+        pollIntervalMs: 50,
+        signal: controller.signal,
+        onQuotaSignal: async (signal) => {
+          signals.push({
+            shouldAutoSwitch: signal.shouldAutoSwitch,
+          });
+          controller.abort();
+        },
+      });
+
+      try {
+        await watchPromise;
+      } catch {
+        // Expected when aborting the watcher after the first signal.
+      }
+
+      expect(signals).toEqual([
+        { shouldAutoSwitch: true },
+      ]);
+    });
+
     test("handles client creation failure with reconnect", async () => {
       let attempts = 0;
       const statusEvents: unknown[] = [];

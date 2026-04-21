@@ -106,7 +106,7 @@ codexm run --proxy -- --model o3
 codexm proxy disable
 ```
 
-`codexm proxy enable` 会在 `127.0.0.1` 启动本地 daemon，写入一个 synthetic ChatGPT auth（`proxy@codexm.local`），并把本地 auth/config 指向这个 proxy。live config 现在会保留内建 provider 身份，只改 transport URL，所以 proxy 和非 proxy 会继续共用同一份 live thread 历史。dashboard 和 `codexm list` 总会显示一个 `proxy` 行，它的 quota 来自真实池：统计未保护、允许 auto-switch 且仍保留 quota 快照的账号，包含已经耗尽的账号，这样整个池子都归零时也会继续显示 `0%`，不会直接消失；受保护账号不计入。Codex Desktop 里的 usage/account 读取现在也会保持在同一个 synthetic proxy 账号视图上，不再因为最近一次命中的真实 upstream 而漂移。它的 `5H`、`1W` 和 `ETA` 都基于这个池子的真实剩余额度聚合，消耗速率仍然沿用用户全局 watch 历史。启用 proxy 模式后，这个 synthetic 账号会成为默认 `CODEX_HOME` 的当前账号。proxy 选路现在会默认跟随保存的 direct/current upstream，而不是每条消息都重新排序：`codexm switch <name>` 会立刻成为 proxy 的当前上游；如果后续 daemon 因 quota 耗尽信号触发 autoswitch，proxy 才会再跟着切走。只要 proxy 已启用，`codexm list` 和 dashboard 里当前配置的真实 upstream 行都会带上 `@` 标记，即使还没有新的 proxy 请求发出。最近一次真实 proxy 命中仍会单独显示为 `Proxy last upstream: ...` 和 dashboard 详情区里的 `Last upstream: ...`。这个 daemon 同时提供 OpenAI-compatible `/v1` 接口，覆盖 Responses、Chat Completions、旧版 Completions、Models，以及有 API-key 上游时的 Embeddings。
+`codexm proxy enable` 会在 `127.0.0.1` 启动本地 daemon，写入一个 synthetic ChatGPT auth（`proxy@codexm.local`），并把本地 auth/config 指向这个 proxy。live config 现在会保留内建 provider 身份，只改 transport URL，所以 proxy 和非 proxy 会继续共用同一份 live thread 历史。dashboard 和 `codexm list` 总会显示一个 `proxy` 行，它的 quota 来自真实池：统计未保护、允许 auto-switch 且仍保留 quota 快照的账号，包含已经耗尽的账号，这样整个池子都归零时也会继续显示 `0%`，不会直接消失；受保护账号不计入。Codex Desktop 里的 usage/account 读取现在也会保持在同一个 synthetic proxy 账号视图上，不再因为最近一次命中的真实 upstream 而漂移。它的 `5H`、`1W` 和 `ETA` 都基于这个池子的真实剩余额度聚合，消耗速率仍然沿用用户全局 watch 历史。启用 proxy 模式后，这个 synthetic 账号会成为默认 `CODEX_HOME` 的当前账号。proxy 选路现在会默认跟随保存的 direct/current upstream，而不是每条消息都重新排序：`codexm switch <name>` 会立刻成为 proxy 的当前上游；如果后续 daemon 因 quota 耗尽信号触发 autoswitch，proxy 才会再跟着切走。现在只要 daemon autoswitch 开启，proxy 在遇到可重试的 quota exhausted 失败且尚未向下游输出内容时，还会自动重放一次 `/v1/responses` websocket turn 或一条缓冲型 REST 请求（`stream: false` 的 `/v1/responses`、`/v1/chat/completions`、`/v1/completions`，以及对应的 API-key 非流式路径）；一旦已经开始向下游输出，就保留原始失败，不做半途续流。只要 proxy 已启用，`codexm list` 和 dashboard 里当前配置的真实 upstream 行都会带上 `@` 标记，即使还没有新的 proxy 请求发出。最近一次真实 proxy 命中仍会单独显示为 `Proxy last upstream: ...` 和 dashboard 详情区里的 `Last upstream: ...`。这个 daemon 同时提供 OpenAI-compatible `/v1` 接口，覆盖 Responses、Chat Completions、旧版 Completions、Models，以及有 API-key 上游时的 Embeddings。
 
 对 `codexm` 托管的 proxy 入口，`codexm proxy enable` 现在会改写 `chatgpt_base_url` 和 `openai_base_url`，但不再改 live provider 身份；`codexm run --proxy` 仍然会在隔离 overlay 里使用自定义 provider。这样 live proxy CLI/Desktop 能继续共用历史，而隔离 proxy run 仍然可以把实时 Responses websocket turn 和 REST 请求都强制导向本地 proxy。这个保证仍然只覆盖 `codexm` 托管入口；如果你绕过 `codexm` 直接裸跑 `codex` 或 Desktop，则不保证一定经过本地 proxy。
 
@@ -174,13 +174,13 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 ### Watch 与自动重启
 
 - `codexm watch`: 监听 quota 变化，并在耗尽时自动切号
-- `codexm autoswitch enable`: 启用 daemon 驱动的自动切号
+- `codexm autoswitch enable`: 启用 daemon 驱动的自动切号；proxy 在用户可见输出开始前遇到耗尽时也会内部重放一次
 - `codexm autoswitch disable`: 关闭自动切号，并保留基础 daemon 常驻
 - `codexm daemon start`: 启动共享后台 daemon，但不额外启用附加能力
 - `codexm daemon stop`: 停止共享后台 daemon，并保留最近一次 daemon 功能开关状态
 - `codexm run [--account <name>] [-- ...codexArgs]`: 以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行
 - `codexm run --proxy [-- ...codexArgs]`: 用隔离 CODEX_HOME 通过本地 proxy 运行 codex
-- `codexm proxy enable`: 启用由本地 proxy 提供的全局 synthetic ChatGPT auth
+- `codexm proxy enable`: 启用由本地 proxy 提供的全局 synthetic ChatGPT auth；在 proxy 耗尽且用户可见输出尚未开始时会自动重放一次
 - `codexm proxy disable`: 恢复上一次 direct auth/config 备份并停止 proxy daemon
 - `codexm overlay create <name>`: 为其他工具创建隔离的 CODEX_HOME overlay
 <!-- GENERATED:CORE_COMMANDS:END -->

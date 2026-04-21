@@ -1,10 +1,20 @@
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { copyFile, readFile } from "node:fs/promises";
 
 import type { AccountStore, ManagedAccount } from "../account-store/index.js";
 import { getSnapshotIdentity, readAuthSnapshotFile } from "../auth-snapshot.js";
-import { pathExists } from "../account-store/storage.js";
-import { reapplySyntheticProxyRuntime, writeSyntheticProxyRuntime } from "./config.js";
+import {
+  FILE_MODE,
+  atomicWriteFile,
+  chmodIfPossible,
+  pathExists,
+} from "../account-store/storage.js";
+import { sanitizeConfigForAccountAuth } from "../account-store/config.js";
+import {
+  reapplySyntheticProxyRuntime,
+  stripProxyRuntimeConfig,
+  writeSyntheticProxyRuntime,
+} from "./config.js";
 import { readProxyState, type ProxyProcessState, writeProxyState, resolveProxyDataDir } from "./state.js";
 import { isSyntheticProxyAuthSnapshot } from "./synthetic-auth.js";
 
@@ -58,6 +68,16 @@ async function resolveProxyDirectAuthBackupPath(store: AccountStore): Promise<st
   return await pathExists(defaultBackupPath) ? defaultBackupPath : null;
 }
 
+async function resolveProxyDirectConfigBackupPath(store: AccountStore): Promise<string | null> {
+  const state = await readProxyState(store.paths.codexTeamDir);
+  if (state?.direct_config_backup_path && await pathExists(state.direct_config_backup_path)) {
+    return state.direct_config_backup_path;
+  }
+
+  const defaultBackupPath = join(resolveProxyDataDir(store.paths.codexTeamDir), "last-direct-config.toml");
+  return await pathExists(defaultBackupPath) ? defaultBackupPath : null;
+}
+
 export async function resolveProxyManualUpstreamAccountName(
   store: AccountStore,
   accounts?: ManagedAccount[],
@@ -74,6 +94,62 @@ export async function resolveProxyManualUpstreamAccountName(
     return managedAccounts.find((account) => account.identity === identity)?.name ?? null;
   } catch {
     return null;
+  }
+}
+
+async function resolveDirectConfigBackupContent(
+  store: AccountStore,
+  account: ManagedAccount,
+): Promise<string | null> {
+  if (account.auth_mode === "apikey") {
+    if (account.configPath && await pathExists(account.configPath)) {
+      return await readFile(account.configPath, "utf8");
+    }
+    return null;
+  }
+
+  const candidatePaths = [
+    ...(account.configPath ? [account.configPath] : []),
+    ...(await pathExists(store.paths.currentConfigPath) ? [store.paths.currentConfigPath] : []),
+    ...((await resolveProxyDirectConfigBackupPath(store)) ? [await resolveProxyDirectConfigBackupPath(store) as string] : []),
+  ];
+  for (const path of candidatePaths) {
+    if (!(await pathExists(path))) {
+      continue;
+    }
+    const rawConfig = await readFile(path, "utf8");
+    const sanitized = stripProxyRuntimeConfig(sanitizeConfigForAccountAuth(rawConfig)).join("\n").replace(/\n+$/u, "");
+    return sanitized === "" ? "\n" : `${sanitized}\n`;
+  }
+
+  return null;
+}
+
+export async function persistProxyUpstreamAccountSelection(
+  store: AccountStore,
+  account: ManagedAccount,
+): Promise<void> {
+  const proxyDataDir = resolveProxyDataDir(store.paths.codexTeamDir);
+  const state = await readProxyState(store.paths.codexTeamDir);
+  const authBackupPath = state?.direct_auth_backup_path ?? join(proxyDataDir, "last-direct-auth.json");
+  const configBackupPath = state?.direct_config_backup_path ?? join(proxyDataDir, "last-direct-config.toml");
+
+  await copyFile(account.authPath, authBackupPath);
+  await chmodIfPossible(authBackupPath, FILE_MODE);
+
+  const configBackupContent = await resolveDirectConfigBackupContent(store, account);
+  if (configBackupContent !== null) {
+    await atomicWriteFile(configBackupPath, configBackupContent, FILE_MODE);
+  }
+
+  if (state) {
+    await writeProxyState(store.paths.codexTeamDir, {
+      ...state,
+      direct_auth_backup_path: authBackupPath,
+      direct_config_backup_path: configBackupContent !== null ? configBackupPath : state.direct_config_backup_path,
+      direct_auth_existed: true,
+      direct_config_existed: configBackupContent !== null ? true : state.direct_config_existed,
+    });
   }
 }
 
