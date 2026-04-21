@@ -396,6 +396,10 @@ export function buildManagedSwitchExpression(options?: {
         type: "query-cache-invalidate",
         queryKey: ["rate-limit-status"],
       });
+      await postMessage({
+        type: "query-cache-invalidate",
+        queryKey: "account-info",
+      });
     } catch {}
   };
 
@@ -423,6 +427,18 @@ export function buildManagedSwitchExpression(options?: {
     }
   };
 
+  const isBlockingThreadStatus = (status) => {
+    if (!isRecord(status) || status.type !== "active") {
+      return false;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(status, "activeFlags")) {
+      return true;
+    }
+
+    return Array.isArray(status.activeFlags) ? status.activeFlags.length > 0 : true;
+  };
+
   const collectActiveThreadIds = async () => {
     const loadedThreadIds = await listLoadedThreadIds();
     const activeThreadIds = [];
@@ -433,7 +449,7 @@ export function buildManagedSwitchExpression(options?: {
         const thread = isRecord(result?.thread) ? result.thread : null;
         const status = isRecord(thread?.status) ? thread.status : null;
 
-        if (status?.type === "active") {
+        if (isBlockingThreadStatus(status)) {
           activeThreadIds.push(threadId);
         }
       } catch (error) {

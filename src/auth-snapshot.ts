@@ -49,6 +49,7 @@ export interface SnapshotMeta {
   last_auth_refresh_error?: string | null;
   auth_refresh_fail_count?: number;
   quota: QuotaSnapshot;
+  last_good_quota?: QuotaSnapshot | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -270,6 +271,27 @@ function parseQuotaSnapshot(raw: unknown): QuotaSnapshot {
   };
 }
 
+function quotaHasWindowSnapshot(quota: QuotaSnapshot): boolean {
+  return typeof quota.five_hour?.used_percent === "number"
+    || typeof quota.one_week?.used_percent === "number";
+}
+
+function normalizeLastGoodQuota(quota: QuotaSnapshot): QuotaSnapshot | null {
+  if (!quotaHasWindowSnapshot(quota)) {
+    return null;
+  }
+
+  return {
+    status: "ok",
+    plan_type: quota.plan_type,
+    credits_balance: quota.credits_balance,
+    fetched_at: quota.fetched_at,
+    unlimited: quota.unlimited,
+    five_hour: quota.five_hour,
+    one_week: quota.one_week,
+  };
+}
+
 function parseQuotaWindowSnapshot(
   raw: unknown,
   fieldName: string,
@@ -387,6 +409,7 @@ export function createSnapshotMeta(
     last_auth_refresh_error: null,
     auth_refresh_fail_count: 0,
     quota: defaultQuotaSnapshot(),
+    last_good_quota: null,
   };
 }
 
@@ -427,6 +450,12 @@ export function parseSnapshotMeta(raw: string): SnapshotMeta {
   if (lastAuthRefreshError !== undefined && lastAuthRefreshError !== null && typeof lastAuthRefreshError !== "string") {
     throw new Error('Field "last_auth_refresh_error" must be a string, null, or undefined.');
   }
+  const parsedQuota = parseQuotaSnapshot(parsed.quota);
+  const lastGoodQuota = parsed.last_good_quota === undefined
+    ? normalizeLastGoodQuota(parsedQuota)
+    : parsed.last_good_quota === null
+      ? null
+      : parseQuotaSnapshot(parsed.last_good_quota);
 
   return {
     name: asNonEmptyString(parsed.name, "name"),
@@ -444,7 +473,8 @@ export function parseSnapshotMeta(raw: string): SnapshotMeta {
     last_auth_refresh_status: lastAuthRefreshStatus === undefined ? null : lastAuthRefreshStatus,
     last_auth_refresh_error: lastAuthRefreshError === undefined ? null : lastAuthRefreshError,
     auth_refresh_fail_count: asOptionalNumber(parsed.auth_refresh_fail_count, "auth_refresh_fail_count") ?? 0,
-    quota: parseQuotaSnapshot(parsed.quota),
+    quota: parsedQuota,
+    last_good_quota: lastGoodQuota,
   };
 }
 

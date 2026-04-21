@@ -10,11 +10,13 @@ import {
   proxyOpenAIBaseUrl,
   resolveProxyPort,
 } from "../proxy/constants.js";
+import { ensureSyntheticProxyRuntimeActive } from "../proxy/runtime.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { appendEventLog, appendProxyRequestLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
 import { drainDaemonRequests } from "../daemon/requests.js";
 import { defaultDaemonState } from "../daemon/state.js";
 import { runManagedDesktopWatchSession } from "../watch/session.js";
+import { refreshManagedDesktopAfterSwitch } from "../switching.js";
 
 type DebugLogger = (message: string) => void;
 
@@ -112,6 +114,64 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+async function runDaemonProxyRuntimeLoop(options: {
+  store: AccountStore;
+  desktopLauncher: CodexDesktopLauncher;
+  signal: AbortSignal;
+  debugLog: DebugLogger;
+  intervalMs?: number;
+}): Promise<void> {
+  const intervalMs = options.intervalMs ?? 5_000;
+
+  while (!options.signal.aborted) {
+    try {
+      const result = await ensureSyntheticProxyRuntimeActive(options.store);
+      if (result.restored) {
+        options.debugLog(
+          `daemon: restored synthetic proxy runtime auth_was_synthetic=${result.authWasSynthetic} config_was_synthetic=${result.configWasSynthetic}`,
+        );
+        await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+          component: "proxy",
+          event: "proxy.runtime.reapplied",
+          trigger: "daemon",
+          fields: {
+            auth_was_synthetic: result.authWasSynthetic,
+            config_was_synthetic: result.configWasSynthetic,
+          },
+        }));
+        const warnings: string[] = [];
+        await refreshManagedDesktopAfterSwitch(warnings, options.desktopLauncher, {
+          signal: options.signal,
+        });
+        if (warnings.length > 0) {
+          await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+            component: "proxy",
+            event: "proxy.runtime.reapplied.desktop_warning",
+            trigger: "daemon",
+            level: "warn",
+            fields: {
+              warnings,
+            },
+          }));
+        }
+      }
+    } catch (error) {
+      await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+        component: "proxy",
+        event: "proxy.runtime.reapply_failed",
+        trigger: "daemon",
+        level: "error",
+        errorMessageShort: shortenErrorMessage((error as Error).message),
+      }));
+    }
+
+    if (options.signal.aborted) {
+      return;
+    }
+    await delay(intervalMs, options.signal);
+  }
 }
 
 function buildDaemonStartConfig(options: {
@@ -338,6 +398,12 @@ async function runDaemonService(options: {
           base_url: server.backendBaseUrl,
           openai_base_url: server.openaiBaseUrl,
         },
+      }));
+      backgroundTasks.push(runDaemonProxyRuntimeLoop({
+        store: options.store,
+        desktopLauncher: options.desktopLauncher,
+        signal,
+        debugLog,
       }));
     }
 

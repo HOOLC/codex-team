@@ -20,7 +20,12 @@ import {
 } from "./constants.js";
 import { resolveProxyManualUpstreamAccountName } from "./runtime.js";
 import { isSyntheticProxyBearerToken } from "./synthetic-auth.js";
-import { buildProxyUsagePayloadForStore } from "./quota.js";
+import {
+  buildProxyAccountCheckV4Payload,
+  buildProxyAutoTopUpSettingsPayload,
+  buildProxyUsagePayloadForStore,
+  buildProxyWhamAccountsCheckPayloadForStore,
+} from "./quota.js";
 
 interface ProxyUpstreamAccount {
   account: ManagedAccount;
@@ -57,6 +62,7 @@ interface ProxyForwardResult {
   selectedAuthMode: string | null;
   upstreamKind: "chatgpt" | "openai";
   syntheticUsage?: boolean;
+  diagnostic?: Record<string, unknown>;
 }
 
 interface ProxyStoredConversation {
@@ -171,8 +177,62 @@ function requestHeadersToWebSocketHeaders(
   return headers;
 }
 
+function incomingHeadersToRecord(request: IncomingMessage): Record<string, string | string[]> {
+  const headers: Record<string, string | string[]> = {};
+  for (const [key, rawValue] of Object.entries(request.headers)) {
+    if (Array.isArray(rawValue)) {
+      headers[key] = [...rawValue];
+    } else if (typeof rawValue === "string") {
+      headers[key] = rawValue;
+    }
+  }
+  return headers;
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    result[key] = value;
+  });
+  return result;
+}
+
+function upstreamResponseHeadersToRecord(upstream: Response): Record<string, string> {
+  const headers: Record<string, string> = {};
+  upstream.headers.forEach((value, key) => {
+    if (!["content-encoding", "transfer-encoding", "connection"].includes(key.toLowerCase())) {
+      headers[key] = value;
+    }
+  });
+  return headers;
+}
+
+function shouldCaptureDiagnosticPayload(pathname: string): boolean {
+  return pathname === "/backend-api/wham/usage"
+    || pathname === "/backend-api/wham/accounts/check"
+    || pathname === "/backend-api/subscriptions/auto_top_up/settings"
+    || /^\/backend-api\/accounts\/check\/.+/u.test(pathname);
+}
+
+function isCodexDesktopRequest(request: IncomingMessage): boolean {
+  const rawUserAgent = request.headers["user-agent"] as string | string[] | undefined;
+  const userAgent = Array.isArray(rawUserAgent)
+    ? rawUserAgent.join(" ")
+    : rawUserAgent ?? "";
+  return /Codex Desktop\//u.test(userAgent);
+}
+
 function createRequestId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function shouldUseSyntheticDesktopUsageSurface(request: IncomingMessage): boolean {
+  const authorization = typeof request.headers.authorization === "string"
+    ? request.headers.authorization
+    : null;
+  return authorization === null
+    || isSyntheticProxyBearerToken(authorization)
+    || isCodexDesktopRequest(request);
 }
 
 function writeJson(response: ServerResponse, statusCode: number, payload: unknown): number {
@@ -194,12 +254,7 @@ function writeError(response: ServerResponse, statusCode: number, message: strin
 }
 
 async function writeUpstreamResponse(response: ServerResponse, upstream: Response): Promise<number> {
-  const headers: Record<string, string> = {};
-  upstream.headers.forEach((value, key) => {
-    if (!["content-encoding", "transfer-encoding", "connection"].includes(key.toLowerCase())) {
-      headers[key] = value;
-    }
-  });
+  const headers = upstreamResponseHeadersToRecord(upstream);
   response.writeHead(upstream.status, headers);
   if (!upstream.body) {
     response.end();
@@ -220,6 +275,22 @@ async function writeUpstreamResponse(response: ServerResponse, upstream: Respons
   } finally {
     reader.releaseLock();
   }
+}
+
+async function writeBufferedUpstreamResponse(response: ServerResponse, upstream: Response): Promise<{
+  responseBytes: number;
+  responseHeaders: Record<string, string>;
+  responseBodyText: string;
+}> {
+  const responseHeaders = upstreamResponseHeadersToRecord(upstream);
+  const responseBodyText = await upstream.text();
+  response.writeHead(upstream.status, responseHeaders);
+  response.end(responseBodyText);
+  return {
+    responseBytes: Buffer.byteLength(responseBodyText),
+    responseHeaders,
+    responseBodyText,
+  };
 }
 
 function parseJsonBody(bodyText: string): Record<string, unknown> {
@@ -456,6 +527,9 @@ async function forwardChatGPTBackend(options: {
   const selected = shouldReplaceAuth
     ? await selectProxyAccount(options.store, "chatgpt")
     : null;
+  const outgoingHeaders = shouldReplaceAuth
+    ? buildChatGPTAuthHeaders(options.request, selected)
+    : requestHeadersToFetchHeaders(options.request);
 
   if (shouldReplaceAuth && !selected) {
     return {
@@ -468,16 +542,34 @@ async function forwardChatGPTBackend(options: {
     };
   }
 
+  const upstreamUrl = upstreamChatGPTUrl(options.pathname, options.search);
   const upstream = await options.fetchImpl(
-    upstreamChatGPTUrl(options.pathname, options.search),
+    upstreamUrl,
     fetchInitForRequest(
       options.request,
-      shouldReplaceAuth
-        ? buildChatGPTAuthHeaders(options.request, selected)
-        : requestHeadersToFetchHeaders(options.request),
+      outgoingHeaders,
       options.bodyText,
     ),
   );
+  if (shouldCaptureDiagnosticPayload(options.pathname)) {
+    const buffered = await writeBufferedUpstreamResponse(options.response, upstream);
+    return {
+      statusCode: upstream.status,
+      responseBytes: buffered.responseBytes,
+      authKind: shouldReplaceAuth ? "synthetic-chatgpt" : "direct-chatgpt",
+      selectedAccount: selected?.account.name ?? null,
+      selectedAuthMode: selected?.account.auth_mode ?? null,
+      upstreamKind: "chatgpt",
+      diagnostic: {
+        request_headers: incomingHeadersToRecord(options.request),
+        request_body_text: options.bodyText,
+        upstream_url: upstreamUrl,
+        upstream_request_headers: headersToRecord(outgoingHeaders),
+        response_headers: buffered.responseHeaders,
+        response_body_text: buffered.responseBodyText,
+      },
+    };
+  }
   return {
     statusCode: upstream.status,
     responseBytes: await writeUpstreamResponse(options.response, upstream),
@@ -1638,11 +1730,10 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       }
 
       if (pathname === "/backend-api/wham/usage" && request.method === "GET") {
-        const authorization = typeof request.headers.authorization === "string"
-          ? request.headers.authorization
-          : null;
-        if (authorization === null || isSyntheticProxyBearerToken(authorization)) {
-          const responseBytes = writeJson(response, 200, await buildProxyUsagePayloadForStore(options.store));
+        if (shouldUseSyntheticDesktopUsageSurface(request)) {
+          const payload = await buildProxyUsagePayloadForStore(options.store);
+          const responseBodyText = `${JSON.stringify(payload)}\n`;
+          const responseBytes = writeJson(response, 200, payload);
           await options.requestLogger?.({
             ts: new Date().toISOString(),
             request_id: requestId,
@@ -1659,6 +1750,116 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             request_bytes: requestBytes,
             response_bytes: responseBytes,
             synthetic_usage: true,
+            request_headers: incomingHeadersToRecord(request),
+            request_body_text: bodyText,
+            upstream_url: null,
+            upstream_request_headers: null,
+            response_headers: {
+              "content-type": "application/json",
+            },
+            response_body_text: responseBodyText,
+          });
+          return;
+        }
+      }
+
+      if (pathname === "/backend-api/wham/accounts/check" && request.method === "GET") {
+        if (shouldUseSyntheticDesktopUsageSurface(request)) {
+          const payload = await buildProxyWhamAccountsCheckPayloadForStore(options.store);
+          const responseBodyText = `${JSON.stringify(payload)}\n`;
+          const responseBytes = writeJson(response, 200, payload);
+          await options.requestLogger?.({
+            ts: new Date().toISOString(),
+            request_id: requestId,
+            pid: process.pid,
+            method: request.method ?? "GET",
+            route: pathname,
+            surface: "backend-api",
+            auth_kind: "synthetic-chatgpt",
+            selected_account_name: null,
+            selected_auth_mode: null,
+            upstream_kind: "chatgpt",
+            status_code: 200,
+            duration_ms: Date.now() - startedAt,
+            request_bytes: requestBytes,
+            response_bytes: responseBytes,
+            synthetic_usage: false,
+            request_headers: incomingHeadersToRecord(request),
+            request_body_text: bodyText,
+            upstream_url: null,
+            upstream_request_headers: null,
+            response_headers: {
+              "content-type": "application/json",
+            },
+            response_body_text: responseBodyText,
+          });
+          return;
+        }
+      }
+
+      if (pathname === "/backend-api/subscriptions/auto_top_up/settings" && request.method === "GET") {
+        if (shouldUseSyntheticDesktopUsageSurface(request)) {
+          const payload = buildProxyAutoTopUpSettingsPayload();
+          const responseBodyText = `${JSON.stringify(payload)}\n`;
+          const responseBytes = writeJson(response, 200, payload);
+          await options.requestLogger?.({
+            ts: new Date().toISOString(),
+            request_id: requestId,
+            pid: process.pid,
+            method: request.method ?? "GET",
+            route: pathname,
+            surface: "backend-api",
+            auth_kind: "synthetic-chatgpt",
+            selected_account_name: null,
+            selected_auth_mode: null,
+            upstream_kind: "chatgpt",
+            status_code: 200,
+            duration_ms: Date.now() - startedAt,
+            request_bytes: requestBytes,
+            response_bytes: responseBytes,
+            synthetic_usage: false,
+            request_headers: incomingHeadersToRecord(request),
+            request_body_text: bodyText,
+            upstream_url: null,
+            upstream_request_headers: null,
+            response_headers: {
+              "content-type": "application/json",
+            },
+            response_body_text: responseBodyText,
+          });
+          return;
+        }
+      }
+
+      if (/^\/backend-api\/accounts\/check\/.+/u.test(pathname) && request.method === "GET") {
+        if (shouldUseSyntheticDesktopUsageSurface(request)) {
+          const payload = buildProxyAccountCheckV4Payload();
+          const responseBodyText = `${JSON.stringify(payload)}\n`;
+          const responseBytes = writeJson(response, 200, payload);
+          await options.requestLogger?.({
+            ts: new Date().toISOString(),
+            request_id: requestId,
+            pid: process.pid,
+            method: request.method ?? "GET",
+            route: pathname,
+            surface: "backend-api",
+            auth_kind: "synthetic-chatgpt",
+            selected_account_name: null,
+            selected_auth_mode: null,
+            upstream_kind: "chatgpt",
+            status_code: 200,
+            duration_ms: Date.now() - startedAt,
+            request_bytes: requestBytes,
+            response_bytes: responseBytes,
+            synthetic_usage: false,
+            request_headers: incomingHeadersToRecord(request),
+            request_body_text: bodyText,
+            upstream_url: null,
+            upstream_request_headers: null,
+            response_headers: {
+              "content-type": "application/json",
+            },
+            response_body_text: responseBodyText,
           });
           return;
         }
@@ -1712,6 +1913,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         request_bytes: requestBytes,
         response_bytes: forwardResult.responseBytes,
         synthetic_usage: forwardResult.syntheticUsage ?? false,
+        ...(forwardResult.diagnostic ?? {}),
       });
     })().catch((error) => {
       options.debugLog?.(`proxy: request failed: ${(error as Error).message}`);

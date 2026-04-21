@@ -455,6 +455,146 @@ preferred_auth_method = "apikey"
     }
   });
 
+  test("uses auth-scoped last_good_quota when refresh fallback is enabled", async () => {
+    const homeDir = await createTempHome();
+    let attempts = 0;
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          attempts += 1;
+          if (attempts === 1) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 12,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 999,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 54,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 8_888,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "17",
+              },
+            });
+          }
+
+          throw new TypeError("fetch failed");
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-quota");
+      await store.saveCurrentAccount("main");
+
+      await store.refreshQuotaForAccount("main");
+      const fallback = await store.refreshQuotaForAccount("main", {
+        allowCachedQuotaFallback: true,
+      });
+
+      expect(fallback.quota.status).toBe("stale");
+      expect(fallback.quota.five_hour?.used_percent).toBe(12);
+      expect(fallback.quota.one_week?.used_percent).toBe(54);
+      expect(fallback.warning).toContain("using cached quota");
+
+      const refreshedMeta = JSON.parse(
+        await readFile(join(homeDir, ".codex-team", "accounts", "main", "meta.json"), "utf8"),
+      ) as Record<string, unknown>;
+      expect(refreshedMeta).toMatchObject({
+        quota: {
+          status: "stale",
+          five_hour: {
+            used_percent: 12,
+          },
+          one_week: {
+            used_percent: 54,
+          },
+        },
+        last_good_quota: {
+          status: "ok",
+          five_hour: {
+            used_percent: 12,
+          },
+          one_week: {
+            used_percent: 54,
+          },
+        },
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("does not use stale quota fallback when last_good_quota is older than the max age", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          throw new TypeError("fetch failed");
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-quota");
+      await store.saveCurrentAccount("main");
+
+      const metaPath = join(homeDir, ".codex-team", "accounts", "main", "meta.json");
+      const meta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+      meta.last_good_quota = {
+        status: "ok",
+        plan_type: "plus",
+        fetched_at: "2026-04-01T00:00:00.000Z",
+        five_hour: {
+          used_percent: 12,
+          window_seconds: 18_000,
+          reset_at: "2026-04-01T05:00:00.000Z",
+        },
+        one_week: {
+          used_percent: 54,
+          window_seconds: 604_800,
+          reset_at: "2026-04-08T00:00:00.000Z",
+        },
+      };
+      await writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+      await expect(
+        store.refreshQuotaForAccount("main", {
+          allowCachedQuotaFallback: true,
+          cachedQuotaMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
+        }),
+      ).rejects.toThrow(/Failed to refresh quota/);
+
+      const refreshedMeta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+      expect(refreshedMeta).toMatchObject({
+        quota: {
+          status: "error",
+        },
+        last_good_quota: {
+          status: "ok",
+          fetched_at: "2026-04-01T00:00:00.000Z",
+        },
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("refreshes quotas with limited concurrency and preserves account order", async () => {
     const homeDir = await createTempHome();
     let activeRequests = 0;

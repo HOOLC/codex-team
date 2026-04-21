@@ -6,11 +6,12 @@ import { describe, expect, test } from "@rstest/core";
 import { WebSocket, WebSocketServer } from "ws";
 
 import { createAccountStore } from "../src/account-store/index.js";
-import { decodeJwtPayload, getSnapshotAccountId, getSnapshotEmail, getSnapshotUserId } from "../src/auth-snapshot.js";
+import { decodeJwtPayload, getSnapshotAccountId, getSnapshotEmail, getSnapshotUserId, readAuthSnapshotFile } from "../src/auth-snapshot.js";
 import type { RunnerOptions } from "../src/codex-cli-runner.js";
 import { writeDaemonState } from "../src/daemon/state.js";
 import { runCli } from "../src/main.js";
-import { PROXY_PORT_ENV_VAR } from "../src/proxy/constants.js";
+import { buildCachedAccountDashboardSnapshot } from "../src/commands/tui.js";
+import { PROXY_ACCOUNT_ID, PROXY_PORT_ENV_VAR } from "../src/proxy/constants.js";
 import { formatProxyUpstreamSelectionLabel } from "../src/proxy/request-log.js";
 import { readProxyState, writeProxyState } from "../src/proxy/state.js";
 import {
@@ -267,7 +268,29 @@ describe("codexm proxy", () => {
           'preferred_auth_method = "chatgpt"',
         ].join("\n"),
       );
-      const store = createAccountStore(homeDir);
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 12,
+                limit_window_seconds: 18_000,
+                reset_at: Math.floor(Date.parse("2026-04-18T05:00:00.000Z") / 1000),
+              },
+              secondary_window: {
+                used_percent: 34,
+                limit_window_seconds: 604_800,
+                reset_at: Math.floor(Date.parse("2026-04-25T00:00:00.000Z") / 1000),
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: true,
+              balance: "0",
+            },
+          }),
+      });
       const proxyProcess = createProxyProcessManagerStub();
       const stdout = captureWritable();
       const stderr = captureWritable();
@@ -330,6 +353,62 @@ describe("codexm proxy", () => {
       expect(getSnapshotAccountId(restoredAuth)).toBe("acct-direct");
       expect(getSnapshotUserId(restoredAuth)).toBe("user-direct");
       expect(await readCurrentConfig(homeDir)).toContain("old.example");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy drift recovery reapplies synthetic auth without overwriting the saved upstream backup", async () => {
+    const { ensureSyntheticProxyRuntimeActive } = await import("../src/proxy/runtime.js");
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-plus3", "chatgpt", "plus", "user-plus3");
+      await writeCurrentConfig(
+        homeDir,
+        [
+          'model = "gpt-5"',
+          'preferred_auth_method = "chatgpt"',
+        ].join("\n"),
+      );
+      const store = createAccountStore(homeDir);
+      const proxyProcess = createProxyProcessManagerStub();
+
+      const enableCode = await runCli(["proxy", "enable", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+      expect(enableCode).toBe(0);
+
+      await writeCurrentAuth(homeDir, "acct-plus1", "chatgpt", "plus", "user-plus1");
+      await writeCurrentConfig(
+        homeDir,
+        [
+          'model = "gpt-5"',
+          'preferred_auth_method = "chatgpt"',
+        ].join("\n"),
+      );
+
+      const recovered = await ensureSyntheticProxyRuntimeActive(store);
+      expect(recovered).toMatchObject({
+        restored: true,
+        authWasSynthetic: false,
+        configWasSynthetic: false,
+      });
+
+      const recoveredAuth = await readCurrentAuth(homeDir);
+      expect(getSnapshotEmail(recoveredAuth)).toBe("proxy@codexm.local");
+      expect(getSnapshotAccountId(recoveredAuth)).toBe("codexm-proxy-account");
+
+      const savedDirectAuth = await readAuthSnapshotFile(join(store.paths.codexTeamDir, "proxy", "last-direct-auth.json"));
+      expect(getSnapshotAccountId(savedDirectAuth)).toBe("acct-plus3");
+
+      const recoveredConfig = await readCurrentConfig(homeDir);
+      expect(recoveredConfig).toContain('chatgpt_base_url = "http://127.0.0.1:14555/backend-api"');
+      expect(recoveredConfig).toContain('openai_base_url = "http://127.0.0.1:14555/v1"');
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -404,7 +483,7 @@ describe("codexm proxy", () => {
     }
   });
 
-  test("proxy disable sanitizes proxy base urls restored from a contaminated direct config backup", async () => {
+  test("proxy disable sanitizes proxy base urls restored from a contaminated direct config backup with a stale port", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const homeDir = await createTempHome();
 
@@ -443,11 +522,11 @@ describe("codexm proxy", () => {
       await writeProxyState(store.paths.codexTeamDir, {
         pid: 12345,
         host: "127.0.0.1",
-        port: 14555,
+        port: 14655,
         started_at: "2026-04-18T00:00:00.000Z",
         log_path: "/tmp/codexm-proxy.log",
-        base_url: "http://127.0.0.1:14555/backend-api",
-        openai_base_url: "http://127.0.0.1:14555/v1",
+        base_url: "http://127.0.0.1:14655/backend-api",
+        openai_base_url: "http://127.0.0.1:14655/v1",
         debug: false,
         enabled: true,
         direct_auth_backup_path: null,
@@ -727,6 +806,104 @@ describe("codexm proxy", () => {
       expect(currentConfig).toContain('openai_base_url = "http://127.0.0.1:14555/v1"');
       expect(currentConfig).not.toContain("codexm_proxy");
       expect((await readProxyState(store.paths.codexTeamDir))?.enabled).toBe(true);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list and dashboard keep @ on the configured proxy upstream even before any request log hit", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-real", "chatgpt", "plus", "user-real");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 12,
+                limit_window_seconds: 18_000,
+                reset_at: Math.floor(Date.parse("2026-04-18T05:00:00.000Z") / 1000),
+              },
+              secondary_window: {
+                used_percent: 34,
+                limit_window_seconds: 604_800,
+                reset_at: Math.floor(Date.parse("2026-04-25T00:00:00.000Z") / 1000),
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: true,
+              balance: "0",
+            },
+          }),
+      });
+      await store.saveCurrentAccount("real-main");
+      const savedDirectAuth = await readFile(store.paths.currentAuthPath, "utf8");
+      const backupAuthPath = join(homeDir, ".codex-team", "proxy", "last-direct-auth.json");
+      await mkdir(join(homeDir, ".codex-team", "proxy"), { recursive: true });
+      await writeFile(backupAuthPath, savedDirectAuth, "utf8");
+      await writeFile(
+        store.paths.currentAuthPath,
+        `${JSON.stringify(createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z")), null, 2)}\n`,
+        "utf8",
+      );
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 12345,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: join(homeDir, ".codex-team", "logs", "proxy.log"),
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: true,
+        direct_auth_backup_path: backupAuthPath,
+        direct_config_backup_path: null,
+        direct_auth_existed: true,
+        direct_config_existed: false,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list", "--json"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+      } as never);
+      expect(listCode).toBe(0);
+      const listPayload = JSON.parse(listStdout.read()) as {
+        proxy_current_upstream: { account_name: string } | null;
+        proxy_last_upstream: { account_name: string } | null;
+      };
+      expect(listPayload.proxy_current_upstream).toEqual({
+        account_name: "real-main",
+      });
+      expect(listPayload.proxy_last_upstream).toBeNull();
+
+      const textListStdout = captureWritable();
+      const textListCode = await runCli(["list"], {
+        store,
+        stdout: textListStdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+      } as never);
+      expect(textListCode).toBe(0);
+      const textListOutput = stripAnsi(textListStdout.read());
+      expect(textListOutput).not.toContain("Proxy last upstream:");
+      expect(textListOutput).toMatch(/^[ *]@\s+real-main\b/m);
+
+      const dashboard = await buildCachedAccountDashboardSnapshot({ store });
+      expect(dashboard.accounts.find((account) => account.name === "real-main")).toMatchObject({
+        proxyUpstreamActive: true,
+      });
+      expect(
+        (dashboard.accounts.find((account) => account.name === "proxy")?.detailLines ?? [])
+          .map(stripAnsi)
+          .some((line) => line.startsWith("Last upstream:")),
+      ).toBe(false);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1025,6 +1202,19 @@ describe("codexm proxy", () => {
           synthetic_usage: true,
           status_code: 200,
         });
+        expect(requestLogs[0]).toMatchObject({
+          request_body_text: "",
+          upstream_url: null,
+          upstream_request_headers: null,
+          response_headers: {
+            "content-type": "application/json",
+          },
+        });
+        expect(
+          JSON.parse(String(requestLogs[0]?.response_body_text ?? "{}")) as Record<string, unknown>,
+        ).toMatchObject({
+          plan_type: "pro",
+        });
 
         const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
         const response = await fetch(`${server.baseUrl}/v1/responses`, {
@@ -1169,6 +1359,277 @@ describe("codexm proxy", () => {
           synthetic_usage: false,
           status_code: 200,
         });
+        expect(requestLogs[1]).toMatchObject({
+          request_headers: {
+            authorization: "Bearer direct-access-token",
+            "chatgpt-account-id": "acct-alpha",
+          },
+          request_body_text: "",
+          upstream_url: "https://chatgpt.com/backend-api/wham/usage",
+          upstream_request_headers: {
+            authorization: "Bearer direct-access-token",
+            "chatgpt-account-id": "acct-alpha",
+          },
+        });
+        expect(
+          JSON.parse(String(requestLogs[1]?.response_body_text ?? "{}")) as Record<string, unknown>,
+        ).toMatchObject({
+          plan_type: "plus",
+        });
+
+        const desktopUsageResponse = await fetch(`${server.baseUrl}/backend-api/backend-api/wham/usage`, {
+          headers: {
+            authorization: "Bearer direct-access-token",
+            "ChatGPT-Account-Id": "acct-alpha",
+            "User-Agent": "Codex Desktop/0.122.0-alpha.13 (Mac OS 26.4.1; arm64)",
+          },
+        });
+        expect(desktopUsageResponse.status).toBe(200);
+        const desktopUsage = await desktopUsageResponse.json() as {
+          plan_type: string;
+          rate_limit: {
+            primary_window: { used_percent: number };
+            secondary_window: { used_percent: number };
+          };
+        };
+        expect(desktopUsage.plan_type).toBe("pro");
+        expect(desktopUsage.rate_limit.primary_window.used_percent).toBe(20);
+        expect(desktopUsage.rate_limit.secondary_window.used_percent).toBe(40);
+        expect(requestLogs[2]).toMatchObject({
+          route: "/backend-api/wham/usage",
+          auth_kind: "synthetic-chatgpt",
+          synthetic_usage: true,
+          status_code: 200,
+        });
+        expect(requestLogs[2]).toMatchObject({
+          request_headers: {
+            authorization: "Bearer direct-access-token",
+            "chatgpt-account-id": "acct-alpha",
+            "user-agent": "Codex Desktop/0.122.0-alpha.13 (Mac OS 26.4.1; arm64)",
+          },
+        });
+        expect(forwardedUrls).toEqual(["https://chatgpt.com/backend-api/wham/usage"]);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy serves a synthetic desktop account surface for usage helper routes and preserves direct passthrough", async () => {
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await writeQuotaMeta(
+        (await store.getManagedAccount("alpha")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 20, one_week_used: 40 },
+      );
+
+      const forwardedUrls: string[] = [];
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (url) => {
+          forwardedUrls.push(String(url));
+          if (String(url) === "https://chatgpt.com/backend-api/wham/accounts/check") {
+            return jsonResponse({
+              accounts: [
+                {
+                  id: "acct-alpha",
+                  account_user_id: "user-alpha__acct-alpha",
+                  structure: "personal",
+                  plan_type: "plus",
+                  name: "alpha",
+                  profile_picture_url: null,
+                },
+              ],
+              default_account_id: "acct-alpha",
+              account_ordering: ["acct-alpha"],
+            });
+          }
+          if (String(url) === "https://chatgpt.com/backend-api/subscriptions/auto_top_up/settings") {
+            return jsonResponse({
+              is_enabled: true,
+              recharge_threshold: 25,
+              recharge_target: 50,
+            });
+          }
+          if (String(url) === "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27") {
+            return jsonResponse({
+              accounts: {
+                "acct-alpha": {
+                  account: {
+                    account_user_role: "owner",
+                  },
+                  entitlement: {
+                    billing_currency: "JPY",
+                  },
+                },
+              },
+            });
+          }
+          throw new Error(`Unexpected upstream URL: ${String(url)}`);
+        },
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+      });
+
+      try {
+        const syntheticWhamAccounts = await fetch(`${server.baseUrl}/backend-api/wham/accounts/check`);
+        expect(syntheticWhamAccounts.status).toBe(200);
+        expect(await syntheticWhamAccounts.json()).toMatchObject({
+          default_account_id: PROXY_ACCOUNT_ID,
+          account_ordering: [PROXY_ACCOUNT_ID],
+          accounts: [
+            {
+              id: PROXY_ACCOUNT_ID,
+              plan_type: "pro",
+              name: "proxy",
+            },
+          ],
+        });
+
+        const desktopWhamAccounts = await fetch(`${server.baseUrl}/backend-api/wham/accounts/check`, {
+          headers: {
+            authorization: "Bearer direct-account-token",
+            "ChatGPT-Account-Id": "acct-alpha",
+            "User-Agent": "Codex Desktop/0.122.0-alpha.13 (Mac OS 26.4.1; arm64)",
+          },
+        });
+        expect(desktopWhamAccounts.status).toBe(200);
+        expect(await desktopWhamAccounts.json()).toMatchObject({
+          default_account_id: PROXY_ACCOUNT_ID,
+        });
+
+        const directWhamAccounts = await fetch(`${server.baseUrl}/backend-api/wham/accounts/check`, {
+          headers: {
+            authorization: "Bearer direct-account-token",
+            "ChatGPT-Account-Id": "acct-alpha",
+          },
+        });
+        expect(directWhamAccounts.status).toBe(200);
+        expect(await directWhamAccounts.json()).toMatchObject({
+          default_account_id: "acct-alpha",
+          account_ordering: ["acct-alpha"],
+          accounts: [
+            {
+              id: "acct-alpha",
+              plan_type: "plus",
+              name: "alpha",
+            },
+          ],
+        });
+
+        const syntheticAutoTopUp = await fetch(`${server.baseUrl}/backend-api/subscriptions/auto_top_up/settings`);
+        expect(syntheticAutoTopUp.status).toBe(200);
+        expect(await syntheticAutoTopUp.json()).toEqual({
+          is_enabled: false,
+          recharge_threshold: null,
+          recharge_target: null,
+        });
+
+        const directAutoTopUp = await fetch(`${server.baseUrl}/backend-api/subscriptions/auto_top_up/settings`, {
+          headers: {
+            authorization: "Bearer direct-account-token",
+            "ChatGPT-Account-Id": "acct-alpha",
+          },
+        });
+        expect(directAutoTopUp.status).toBe(200);
+        expect(await directAutoTopUp.json()).toEqual({
+          is_enabled: true,
+          recharge_threshold: 25,
+          recharge_target: 50,
+        });
+
+        const syntheticAccountCheck = await fetch(`${server.baseUrl}/backend-api/accounts/check/v4-2023-04-27`);
+        expect(syntheticAccountCheck.status).toBe(200);
+        expect(await syntheticAccountCheck.json()).toMatchObject({
+          accounts: {
+            [PROXY_ACCOUNT_ID]: {
+              account: {
+                account_user_role: "owner",
+              },
+              entitlement: {
+                billing_currency: "USD",
+              },
+            },
+          },
+        });
+
+        const directAccountCheck = await fetch(`${server.baseUrl}/backend-api/accounts/check/v4-2023-04-27`, {
+          headers: {
+            authorization: "Bearer direct-account-token",
+            "ChatGPT-Account-Id": "acct-alpha",
+          },
+        });
+        expect(directAccountCheck.status).toBe(200);
+        expect(await directAccountCheck.json()).toMatchObject({
+          accounts: {
+            "acct-alpha": {
+              account: {
+                account_user_role: "owner",
+              },
+              entitlement: {
+                billing_currency: "JPY",
+              },
+            },
+          },
+        });
+
+        expect(forwardedUrls).toEqual([
+          "https://chatgpt.com/backend-api/wham/accounts/check",
+          "https://chatgpt.com/backend-api/subscriptions/auto_top_up/settings",
+          "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+        ]);
+        expect(requestLogs).toHaveLength(7);
+        expect(requestLogs[0]).toMatchObject({
+          route: "/backend-api/wham/accounts/check",
+          auth_kind: "synthetic-chatgpt",
+          upstream_url: null,
+          status_code: 200,
+        });
+        expect(requestLogs[1]).toMatchObject({
+          route: "/backend-api/wham/accounts/check",
+          auth_kind: "synthetic-chatgpt",
+          upstream_url: null,
+          request_headers: {
+            authorization: "Bearer direct-account-token",
+            "chatgpt-account-id": "acct-alpha",
+            "user-agent": "Codex Desktop/0.122.0-alpha.13 (Mac OS 26.4.1; arm64)",
+          },
+        });
+        expect(requestLogs[2]).toMatchObject({
+          route: "/backend-api/wham/accounts/check",
+          auth_kind: "direct-chatgpt",
+          upstream_url: "https://chatgpt.com/backend-api/wham/accounts/check",
+        });
+        expect(requestLogs[3]).toMatchObject({
+          route: "/backend-api/subscriptions/auto_top_up/settings",
+          auth_kind: "synthetic-chatgpt",
+          upstream_url: null,
+        });
+        expect(requestLogs[4]).toMatchObject({
+          route: "/backend-api/subscriptions/auto_top_up/settings",
+          auth_kind: "direct-chatgpt",
+          upstream_url: "https://chatgpt.com/backend-api/subscriptions/auto_top_up/settings",
+        });
+        expect(requestLogs[5]).toMatchObject({
+          route: "/backend-api/accounts/check/v4-2023-04-27",
+          auth_kind: "synthetic-chatgpt",
+          upstream_url: null,
+        });
+        expect(requestLogs[6]).toMatchObject({
+          route: "/backend-api/accounts/check/v4-2023-04-27",
+          auth_kind: "direct-chatgpt",
+          upstream_url: "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+        });
       } finally {
         await server.close();
       }
@@ -1228,6 +1689,88 @@ describe("codexm proxy", () => {
         expect(response.status).toBe(200);
         expect(forwardedBodies[0]).toMatchObject({
           service_tier: "priority",
+        });
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy captures full diagnostic payloads for backend account check routes", async () => {
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (url, init) => {
+          expect(String(url)).toBe("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27");
+          expect(new Headers(init?.headers).get("authorization")).toBe("Bearer direct-account-token");
+          expect(new Headers(init?.headers).get("ChatGPT-Account-Id")).toBe("acct-direct");
+          return jsonResponse({
+            accounts: {
+              "acct-direct": {
+                account: {
+                  account_user_role: "owner",
+                },
+              },
+            },
+          });
+        },
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+      });
+
+      try {
+        const response = await fetch(`${server.baseUrl}/backend-api/accounts/check/v4-2023-04-27`, {
+          headers: {
+            authorization: "Bearer direct-account-token",
+            "ChatGPT-Account-Id": "acct-direct",
+          },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          accounts: {
+            "acct-direct": {
+              account: {
+                account_user_role: "owner",
+              },
+            },
+          },
+        });
+        expect(requestLogs).toHaveLength(1);
+        expect(requestLogs[0]).toMatchObject({
+          route: "/backend-api/accounts/check/v4-2023-04-27",
+          auth_kind: "direct-chatgpt",
+          status_code: 200,
+          request_headers: {
+            authorization: "Bearer direct-account-token",
+            "chatgpt-account-id": "acct-direct",
+          },
+          request_body_text: "",
+          upstream_url: "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+          upstream_request_headers: {
+            authorization: "Bearer direct-account-token",
+            "chatgpt-account-id": "acct-direct",
+          },
+        });
+        expect(
+          JSON.parse(String(requestLogs[0]?.response_body_text ?? "{}")) as Record<string, unknown>,
+        ).toMatchObject({
+          accounts: {
+            "acct-direct": {
+              account: {
+                account_user_role: "owner",
+              },
+            },
+          },
         });
       } finally {
         await server.close();
@@ -2312,6 +2855,7 @@ describe("codexm proxy", () => {
       expect(listCode).toBe(0);
       const listPayload = JSON.parse(listStdout.read()) as {
         proxy: { name: string; plan_type: string; five_hour: { used_percent: number } } | null;
+        proxy_current_upstream: { account_name: string } | null;
         proxy_last_upstream: { account_name: string; auth_mode: string; label: string | null } | null;
         successes: Array<{ name: string; is_current: boolean }>;
       };
@@ -2323,6 +2867,9 @@ describe("codexm proxy", () => {
       expect(listPayload.successes[0]).toMatchObject({
         name: "proxy",
         is_current: true,
+      });
+      expect(listPayload.proxy_current_upstream).toEqual({
+        account_name: "real-main",
       });
       expect(listPayload.proxy_last_upstream).toMatchObject({
         account_name: "real-main",

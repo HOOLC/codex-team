@@ -1045,6 +1045,75 @@ run_case daemon-flags codexm daemon --
     }
   });
 
+  test("current --refresh shows proxy aggregate usage for the synthetic proxy auth", async () => {
+    const homeDir = await createTempHome();
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 12,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 400,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 47,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-proxy");
+      await runCli(["save", "proxy-source", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await store.refreshQuotaForAccount("proxy-source");
+      await writeFile(
+        store.paths.currentAuthPath,
+        `${JSON.stringify(createSyntheticProxyAuthSnapshot(new Date("2026-04-22T00:00:00.000Z")), null, 2)}\n`,
+      );
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: proxy");
+      expect(output).toContain(
+        "Usage: available | 5H 12% used | 1W 47% used | refreshed via proxy aggregate",
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("current --refresh --json includes refreshed quota data", async () => {
     const homeDir = await createTempHome();
 

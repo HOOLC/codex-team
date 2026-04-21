@@ -38,6 +38,41 @@ export interface ProxyUsagePayload {
   };
 }
 
+export interface ProxyWhamAccountPayload {
+  id: string;
+  account_user_id: string;
+  structure: "personal";
+  plan_type: string;
+  name: string;
+  profile_picture_url: null;
+  rate_limit: ProxyUsagePayload["rate_limit"];
+  additional_rate_limits: ProxyUsagePayload["additional_rate_limits"];
+  credits: ProxyUsagePayload["credits"];
+}
+
+export interface ProxyWhamAccountsCheckPayload {
+  accounts: ProxyWhamAccountPayload[];
+  default_account_id: string;
+  account_ordering: string[];
+}
+
+export interface ProxyAutoTopUpSettingsPayload {
+  is_enabled: boolean;
+  recharge_threshold: number | null;
+  recharge_target: number | null;
+}
+
+export interface ProxyAccountCheckV4Payload {
+  accounts: Record<string, {
+    account: {
+      account_user_role: "owner";
+    };
+    entitlement: {
+      billing_currency: string;
+    };
+  }>;
+}
+
 export interface ProxyQuotaAggregate {
   summary: AccountQuotaSummary;
   watchEtaTarget: WatchHistoryTargetSnapshot;
@@ -269,6 +304,52 @@ export function buildProxyUsagePayload(summary: AccountQuotaSummary | null): Pro
   };
 }
 
+export function buildProxyWhamAccountsCheckPayload(
+  summary: AccountQuotaSummary | null,
+): ProxyWhamAccountsCheckPayload {
+  const usage = buildProxyUsagePayload(summary);
+  return {
+    accounts: [
+      {
+        id: PROXY_ACCOUNT_ID,
+        account_user_id: `${PROXY_USER_ID}__${PROXY_ACCOUNT_ID}`,
+        structure: "personal",
+        plan_type: PROXY_PLAN_TYPE,
+        name: PROXY_ACCOUNT_NAME,
+        profile_picture_url: null,
+        rate_limit: usage.rate_limit,
+        additional_rate_limits: usage.additional_rate_limits,
+        credits: usage.credits,
+      },
+    ],
+    default_account_id: PROXY_ACCOUNT_ID,
+    account_ordering: [PROXY_ACCOUNT_ID],
+  };
+}
+
+export function buildProxyAutoTopUpSettingsPayload(): ProxyAutoTopUpSettingsPayload {
+  return {
+    is_enabled: false,
+    recharge_threshold: null,
+    recharge_target: null,
+  };
+}
+
+export function buildProxyAccountCheckV4Payload(): ProxyAccountCheckV4Payload {
+  return {
+    accounts: {
+      [PROXY_ACCOUNT_ID]: {
+        account: {
+          account_user_role: "owner",
+        },
+        entitlement: {
+          billing_currency: "USD",
+        },
+      },
+    },
+  };
+}
+
 export async function buildProxyQuotaSummary(options: {
   store: AccountStore;
   includeWhenDisabled?: boolean;
@@ -309,6 +390,14 @@ export async function buildProxyQuotaAggregate(options: {
 
 export async function buildProxyUsagePayloadForStore(store: AccountStore): Promise<ProxyUsagePayload> {
   return buildProxyUsagePayload(
+    buildProxyQuotaSummaryFromAccounts((await store.listQuotaSummaries()).accounts),
+  );
+}
+
+export async function buildProxyWhamAccountsCheckPayloadForStore(
+  store: AccountStore,
+): Promise<ProxyWhamAccountsCheckPayload> {
+  return buildProxyWhamAccountsCheckPayload(
     buildProxyQuotaSummaryFromAccounts((await store.listQuotaSummaries()).accounts),
   );
 }

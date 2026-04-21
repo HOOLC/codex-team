@@ -92,6 +92,25 @@ function sanitizeRestoredDirectConfig(
   rawConfig: string | null,
   state: ProxyProcessState | null,
 ): string | null {
+  const matchesManagedProxyUrl = (value: string, expectedPath: string): boolean => {
+    try {
+      const url = new URL(value);
+      const normalizedPath = url.pathname.replace(/\/+$/u, "");
+      if (url.protocol !== "http:" || normalizedPath !== expectedPath || url.port === "") {
+        return false;
+      }
+
+      return (
+        url.hostname === state?.host
+        || url.hostname === "127.0.0.1"
+        || url.hostname === "localhost"
+        || url.hostname === "::1"
+      );
+    } catch {
+      return false;
+    }
+  };
+
   const sanitizedLines = trimTrailingBlankLines(
     stripProxyProviderTable(
       (rawConfig ?? "")
@@ -106,10 +125,10 @@ function sanitizeRestoredDirectConfig(
           if (key === "model_provider" && value === PROXY_MODEL_PROVIDER_ID) {
             return false;
           }
-          if (key === "chatgpt_base_url" && value === state?.base_url) {
+          if (key === "chatgpt_base_url" && matchesManagedProxyUrl(value, "/backend-api")) {
             return false;
           }
-          if (key === "openai_base_url" && value === state?.openai_base_url) {
+          if (key === "openai_base_url" && matchesManagedProxyUrl(value, "/v1")) {
             return false;
           }
           return true;
@@ -250,6 +269,35 @@ export async function writeSyntheticProxyRuntime(options: {
     direct_config_backup_path: configExisted ? configBackupPath : null,
     direct_auth_existed: authExisted,
     direct_config_existed: configExisted,
+  };
+}
+
+export async function reapplySyntheticProxyRuntime(options: {
+  store: AccountStore;
+  state: ProxyProcessState;
+  now?: Date;
+}): Promise<ProxyProcessState> {
+  const configExisted = await pathExists(options.store.paths.currentConfigPath);
+  const rawConfig = configExisted
+    ? await readFile(options.store.paths.currentConfigPath, "utf8")
+    : null;
+  const syntheticAuth = createSyntheticProxyAuthSnapshot(options.now ?? new Date());
+
+  await atomicWriteFile(
+    options.store.paths.currentAuthPath,
+    `${JSON.stringify(syntheticAuth, null, 2)}\n`,
+    FILE_MODE,
+  );
+  await atomicWriteFile(
+    options.store.paths.currentConfigPath,
+    buildLiveProxyConfig(rawConfig, options.state.base_url, options.state.openai_base_url),
+    FILE_MODE,
+  );
+
+  return {
+    ...options.state,
+    enabled: true,
+    enabled_at: options.state.enabled_at ?? (options.now ?? new Date()).toISOString(),
   };
 }
 

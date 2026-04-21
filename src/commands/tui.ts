@@ -67,6 +67,7 @@ import {
   readLatestProxyUpstreamSelection,
   type ProxyLastUpstreamSelection,
 } from "../proxy/request-log.js";
+import { resolveProxyManualUpstreamAccountName } from "../proxy/runtime.js";
 import { readProxyState } from "../proxy/state.js";
 import {
   deleteAccountForTui,
@@ -372,6 +373,7 @@ function buildDashboardSnapshot(options: {
   proxySummary?: AccountQuotaSummary | null;
   proxyAggregate?: Awaited<ReturnType<typeof buildProxyQuotaAggregate>> | null;
   proxyLastUpstream?: ProxyLastUpstreamSelection | null;
+  proxyManualUpstreamName?: string | null;
   useProxyAggregate?: boolean;
   debugLog?: DebugLogger;
 }): AccountDashboardSnapshot {
@@ -412,7 +414,9 @@ function buildDashboardSnapshot(options: {
     .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
   const usableCount = summaryAccounts.filter((account) => deriveAvailability(account) === "available").length;
   const accountMetaByName = new Map(options.accounts.map((account) => [account.name, account] as const));
-  const proxyUpstreamAccountName = options.proxyLastUpstream?.accountName ?? null;
+  const proxyUpstreamAccountName = options.proxyManualUpstreamName
+    ?? options.proxyLastUpstream?.accountName
+    ?? null;
 
   options.debugLog?.(
     `tui: accounts=${displayAccounts.length} proxy=${options.proxySummary ? "yes" : "no"} failures=${options.failures.length} warnings=${options.warnings.length} current_matches=${options.current.matched_accounts.length} watch_history_samples=${options.watchHistory.length}`,
@@ -535,6 +539,9 @@ export async function buildAccountDashboardSnapshot(options: {
     store: options.store,
     includeWhenDisabled: true,
   });
+  const proxyManualUpstreamName = proxyState?.enabled === true
+    ? await resolveProxyManualUpstreamAccountName(options.store, accounts)
+    : null;
   const proxyLastUpstream = proxyState?.enabled === true
     ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
     : null;
@@ -550,6 +557,7 @@ export async function buildAccountDashboardSnapshot(options: {
     proxySummary: proxyAggregate?.summary ?? null,
     proxyAggregate,
     proxyLastUpstream,
+    proxyManualUpstreamName,
     useProxyAggregate: proxyAggregate !== null,
     debugLog: options.debugLog,
   });
@@ -580,6 +588,9 @@ export async function buildCachedAccountDashboardSnapshot(options: {
     store: options.store,
     includeWhenDisabled: true,
   });
+  const proxyManualUpstreamName = proxyState?.enabled === true
+    ? await resolveProxyManualUpstreamAccountName(options.store, accounts)
+    : null;
   const proxyLastUpstream = proxyState?.enabled === true
     ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
     : null;
@@ -595,6 +606,7 @@ export async function buildCachedAccountDashboardSnapshot(options: {
     proxySummary: proxyAggregate?.summary ?? null,
     proxyAggregate,
     proxyLastUpstream,
+    proxyManualUpstreamName,
     useProxyAggregate: proxyAggregate !== null,
     debugLog: options.debugLog,
   });

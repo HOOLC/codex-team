@@ -126,6 +126,8 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 这两个动作都是 Desktop 运行态动作，不是一次性读取动作。
 
+另外，受管 Desktop refresh 在 app-server restart 之后，不只会失效 quota 相关 query，也会补刷 account-info query，这样 plan / usage 相关菜单不会继续卡在旧账号信息上。
+
 ### 3.4 后续 `doctor`
 
 `doctor` 使用 **direct 优先** 的检查顺序：

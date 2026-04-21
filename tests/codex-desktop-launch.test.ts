@@ -10,6 +10,7 @@ import {
   createCodexDesktopLauncher,
 } from "../src/desktop/launcher.js";
 import { launchManagedDesktopProcess } from "../src/desktop/process.js";
+import { buildManagedSwitchExpression } from "../src/desktop/runtime-expressions.js";
 import { cleanupTempHome, createTempHome } from "./test-helpers.js";
 
 describe("codex-desktop-launch", () => {
@@ -850,11 +851,20 @@ describe("codex-desktop-launch", () => {
       expect(sentMessages[0]).toContain("codex-app-server-restart");
       expect(sentMessages[0]).toContain("query-cache-invalidate");
       expect(sentMessages[0]).toContain("rate-limit-status");
-      expect(sentMessages[0]).not.toContain("account-info");
+      expect(sentMessages[0]).toContain("account-info");
       expect(sentMessages[0]).not.toContain("account/updated");
     } finally {
       await cleanupTempHome(homeDir);
     }
+  });
+
+  test("managed switch ignores active threads whose active flags are empty", () => {
+    const expression = buildManagedSwitchExpression({ force: false, timeoutMs: 120_000 });
+
+    expect(expression).toContain("const isBlockingThreadStatus = (status) => {");
+    expect(expression).toContain('!Object.prototype.hasOwnProperty.call(status, "activeFlags")');
+    expect(expression).toContain("Array.isArray(status.activeFlags) ? status.activeFlags.length > 0 : true");
+    expect(expression).toContain("if (isBlockingThreadStatus(status))");
   });
 
   test("passes an extended devtools timeout for managed switches", async () => {

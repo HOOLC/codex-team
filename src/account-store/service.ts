@@ -67,7 +67,7 @@ export type {
   UpdateAccountResult,
 } from "./types.js";
 
-const LIST_CACHED_QUOTA_MAX_AGE_MS = Number.POSITIVE_INFINITY;
+const LIST_CACHED_QUOTA_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 
 interface RefreshQuotaOptions {
   quotaClientMode?: QuotaClientMode;
@@ -83,6 +83,28 @@ function hasQuotaWindowSnapshot(
   window: QuotaSnapshot["five_hour"] | QuotaSnapshot["one_week"],
 ): boolean {
   return typeof window?.used_percent === "number" && typeof window.window_seconds === "number";
+}
+
+function quotaHasWindowSnapshot(quota: QuotaSnapshot | null | undefined): quota is QuotaSnapshot {
+  return quota !== null
+    && quota !== undefined
+    && (hasQuotaWindowSnapshot(quota.five_hour) || hasQuotaWindowSnapshot(quota.one_week));
+}
+
+function toLastGoodQuotaSnapshot(quota: QuotaSnapshot): QuotaSnapshot | null {
+  if (!quotaHasWindowSnapshot(quota)) {
+    return null;
+  }
+
+  return {
+    status: "ok",
+    plan_type: quota.plan_type,
+    credits_balance: quota.credits_balance,
+    fetched_at: quota.fetched_at,
+    unlimited: quota.unlimited,
+    five_hour: quota.five_hour,
+    one_week: quota.one_week,
+  };
 }
 
 export class AccountStore {
@@ -139,12 +161,11 @@ export class AccountStore {
     now: Date,
     maxAgeMs: number,
   ): { quota: QuotaSnapshot; warning: string } | null {
-    const cachedQuota = account.quota;
+    const cachedQuota = account.last_good_quota ?? account.quota;
     const cachedFetchedAt = cachedQuota.fetched_at;
     if (
       !isFiniteTimestamp(cachedFetchedAt) ||
-      (!hasQuotaWindowSnapshot(cachedQuota.five_hour) &&
-        !hasQuotaWindowSnapshot(cachedQuota.one_week))
+      !quotaHasWindowSnapshot(cachedQuota)
     ) {
       return null;
     }
@@ -266,6 +287,7 @@ export class AccountStore {
     );
     meta.last_switched_at = existingMeta?.last_switched_at ?? null;
     meta.quota = existingMeta?.quota ?? meta.quota;
+    meta.last_good_quota = existingMeta?.last_good_quota ?? meta.last_good_quota;
     await atomicWriteFile(
       metaPath,
       stringifyJson(meta),
@@ -333,6 +355,7 @@ export class AccountStore {
     );
     meta.last_switched_at = existingMeta?.last_switched_at ?? null;
     meta.quota = existingMeta?.quota ?? meta.quota;
+    meta.last_good_quota = existingMeta?.last_good_quota ?? meta.last_good_quota;
     await atomicWriteFile(metaPath, stringifyJson(meta));
 
     return await this.repository.readManagedAccount(name);
@@ -531,6 +554,10 @@ export class AccountStore {
       meta.user_id = getSnapshotUserId(result.authSnapshot);
       meta.updated_at = now.toISOString();
       meta.quota = result.quota;
+      const nextLastGoodQuota = toLastGoodQuotaSnapshot(result.quota);
+      if (nextLastGoodQuota) {
+        meta.last_good_quota = nextLastGoodQuota;
+      }
       await this.repository.writeAccountMeta(name, meta);
 
       return {
@@ -548,8 +575,10 @@ export class AccountStore {
           options.cachedQuotaMaxAgeMs ?? LIST_CACHED_QUOTA_MAX_AGE_MS,
         );
         if (fallback) {
+          const fallbackSource = account.last_good_quota ?? toLastGoodQuotaSnapshot(account.quota);
           meta.updated_at = now.toISOString();
           meta.quota = fallback.quota;
+          meta.last_good_quota = fallbackSource;
           await this.repository.writeAccountMeta(name, meta);
           await appendEventLog(this.paths.codexTeamDir, buildEventPayload({
             component: "quota",
@@ -558,7 +587,7 @@ export class AccountStore {
             level: "warn",
             fields: {
               account_name: account.name,
-              cached_fetched_at: account.quota.fetched_at ?? null,
+              cached_fetched_at: fallbackSource?.fetched_at ?? fallback.quota.fetched_at ?? null,
               error: shortenErrorMessage(refreshError.message),
             },
           }));
@@ -586,6 +615,7 @@ export class AccountStore {
         fetched_at: now.toISOString(),
         error_message: refreshError.message,
       };
+      meta.last_good_quota = account.last_good_quota ?? toLastGoodQuotaSnapshot(account.quota);
       await this.repository.writeAccountMeta(name, meta);
       throw new Error(`Failed to refresh quota for "${name}": ${refreshError.message}`);
     }
