@@ -218,7 +218,7 @@ mkdir -p ~/.local/share/bash-completion/completions
 codexm completion bash > ~/.local/share/bash-completion/completions/codexm
 ```
 
-The generated scripts dynamically complete saved account names by calling `codexm completion --accounts`.
+The generated scripts complete commands, known subcommands, flags when the current word starts with `-`, and saved account names by calling `codexm completion --accounts`.
 <!-- GENERATED:SHELL_COMPLETION:END -->
 
 ## Development

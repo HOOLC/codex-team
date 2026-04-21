@@ -1,5 +1,7 @@
-import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, test } from "@rstest/core";
 import dayjs from "dayjs";
@@ -29,6 +31,8 @@ import {
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+const execFileAsync = promisify(execFile);
 
 async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Promise<void> {
   await mkdir(join(homeDir, ".codex-team"), { recursive: true });
@@ -358,6 +362,12 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("'--debug:enable debug logging'");
       expect(script).toContain("'-j:print JSON output'");
       expect(script).not.toContain("'--debug[enable debug logging]'");
+      expect(script).toContain("'start:start subcommand'");
+      expect(script).toContain("'restart:restart subcommand'");
+      expect(script).toContain("'status:status subcommand'");
+      expect(script).toContain("'stop:stop subcommand'");
+      expect(script).toContain("'zsh:zsh subcommand'");
+      expect(script).toContain("'bash:bash subcommand'");
       expect(script).toContain("codexm completion --accounts");
       expect(stderr.read()).toBe("");
     } finally {
@@ -392,7 +402,84 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("autoswitch");
       expect(script).not.toContain("--detach");
       expect(script).toContain("run");
+      expect(script).toContain('daemon) subcommands="start restart status stop" ;;');
+      expect(script).toContain('autoswitch) subcommands="enable disable status" ;;');
+      expect(script).toContain('proxy) subcommands="enable disable status stop" ;;');
+      expect(script).toContain('overlay) subcommands="create delete gc" ;;');
+      expect(script).toContain('completion) subcommands="zsh bash" ;;');
+      expect(script).toContain("list|ls|switch|launch|protect|unprotect|remove|rename)");
+      expect(script).not.toContain("launch)|");
       expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("bash completion resolves subcommands, accounts, and flags", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "bash"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toBe("");
+
+      const binDir = join(homeDir, "bin");
+      await mkdir(binDir, { recursive: true });
+      const fakeCodexmPath = join(binDir, "codexm");
+      await writeFile(
+        fakeCodexmPath,
+        [
+          "#!/usr/bin/env bash",
+          'if [[ "$1" == "completion" && "$2" == "--accounts" ]]; then',
+          "  printf '%s\\n' plus3 team.ops",
+          "  exit 0",
+          "fi",
+          "exit 1",
+          "",
+        ].join("\n"),
+      );
+      await chmod(fakeCodexmPath, 0o755);
+
+      const completionPath = join(homeDir, "codexm-completion.bash");
+      await writeFile(completionPath, stdout.read());
+
+      const probe = `
+source "${completionPath}"
+run_case() {
+  local label="$1"
+  shift
+  COMP_WORDS=("$@")
+  COMP_CWORD=$(($# - 1))
+  COMPREPLY=()
+  _codexm
+  printf '[%s]\\n' "$label"
+  printf '%s\\n' "\${COMPREPLY[@]}"
+}
+run_case daemon codexm daemon ""
+run_case switch-account codexm switch p
+run_case switch-flags codexm switch --
+run_case daemon-flags codexm daemon --
+`;
+      const { stdout: completionOutput } = await execFileAsync("bash", ["--noprofile", "--norc", "-c", probe], {
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        },
+      });
+
+      expect(completionOutput).toContain("[daemon]\nstart\nrestart\nstatus\nstop");
+      expect(completionOutput).toContain("[switch-account]\nplus3");
+      expect(completionOutput).toContain("[switch-flags]\n--help\n--version\n--debug\n--auto\n--dry-run\n--force\n--json");
+      expect(completionOutput).toContain("[daemon-flags]\n--help\n--version\n--debug\n--json\n--host\n--port");
     } finally {
       await cleanupTempHome(homeDir);
     }

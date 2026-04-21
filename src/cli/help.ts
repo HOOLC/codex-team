@@ -43,6 +43,16 @@ function listCommandFlagsWithAliases(commandName: string): string[] {
   ];
 }
 
+function bashCasePattern(tokens: readonly string[]): string {
+  return tokens.join("|");
+}
+
+function zshDescribeValues(values: readonly string[], description: string): string {
+  return values
+    .map((value) => `'${value}:${value} ${description}'`)
+    .join(" ");
+}
+
 export function buildHelpText(): string {
   const usageLines = listHelpUsageLines()
     .map((usage) => `  ${usage}`)
@@ -99,17 +109,25 @@ export function buildCompletionZshScript(): string {
       command_flags=(${flags})
       ;;`;
   }).join("\n");
+  const subcommandCases = COMMAND_SPECS
+    .filter((command) => (command.completionSubcommands ?? []).length > 0)
+    .map((command) => {
+      const commandTokens = [command.name, ...(command.aliases ?? [])].join("|");
+      return `      ${commandTokens})
+        subcommands=(${zshDescribeValues(command.completionSubcommands ?? [], "subcommand")})
+        ;;`;
+    })
+    .join("\n");
 
   const accountCommandPattern = COMMAND_SPECS
     .filter((command) => isCompletionAccountCommand(command.name))
     .flatMap((command) => [command.name, ...(command.aliases ?? [])])
     .join("|");
-  const completionTargets = getCommandSpec("completion").completionTargets ?? [];
 
   return `#compdef ${PROGRAM_NAME}
 
 _${PROGRAM_NAME}() {
-  local -a commands global_flags command_flags accounts
+  local -a commands global_flags command_flags accounts subcommands
   local command=\${words[2]}
 
   commands=(
@@ -125,13 +143,6 @@ _${PROGRAM_NAME}() {
     return 0
   fi
 
-  if [[ \$command == completion ]]; then
-    _describe -t completion-target 'completion target' \\
-${completionTargets.map((target) => `      '${target}:${target} completion script' \\`).join("\n")}
-      '--accounts:${getFlagDescription("--accounts")}'
-    return 0
-  fi
-
   if [[ \${words[CURRENT-1]} == --account ]]; then
     accounts=(\${(@f)\$(${PROGRAM_NAME} completion --accounts 2>/dev/null)})
     if (( \${#accounts[@]} > 0 )); then
@@ -141,6 +152,15 @@ ${completionTargets.map((target) => `      '${target}:${target} completion scrip
   fi
 
   if (( CURRENT == 3 )) && [[ \${words[CURRENT]} != -* ]]; then
+    subcommands=()
+    case \$command in
+${subcommandCases}
+    esac
+    if (( \${#subcommands[@]} > 0 )); then
+      _describe -t subcommands 'subcommand' subcommands
+      return 0
+    fi
+
     case \$command in
       ${accountCommandPattern}) ;;
       *) return 0 ;;
@@ -173,19 +193,24 @@ export function buildCompletionBashScript(): string {
   const globalFlags = listGlobalFlagsWithAliases().join(" ");
   const commandCases = COMMAND_SPECS.map((command) => {
     const flags = listCommandFlagsWithAliases(command.name).join(" ");
-    const commandTokens = [command.name, ...(command.aliases ?? [])].join("|");
+    const commandTokens = bashCasePattern([command.name, ...(command.aliases ?? [])]);
     return `    ${commandTokens}) command_flags="${flags}" ;;`;
   }).join("\n");
+  const subcommandCases = COMMAND_SPECS
+    .filter((command) => (command.completionSubcommands ?? []).length > 0)
+    .map((command) => {
+      const commandTokens = bashCasePattern([command.name, ...(command.aliases ?? [])]);
+      return `    ${commandTokens}) subcommands="${(command.completionSubcommands ?? []).join(" ")}" ;;`;
+    })
+    .join("\n");
 
-  const accountCommandCases = COMMAND_SPECS
+  const accountCommandPattern = bashCasePattern(COMMAND_SPECS
     .filter((command) => isCompletionAccountCommand(command.name))
-    .flatMap((command) => [command.name, ...(command.aliases ?? [])])
-    .map((command) => `    ${command})`)
-    .join("|");
+    .flatMap((command) => [command.name, ...(command.aliases ?? [])]));
   const completionTargets = (getCommandSpec("completion").completionTargets ?? []).join(" ");
 
   return `_${PROGRAM_NAME}() {
-  local cur prev command command_flags global_flags commands accounts
+  local cur prev command command_flags global_flags commands accounts subcommands
   COMPREPLY=()
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
@@ -199,7 +224,11 @@ export function buildCompletionBashScript(): string {
   fi
 
   if [[ "\${command}" == "completion" ]]; then
-    COMPREPLY=( $(compgen -W "${completionTargets} --accounts" -- "\${cur}") )
+    if [[ "\${cur}" == -* ]]; then
+      COMPREPLY=( $(compgen -W "--accounts" -- "\${cur}") )
+    else
+      COMPREPLY=( $(compgen -W "${completionTargets} --accounts" -- "\${cur}") )
+    fi
     return 0
   fi
 
@@ -210,8 +239,17 @@ export function buildCompletionBashScript(): string {
   fi
 
   if [[ \${COMP_CWORD} -eq 2 && "\${cur}" != -* ]]; then
+    subcommands=""
     case "\${command}" in
-      ${accountCommandCases})
+${subcommandCases}
+    esac
+    if [[ -n "\${subcommands}" ]]; then
+      COMPREPLY=( $(compgen -W "\${subcommands}" -- "\${cur}") )
+      return 0
+    fi
+
+    case "\${command}" in
+      ${accountCommandPattern})
         accounts="$(${PROGRAM_NAME} completion --accounts 2>/dev/null)"
         COMPREPLY=( $(compgen -W "\${accounts}" -- "\${cur}") )
         return 0

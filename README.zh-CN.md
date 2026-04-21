@@ -217,7 +217,7 @@ mkdir -p ~/.local/share/bash-completion/completions
 codexm completion bash > ~/.local/share/bash-completion/completions/codexm
 ```
 
-生成的脚本会通过 `codexm completion --accounts` 动态补全已保存账号名。
+生成的脚本会补全命令、已知二级命令、当前输入以 `-` 开头时的 flag，并通过 `codexm completion --accounts` 动态补全已保存账号名。
 <!-- GENERATED:SHELL_COMPLETION:END -->
 
 ## 开发

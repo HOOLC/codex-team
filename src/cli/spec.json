@@ -124,6 +124,7 @@
     {
       "name": "daemon",
       "flags": ["--json", "--host", "--port"],
+      "completionSubcommands": ["start", "restart", "status", "stop"],
       "helpUsages": [
         "codexm daemon <start|restart|status|stop> [--json]",
         "codexm daemon start [--json]",
@@ -138,6 +139,7 @@
     {
       "name": "autoswitch",
       "flags": ["--json"],
+      "completionSubcommands": ["enable", "disable", "status"],
       "helpUsages": [
         "codexm autoswitch <enable|disable|status> [--json]",
         "codexm autoswitch enable [--json]",
@@ -151,6 +153,7 @@
     {
       "name": "proxy",
       "flags": ["--dry-run", "--force", "--json", "--host", "--port"],
+      "completionSubcommands": ["enable", "disable", "status", "stop"],
       "helpUsages": [
         "codexm proxy <enable|disable|status|stop> [--json]",
         "codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]",
@@ -181,6 +184,7 @@
     {
       "name": "overlay",
       "flags": ["--json", "--owner-pid"],
+      "completionSubcommands": ["create", "delete", "gc"],
       "helpUsages": [
         "codexm overlay <create|delete|gc> ...",
         "codexm overlay create <name> [--owner-pid <pid>] [--json]",
@@ -260,6 +264,7 @@
     {
       "name": "completion",
       "flags": ["--accounts"],
+      "completionSubcommands": ["zsh", "bash"],
       "helpUsages": ["codexm completion <zsh|bash>"],
       "usageErrors": {
         "default": "codexm completion <zsh|bash>",
@@ -559,8 +564,8 @@
         "codexm completion bash > ~/.local/share/bash-completion/completions/codexm"
       ],
       "outro": {
-        "en": "The generated scripts dynamically complete saved account names by calling `codexm completion --accounts`.",
-        "zh-CN": "生成的脚本会通过 `codexm completion --accounts` 动态补全已保存账号名。"
+        "en": "The generated scripts complete commands, known subcommands, flags when the current word starts with `-`, and saved account names by calling `codexm completion --accounts`.",
+        "zh-CN": "生成的脚本会补全命令、已知二级命令、当前输入以 `-` 开头时的 flag，并通过 `codexm completion --accounts` 动态补全已保存账号名。"
       }
     }
   }
