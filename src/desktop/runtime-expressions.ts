@@ -269,6 +269,7 @@ export function buildManagedSwitchExpression(options?: {
   const timeoutMs = ${JSON.stringify(timeoutMs)};
   const fallbackPollIntervalMs = 2000;
   const rpcTimeoutMs = 5000;
+  const quotaRefreshTimeoutMs = 10000;
 
   const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
   const toError = (value, fallback) => {
@@ -291,13 +292,6 @@ export function buildManagedSwitchExpression(options?: {
     }
 
     await window.electronBridge.sendMessageFromView(message);
-  };
-
-  const restart = async () => {
-    await postMessage({
-      type: "codex-app-server-restart",
-      hostId,
-    });
   };
 
   const pendingResponses = new Map();
@@ -364,6 +358,45 @@ export function buildManagedSwitchExpression(options?: {
         reject(toError(error, "Failed to send Codex Desktop bridge request."));
       });
     });
+  };
+
+  const sleep = async (ms) => {
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  };
+
+  const waitForQuotaRefreshReadiness = async () => {
+    const deadline = Date.now() + quotaRefreshTimeoutMs;
+
+    while (Date.now() < deadline) {
+      try {
+        await sendRpcRequest("account/read", { refreshToken: false });
+        return true;
+      } catch {
+        await sleep(250);
+      }
+    }
+
+    return false;
+  };
+
+  const restart = async () => {
+    await postMessage({
+      type: "codex-app-server-restart",
+      hostId,
+    });
+
+    if (!await waitForQuotaRefreshReadiness()) {
+      return;
+    }
+
+    try {
+      await postMessage({
+        type: "query-cache-invalidate",
+        queryKey: ["rate-limit-status"],
+      });
+    } catch {}
   };
 
   const listLoadedThreadIds = async () => {

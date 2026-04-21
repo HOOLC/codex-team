@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -399,6 +399,78 @@ describe("codexm proxy", () => {
       expect(sanitizedConfig).not.toContain("chatgpt_base_url");
       expect(sanitizedConfig).not.toContain("openai_base_url");
       expect(sanitizedConfig).not.toContain("preferred_auth_method");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy disable sanitizes proxy base urls restored from a contaminated direct config backup", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const proxyProcess = createProxyProcessManagerStub({ running: true });
+      const backupConfigPath = join(homeDir, ".codex-team", "proxy-backup.toml");
+      await mkdir(join(homeDir, ".codex-team"), { recursive: true });
+      await writeFile(
+        backupConfigPath,
+        [
+          'model = "gpt-5.4"',
+          'preferred_auth_method = "chatgpt"',
+          'chatgpt_base_url = "http://127.0.0.1:14555/backend-api"',
+          'openai_base_url = "http://127.0.0.1:14555/v1"',
+          "",
+          "[projects.main]",
+          'path = "/tmp/project"',
+        ].join("\n"),
+        "utf8",
+      );
+      await writeCurrentConfig(
+        homeDir,
+        [
+          'model = "gpt-5.4"',
+          'preferred_auth_method = "chatgpt"',
+          'chatgpt_base_url = "http://127.0.0.1:14555/backend-api"',
+          'openai_base_url = "http://127.0.0.1:14555/v1"',
+        ].join("\n"),
+      );
+      await writeFile(
+        store.paths.currentAuthPath,
+        `${JSON.stringify(createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z")), null, 2)}\n`,
+        "utf8",
+      );
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 12345,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/codexm-proxy.log",
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: true,
+        direct_auth_backup_path: null,
+        direct_config_backup_path: backupConfigPath,
+        direct_auth_existed: false,
+        direct_config_existed: true,
+      });
+
+      const exitCode = await runCli(["proxy", "disable", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+
+      expect(exitCode).toBe(0);
+      const restoredConfig = await readCurrentConfig(homeDir);
+      expect(restoredConfig).toContain('model = "gpt-5.4"');
+      expect(restoredConfig).toContain('preferred_auth_method = "chatgpt"');
+      expect(restoredConfig).toContain("[projects.main]");
+      expect(restoredConfig).not.toContain("chatgpt_base_url");
+      expect(restoredConfig).not.toContain("openai_base_url");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1549,7 +1621,7 @@ describe("codexm proxy", () => {
         expect((upstreamConnections[1]?.bodies[0]?.input as unknown[] | undefined)?.length).toBe(3);
         expect((upstreamConnections[1]?.bodies[0]?.input as Array<Record<string, unknown>> | undefined)?.[1]).toEqual({
           role: "assistant",
-          content: [{ type: "input_text", text: "one" }],
+          content: [{ type: "output_text", text: "one" }],
         });
 
         downstream.close();

@@ -552,9 +552,15 @@ function normalizeWebSocketInput(input: unknown): unknown[] {
   return [cloneJsonValue(input)];
 }
 
-function normalizeResponseOutputContentPart(part: unknown): Record<string, unknown> | null {
+function normalizeResponseOutputContentPart(
+  part: unknown,
+  role: string,
+): Record<string, unknown> | null {
   if (typeof part === "string") {
-    return { type: "input_text", text: part };
+    return {
+      type: role === "assistant" ? "output_text" : "input_text",
+      text: part,
+    };
   }
 
   if (typeof part !== "object" || part === null || Array.isArray(part)) {
@@ -568,13 +574,23 @@ function normalizeResponseOutputContentPart(part: unknown): Record<string, unkno
     : typeof record.output_text === "string"
       ? record.output_text
       : null;
+  const refusal = typeof record.refusal === "string"
+    ? record.refusal
+    : null;
   if (
     (type === null || type === "text" || type === "input_text" || type === "output_text")
     && text !== null
   ) {
     return {
-      type: "input_text",
+      type: role === "assistant" ? "output_text" : "input_text",
       text,
+    };
+  }
+
+  if (role === "assistant" && type === "refusal" && refusal !== null) {
+    return {
+      type: "refusal",
+      refusal,
     };
   }
 
@@ -592,7 +608,7 @@ function normalizeResponseOutputMessageItem(record: Record<string, unknown>): Re
   const role = typeof record.role === "string" ? record.role : "assistant";
   const content = Array.isArray(record.content)
     ? record.content
-      .map((part) => normalizeResponseOutputContentPart(part))
+      .map((part) => normalizeResponseOutputContentPart(part, role))
       .filter((part): part is Record<string, unknown> => part !== null)
     : [];
   if (content.length === 0) {
@@ -1730,7 +1746,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             ? []
             : [{
                 role: "assistant",
-                content: [{ type: "input_text", text: fallbackText }],
+                content: [{ type: "output_text", text: fallbackText }],
               }];
         })();
 

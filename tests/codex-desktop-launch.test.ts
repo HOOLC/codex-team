@@ -419,6 +419,10 @@ describe("codex-desktop-launch", () => {
       expect(sentMessages).toHaveLength(1);
       expect(sentMessages[0]).toContain('"method":"Runtime.evaluate"');
       expect(sentMessages[0]).toContain("codex-app-server-restart");
+      expect(sentMessages[0]).not.toContain("query-cache-invalidate");
+      expect(sentMessages[0]).not.toContain("rate-limit-status");
+      expect(sentMessages[0]).not.toContain("account-info");
+      expect(sentMessages[0]).not.toContain("account/updated");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -844,6 +848,10 @@ describe("codex-desktop-launch", () => {
       expect(sentMessages[0]).toContain('\\"mcp-request\\"');
       expect(sentMessages[0]).toContain("fallbackPollIntervalMs");
       expect(sentMessages[0]).toContain("codex-app-server-restart");
+      expect(sentMessages[0]).toContain("query-cache-invalidate");
+      expect(sentMessages[0]).toContain("rate-limit-status");
+      expect(sentMessages[0]).not.toContain("account-info");
+      expect(sentMessages[0]).not.toContain("account/updated");
     } finally {
       await cleanupTempHome(homeDir);
     }

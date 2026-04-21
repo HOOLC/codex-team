@@ -88,6 +88,41 @@ function sanitizeProxyConfig(rawConfig: string | null): string | null {
   return `${sanitizedLines.join("\n")}\n`;
 }
 
+function sanitizeRestoredDirectConfig(
+  rawConfig: string | null,
+  state: ProxyProcessState | null,
+): string | null {
+  const sanitizedLines = trimTrailingBlankLines(
+    stripProxyProviderTable(
+      (rawConfig ?? "")
+        .split(/\r?\n/u)
+        .filter((line) => {
+          const match = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*"([^"]*)"\s*$/u);
+          if (!match) {
+            return true;
+          }
+
+          const [, key, value] = match;
+          if (key === "model_provider" && value === PROXY_MODEL_PROVIDER_ID) {
+            return false;
+          }
+          if (key === "chatgpt_base_url" && value === state?.base_url) {
+            return false;
+          }
+          if (key === "openai_base_url" && value === state?.openai_base_url) {
+            return false;
+          }
+          return true;
+        }),
+    ),
+  );
+  if (sanitizedLines.length === 0) {
+    return null;
+  }
+
+  return `${sanitizedLines.join("\n")}\n`;
+}
+
 function buildProxyProviderLines(openAIBaseUrl: string): string[] {
   return [
     `[model_providers.${PROXY_MODEL_PROVIDER_ID}]`,
@@ -241,6 +276,13 @@ export async function restoreDirectRuntime(options: {
   } else if (state?.direct_config_backup_path && await pathExists(state.direct_config_backup_path)) {
     await copyFile(state.direct_config_backup_path, options.store.paths.currentConfigPath);
     await chmodIfPossible(options.store.paths.currentConfigPath, FILE_MODE);
+    const restoredConfig = await readFile(options.store.paths.currentConfigPath, "utf8");
+    const sanitizedConfig = sanitizeRestoredDirectConfig(restoredConfig, state);
+    if (sanitizedConfig === null) {
+      await rm(options.store.paths.currentConfigPath, { force: true });
+    } else if (sanitizedConfig !== restoredConfig) {
+      await atomicWriteFile(options.store.paths.currentConfigPath, sanitizedConfig, FILE_MODE);
+    }
     configRestored = true;
   } else if (await pathExists(options.store.paths.currentConfigPath)) {
     const rawConfig = await readFile(options.store.paths.currentConfigPath, "utf8");
