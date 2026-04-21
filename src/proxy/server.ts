@@ -89,7 +89,9 @@ function stripTrailingSlash(value: string): string {
 }
 
 function normalizePathname(pathname: string): string {
-  return pathname.replace(/\/{2,}/gu, "/");
+  return pathname
+    .replace(/\/{2,}/gu, "/")
+    .replace(/^(?:\/backend-api){2,}(?=\/|$)/u, "/backend-api");
 }
 
 function readRequestBody(request: IncomingMessage): Promise<string> {
@@ -293,12 +295,23 @@ async function selectProxyAccount(
   const matchingFallbackNames = eligibleAccounts
     .filter(typeMatches)
     .map((account) => account.name);
+  const manualAccountName = await resolveProxyManualUpstreamAccountName(store, eligibleAccounts);
+  if (manualAccountName && matchingFallbackNames.includes(manualAccountName)) {
+    const selectedAccount = accountByName.get(manualAccountName) ?? null;
+    if (!selectedAccount) {
+      return null;
+    }
+
+    const selectedQuota = quotaByName.get(manualAccountName) ?? null;
+    const selectedCandidate = selectedQuota
+      ? rankAutoSwitchCandidates([selectedQuota]).find((candidate) => candidate.name === manualAccountName) ?? null
+      : null;
+    return await toProxyUpstreamAccount(selectedAccount, selectedCandidate);
+  }
+
   const autoswitchEnabled = daemonState?.auto_switch === true;
   if (!autoswitchEnabled) {
-    const manualAccountName = await resolveProxyManualUpstreamAccountName(store, eligibleAccounts);
-    const selectedName = manualAccountName && matchingFallbackNames.includes(manualAccountName)
-      ? manualAccountName
-      : matchingFallbackNames[0] ?? null;
+    const selectedName = matchingFallbackNames[0] ?? null;
     const selectedAccount = selectedName ? accountByName.get(selectedName) ?? null : null;
     if (!selectedAccount) {
       return null;

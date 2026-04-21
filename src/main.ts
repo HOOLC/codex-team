@@ -462,7 +462,7 @@ export async function runCli(
           );
         }
         ensureAccountName(name);
-        const { result, quota, desktopForceWarning } = await performManualSwitch({
+        const { result, quota, desktopForceWarning, proxyRetained } = await performManualSwitch({
           name,
           force,
           store,
@@ -488,15 +488,23 @@ export async function runCli(
           },
           quota,
           backup_path: result.backup_path,
+          proxy_retained: proxyRetained,
+          effective_current_account_name: proxyRetained ? PROXY_ACCOUNT_NAME : result.account.name,
           warnings: result.warnings,
         };
 
         if (json) {
           writeJson(streams.stdout, payload);
         } else {
-          streams.stdout.write(
-            `Switched to "${result.account.name}" (${maskAccountId(result.account.identity)}).\n`,
-          );
+          if (proxyRetained) {
+            streams.stdout.write(
+              `Updated proxy upstream to "${result.account.name}" (${maskAccountId(result.account.identity)}) while proxy remains enabled.\n`,
+            );
+          } else {
+            streams.stdout.write(
+              `Switched to "${result.account.name}" (${maskAccountId(result.account.identity)}).\n`,
+            );
+          }
           if (result.backup_path) {
             streams.stdout.write(`Backup: ${result.backup_path}\n`);
           }

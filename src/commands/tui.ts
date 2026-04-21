@@ -723,6 +723,9 @@ export async function handleTuiCommand(options: {
                 currentManagedAccountRef.value = await resolveCurrentManagedAccountLabel(options.store);
                 return {
                   statusMessage: "Disabled proxy.",
+                  currentName: currentManagedAccountRef.value,
+                  proxyUpstreamName: null,
+                  proxyLastUpstreamLabel: null,
                   warningMessages: warnings,
                 };
               }
@@ -747,6 +750,7 @@ export async function handleTuiCommand(options: {
               currentManagedAccountRef.value = PROXY_ACCOUNT_NAME;
               return {
                 statusMessage: proxyCurrentlyActive ? "Reloaded proxy." : 'Switched to "proxy".',
+                currentName: PROXY_ACCOUNT_NAME,
                 warningMessages: warnings,
               };
             }
@@ -763,11 +767,21 @@ export async function handleTuiCommand(options: {
               managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
             });
             currentManagedAccountRef.value = proxyRetained ? PROXY_ACCOUNT_NAME : result.account.name;
+            const proxyLastUpstreamLabel = proxyRetained
+              ? formatProxyUpstreamSelectionLabel({
+                  accountName: result.account.name,
+                  authMode: result.account.auth_mode,
+                  ts: new Date().toISOString(),
+                })
+              : undefined;
 
             return {
               statusMessage: proxyRetained
-                ? `Updated direct account to "${result.account.name}" while proxy remains enabled.`
+                ? `Updated proxy upstream to "${result.account.name}" while proxy remains enabled.`
                 : `Switched to "${result.account.name}".`,
+              currentName: proxyRetained ? PROXY_ACCOUNT_NAME : result.account.name,
+              proxyUpstreamName: proxyRetained ? result.account.name : undefined,
+              proxyLastUpstreamLabel,
               warningMessages: [
                 ...result.warnings,
                 ...(desktopForceWarning ? [desktopForceWarning] : []),

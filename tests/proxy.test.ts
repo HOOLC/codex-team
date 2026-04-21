@@ -1071,6 +1071,112 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy normalizes duplicated backend-api usage routes before applying auth-specific handling", async () => {
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await writeQuotaMeta(
+        (await store.getManagedAccount("alpha")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 20, one_week_used: 40 },
+      );
+
+      const forwardedUrls: string[] = [];
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (url) => {
+          forwardedUrls.push(String(url));
+          if (String(url) === "https://chatgpt.com/backend-api/wham/usage") {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                allowed: true,
+                limit_reached: false,
+                primary_window: {
+                  used_percent: 7,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 120,
+                  reset_at: 1_777_000_000,
+                },
+                secondary_window: {
+                  used_percent: 11,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 240,
+                  reset_at: 1_777_100_000,
+                },
+              },
+              additional_rate_limits: [],
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "3",
+              },
+            });
+          }
+          throw new Error(`Unexpected upstream URL: ${String(url)}`);
+        },
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+      });
+
+      try {
+        const syntheticUsageResponse = await fetch(`${server.baseUrl}/backend-api/backend-api/wham/usage`);
+        expect(syntheticUsageResponse.status).toBe(200);
+        const syntheticUsage = await syntheticUsageResponse.json() as {
+          plan_type: string;
+          rate_limit: {
+            primary_window: { used_percent: number };
+            secondary_window: { used_percent: number };
+          };
+        };
+        expect(syntheticUsage.plan_type).toBe("pro");
+        expect(syntheticUsage.rate_limit.primary_window.used_percent).toBe(20);
+        expect(syntheticUsage.rate_limit.secondary_window.used_percent).toBe(40);
+        expect(requestLogs[0]).toMatchObject({
+          route: "/backend-api/wham/usage",
+          auth_kind: "synthetic-chatgpt",
+          synthetic_usage: true,
+          status_code: 200,
+        });
+
+        const directUsageResponse = await fetch(`${server.baseUrl}/backend-api/backend-api/wham/usage`, {
+          headers: {
+            authorization: "Bearer direct-access-token",
+            "ChatGPT-Account-Id": "acct-alpha",
+          },
+        });
+        expect(directUsageResponse.status).toBe(200);
+        const directUsage = await directUsageResponse.json() as {
+          plan_type: string;
+          rate_limit: {
+            primary_window: { used_percent: number };
+            secondary_window: { used_percent: number };
+          };
+        };
+        expect(directUsage.plan_type).toBe("plus");
+        expect(directUsage.rate_limit.primary_window.used_percent).toBe(7);
+        expect(directUsage.rate_limit.secondary_window.used_percent).toBe(11);
+        expect(forwardedUrls).toEqual(["https://chatgpt.com/backend-api/wham/usage"]);
+        expect(requestLogs[1]).toMatchObject({
+          route: "/backend-api/wham/usage",
+          auth_kind: "direct-chatgpt",
+          synthetic_usage: false,
+          status_code: 200,
+        });
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("proxy injects service_tier priority for exhausted synthetic ChatGPT turns", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");
@@ -1281,6 +1387,104 @@ describe("codexm proxy", () => {
 
         expect(response.status).toBe(200);
         expect(forwardedBodies).toHaveLength(1);
+      } finally {
+        await server.close();
+      }
+
+      expect(requestLogs.at(-1)).toMatchObject({
+        selected_account_name: "beta",
+        selected_auth_mode: "chatgpt",
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy follows the saved direct account even when autoswitch is on", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { writeSyntheticProxyRuntime } = await import("../src/proxy/config.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "pro", "user-beta"));
+      await writeQuotaMeta(
+        (await store.getManagedAccount("alpha")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 5, one_week_used: 10 },
+      );
+      await writeQuotaMeta(
+        (await store.getManagedAccount("beta")).metaPath,
+        { status: "ok", plan_type: "pro", five_hour_used: 60, one_week_used: 65 },
+      );
+
+      await store.switchAccount("beta");
+      const proxyRuntimeState = await writeSyntheticProxyRuntime({
+        store,
+        state: {
+          pid: 12345,
+          host: "127.0.0.1",
+          port: 14555,
+          started_at: "2026-04-18T00:00:00.000Z",
+          log_path: "/tmp/codexm-proxy.log",
+          base_url: "http://127.0.0.1:14555/backend-api",
+          openai_base_url: "http://127.0.0.1:14555/v1",
+          debug: false,
+        },
+      });
+      await writeProxyState(store.paths.codexTeamDir, proxyRuntimeState);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: true,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async () => sseResponse([
+          {
+            type: "response.completed",
+            response: {
+              id: "resp_manual_autoswitch",
+              object: "response",
+              model: "gpt-5.4",
+              output: [],
+            },
+          },
+        ]),
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const response = await fetch(`${server.baseUrl}/v1/responses`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            input: "hello",
+          }),
+        });
+
+        expect(response.status).toBe(200);
       } finally {
         await server.close();
       }

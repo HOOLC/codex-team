@@ -1591,6 +1591,119 @@ describe("Account Dashboard TUI", () => {
     }
   });
 
+  test("keeps proxy current and moves the upstream marker immediately after a proxy-backed manual switch", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let loadCount = 0;
+    let resolveRefresh: ((snapshot: AccountDashboardSnapshot) => void) | null = null;
+    const proxySnapshot = createSnapshot("proxy");
+    proxySnapshot.accounts = [
+      {
+        name: "proxy",
+        planLabel: "",
+        identityLabel: "",
+        availabilityLabel: "available",
+        current: true,
+        autoSwitchEligible: true,
+        score: 92,
+        scoreLabel: "92%",
+        etaLabel: "9.1h",
+        nextResetLabel: "04-16 19:30 (6h)",
+        fiveHourLabel: "8%",
+        oneWeekLabel: "12%",
+        authModeLabel: "proxy",
+        emailLabel: "proxy@codexm.local",
+        accountIdLabel: "",
+        userIdLabel: "",
+        joinedAtLabel: "-",
+        lastSwitchedAtLabel: "-",
+        fetchedAtLabel: "2026-04-16 13:23",
+        refreshStatusLabel: "ok",
+        bottleneckLabel: "1W",
+        reasonLabel: "available",
+        proxyLastUpstreamLabel: "alpha (chatgpt, 04-16 13:23, now)",
+        oneWeekBlocked: false,
+        detailLines: [
+          "Email: proxy@codexm.local",
+          "Auth: proxy",
+          "Fetched: 2026-04-16 13:23",
+          "Refresh: ok",
+          "Reason: available",
+          "",
+          "Pool: auto-switch eligible accounts",
+          "Last upstream: alpha (chatgpt, 04-16 13:23, now)",
+        ],
+      },
+      {
+        ...proxySnapshot.accounts[0]!,
+        proxyUpstreamActive: true,
+      },
+      ...proxySnapshot.accounts.slice(1),
+    ];
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => {
+        loadCount += 1;
+        if (loadCount === 1) {
+          return proxySnapshot;
+        }
+
+        return await new Promise<AccountDashboardSnapshot>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      },
+      switchAccount: async (name) => ({
+        statusMessage: `Updated proxy upstream to "${name}" while proxy remains enabled.`,
+        warningMessages: [],
+        currentName: "proxy",
+        proxyUpstreamName: name,
+        proxyLastUpstreamLabel: `${name} (chatgpt, now)`,
+      }),
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("j");
+      await flushLoop();
+      stdin.emitInput("j");
+      await flushLoop();
+      stdin.emitInput("\r");
+      await flushLoop();
+      await flushLoop();
+
+      const frame = latestDashboardFrame(stdout.read());
+      expect(frame).toContain('Updated proxy upstream to "beta" while proxy remains enabled.');
+      expect(frame).toContain("codexm | current proxy");
+      expect(frame).toContain(" *  proxy");
+      expect(frame).toContain("> @ beta");
+
+      stdin.emitInput("q");
+      await flushLoop();
+      const refreshResolver = resolveRefresh as ((snapshot: AccountDashboardSnapshot) => void) | null;
+      if (!refreshResolver) {
+        throw new Error("Expected refresh promise to be pending.");
+      }
+      refreshResolver(proxySnapshot);
+
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } catch (error) {
+      stdin.emitInput("q");
+      await flushLoop();
+      const refreshResolver = resolveRefresh as ((snapshot: AccountDashboardSnapshot) => void) | null;
+      if (refreshResolver) {
+        refreshResolver(proxySnapshot);
+      }
+      await tuiPromise;
+      throw error;
+    }
+  });
+
   test("renders the selected row while a write operation is still running", () => {
     const screen = stripAnsi(
       renderAccountDashboardScreen({

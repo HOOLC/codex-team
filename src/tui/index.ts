@@ -175,6 +175,9 @@ export interface RunAccountDashboardTuiOptions {
   ) => Promise<{
     statusMessage?: string;
     warningMessages?: string[];
+    currentName?: string | null;
+    proxyUpstreamName?: string | null;
+    proxyLastUpstreamLabel?: string | null;
   }>;
   openDesktop?: (
     name: string,
@@ -1360,6 +1363,93 @@ function updateSnapshotCurrentIndicator(
   };
 }
 
+function updateProxyDetailLines(
+  detailLines: string[],
+  proxyLastUpstreamLabel: string | null,
+): string[] {
+  const nextLastUpstreamLine = proxyLastUpstreamLabel ? `Last upstream: ${proxyLastUpstreamLabel}` : null;
+  const trimmedLines = detailLines.filter((line) => !line.startsWith("Last upstream: "));
+  if (!nextLastUpstreamLine) {
+    return trimmedLines;
+  }
+
+  const poolLineIndex = trimmedLines.findIndex((line) => line.startsWith("Pool: "));
+  if (poolLineIndex >= 0) {
+    return [
+      ...trimmedLines.slice(0, poolLineIndex + 1),
+      nextLastUpstreamLine,
+      ...trimmedLines.slice(poolLineIndex + 1),
+    ];
+  }
+
+  const firstBlankIndex = trimmedLines.findIndex((line) => line === "");
+  if (firstBlankIndex >= 0) {
+    return [
+      ...trimmedLines.slice(0, firstBlankIndex),
+      nextLastUpstreamLine,
+      ...trimmedLines.slice(firstBlankIndex),
+    ];
+  }
+
+  return [...trimmedLines, nextLastUpstreamLine];
+}
+
+function updateSnapshotProxyRouting(
+  snapshot: AccountDashboardSnapshot,
+  options: {
+    proxyUpstreamName?: string | null;
+    proxyLastUpstreamLabel?: string | null;
+  },
+): AccountDashboardSnapshot {
+  if (options.proxyUpstreamName === undefined && options.proxyLastUpstreamLabel === undefined) {
+    return snapshot;
+  }
+
+  let changed = false;
+  const nextAccounts = snapshot.accounts.map((account) => {
+    let nextAccount = account;
+
+    if (options.proxyUpstreamName !== undefined && account.authModeLabel !== "proxy") {
+      const nextProxyUpstreamActive = options.proxyUpstreamName !== null && account.name === options.proxyUpstreamName;
+      if (account.proxyUpstreamActive !== nextProxyUpstreamActive) {
+        nextAccount = {
+          ...nextAccount,
+          proxyUpstreamActive: nextProxyUpstreamActive,
+        };
+      }
+    }
+
+    if (options.proxyLastUpstreamLabel !== undefined && account.authModeLabel === "proxy") {
+      const nextDetailLines = updateProxyDetailLines(
+        nextAccount.detailLines,
+        options.proxyLastUpstreamLabel,
+      );
+      if (
+        account.proxyLastUpstreamLabel !== options.proxyLastUpstreamLabel
+        || nextDetailLines !== nextAccount.detailLines
+      ) {
+        nextAccount = {
+          ...nextAccount,
+          proxyLastUpstreamLabel: options.proxyLastUpstreamLabel,
+          detailLines: nextDetailLines,
+        };
+      }
+    }
+
+    if (nextAccount !== account) {
+      changed = true;
+    }
+    return nextAccount;
+  });
+
+  return changed
+    ? {
+        ...snapshot,
+        accounts: nextAccounts,
+      }
+    : snapshot;
+}
+
 function insertTextAtCursor(state: AccountDashboardState, value: string): AccountDashboardState {
   return {
     ...state,
@@ -1961,7 +2051,12 @@ export async function runAccountDashboardTui(
           reloadingCurrentAccount ? `Reloaded "${selected.name}".` : undefined,
         ),
       };
-      snapshot = updateSnapshotCurrentIndicator(snapshot, selected.name);
+      const currentName = result.currentName ?? selected.name;
+      snapshot = updateSnapshotCurrentIndicator(snapshot, currentName);
+      snapshot = updateSnapshotProxyRouting(snapshot, {
+        proxyUpstreamName: result.proxyUpstreamName,
+        proxyLastUpstreamLabel: result.proxyLastUpstreamLabel,
+      });
       state = resolvePreferredSelection(snapshot, state, selected.name);
 
       if (optionsForAction.after === "open-codex") {
