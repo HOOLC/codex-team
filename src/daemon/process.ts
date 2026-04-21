@@ -372,10 +372,7 @@ export function createDaemonProcessManager(
         await writeDaemonState(codexTeamDir, {
           ...status.state,
           pid: 0,
-          watch: false,
-          auto_switch: false,
-          proxy: false,
-          stayalive: false,
+          started_at: "",
         });
         await appendEventLog(codexTeamDir, buildEventPayload({
           component: "daemon",
@@ -398,10 +395,7 @@ export function createDaemonProcessManager(
         await writeDaemonState(codexTeamDir, {
           ...status.state,
           pid: 0,
-          watch: false,
-          auto_switch: false,
-          proxy: false,
-          stayalive: false,
+          started_at: "",
         });
         await appendEventLog(codexTeamDir, buildEventPayload({
           component: "daemon",

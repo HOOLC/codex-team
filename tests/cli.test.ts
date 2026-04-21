@@ -374,6 +374,98 @@ describe("CLI", () => {
     }
   });
 
+  test("daemon restart stops the current process and preserves prior proxy and watch state", async () => {
+    const homeDir = await createTempHome();
+    const callOrder: string[] = [];
+    let ensureConfigArgs: Record<string, unknown> | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["daemon", "restart"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: true,
+            state: {
+              pid: 54321,
+              started_at: "2026-04-18T00:00:00.000Z",
+              log_path: "/tmp/daemon.log",
+              stayalive: true,
+              watch: true,
+              auto_switch: true,
+              proxy: true,
+              host: "127.0.0.1",
+              port: 14555,
+              base_url: "http://127.0.0.1:14555/backend-api",
+              openai_base_url: "http://127.0.0.1:14555/v1",
+              debug: false,
+            },
+          }),
+          stop: async () => {
+            callOrder.push("stop");
+            return {
+              running: false,
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:00:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: true,
+                auto_switch: true,
+                proxy: true,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: false,
+              },
+              stopped: true,
+            };
+          },
+          ensureConfig: async (config) => {
+            callOrder.push("ensure");
+            ensureConfigArgs = config;
+            return {
+              action: "started",
+              state: {
+                pid: 65432,
+                started_at: "2026-04-18T00:05:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: true,
+                auto_switch: true,
+                proxy: true,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: false,
+              },
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(callOrder).toEqual(["stop", "ensure"]);
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: true,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+      });
+      expect(stdout.read()).toContain("Started daemon (pid 65432).");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("autoswitch status reports disabled when the daemon is not running", async () => {
     const homeDir = await createTempHome();
 

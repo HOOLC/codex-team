@@ -10,8 +10,6 @@ import {
   proxyOpenAIBaseUrl,
   resolveProxyPort,
 } from "../proxy/constants.js";
-import { restoreDirectRuntime } from "../proxy/config.js";
-import { readProxyState, writeProxyState } from "../proxy/state.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { appendEventLog, appendProxyRequestLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
 import { drainDaemonRequests } from "../daemon/requests.js";
@@ -114,6 +112,33 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function buildDaemonStartConfig(options: {
+  currentState: Awaited<ReturnType<DaemonProcessManager["getStatus"]>>["state"];
+  codexTeamDir: string;
+  portOverride?: string;
+  debug: boolean;
+}) {
+  const currentState = options.currentState ?? defaultDaemonState(options.codexTeamDir);
+  const host = currentState.host;
+  const port = resolveProxyPort({
+    env: process.env,
+    cliValue: options.portOverride,
+    fallback: currentState.port,
+  });
+
+  return {
+    stayalive: true,
+    watch: currentState.watch,
+    auto_switch: currentState.watch ? currentState.auto_switch : false,
+    proxy: currentState.proxy,
+    host,
+    port,
+    debug: currentState.debug || options.debug,
+    base_url: proxyBackendBaseUrl(host, port),
+    openai_base_url: proxyOpenAIBaseUrl(host, port),
+  };
 }
 
 async function runDaemonWatchLoop(options: {
@@ -416,24 +441,13 @@ export async function handleDaemonCommand(options: {
   }
 
   if (subcommand === "start") {
-    const currentState = (await options.daemonProcessManager.getStatus()).state
-      ?? defaultDaemonState(options.store.paths.codexTeamDir);
-    const host = currentState.host;
-    const port = resolveProxyPort({
-      env: process.env,
-      fallback: currentState.port,
-    });
-    const result = await options.daemonProcessManager.ensureConfig({
-      stayalive: true,
-      watch: currentState.watch,
-      auto_switch: currentState.watch ? currentState.auto_switch : false,
-      proxy: currentState.proxy,
-      host,
-      port,
-      debug: currentState.debug || options.debug,
-      base_url: proxyBackendBaseUrl(host, port),
-      openai_base_url: proxyOpenAIBaseUrl(host, port),
-    });
+    const currentState = (await options.daemonProcessManager.getStatus()).state;
+    const result = await options.daemonProcessManager.ensureConfig(buildDaemonStartConfig({
+      currentState,
+      codexTeamDir: options.store.paths.codexTeamDir,
+      portOverride: options.optionValues.get("--port"),
+      debug: options.debug,
+    }));
     const payload = {
       ok: true,
       action: "daemon.start",
@@ -454,27 +468,44 @@ export async function handleDaemonCommand(options: {
     return 0;
   }
 
-  if (subcommand === "stop") {
-    const proxyState = await readProxyState(options.store.paths.codexTeamDir);
-    const result = await options.daemonProcessManager.stop();
-    let restored: { auth_restored: boolean; config_restored: boolean } | null = null;
-    if (proxyState?.enabled === true) {
-      restored = await restoreDirectRuntime({
-        store: options.store,
-        state: proxyState,
-      });
-      await writeProxyState(options.store.paths.codexTeamDir, {
-        ...proxyState,
-        pid: 0,
-        enabled: false,
-      });
+  if (subcommand === "restart") {
+    const status = await options.daemonProcessManager.getStatus();
+    if (status.running) {
+      await options.daemonProcessManager.stop();
     }
+    const result = await options.daemonProcessManager.ensureConfig(buildDaemonStartConfig({
+      currentState: status.state,
+      codexTeamDir: options.store.paths.codexTeamDir,
+      portOverride: options.optionValues.get("--port"),
+      debug: options.debug,
+    }));
+    const payload = {
+      ok: true,
+      action: "daemon.restart",
+      result: result.action,
+      running: true,
+      state: result.state,
+    };
+    if (options.json) {
+      writeJson(options.stdout, payload);
+    } else {
+      const verb = result.action === "reused"
+        ? "Daemon already running"
+        : result.action === "started"
+          ? "Started daemon"
+          : "Restarted daemon";
+      options.stdout.write(`${verb} (pid ${result.state.pid}).\n`);
+    }
+    return 0;
+  }
+
+  if (subcommand === "stop") {
+    const result = await options.daemonProcessManager.stop();
     const payload = {
       ok: true,
       action: "daemon.stop",
       stopped: result.stopped,
       state: result.state,
-      restored_proxy_runtime: restored,
     };
     if (options.json) {
       writeJson(options.stdout, payload);

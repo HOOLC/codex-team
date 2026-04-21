@@ -36,10 +36,17 @@ function buildAuthClaim(): Record<string, unknown> {
   };
 }
 
+function buildProfileClaim(): Record<string, unknown> {
+  return {
+    email: PROXY_EMAIL,
+  };
+}
+
 export function createSyntheticProxyAuthSnapshot(now = new Date()): AuthSnapshot {
   const issuedAt = Math.floor(now.getTime() / 1000);
   const expiresAt = issuedAt + SYNTHETIC_LIFETIME_SECONDS;
   const authClaim = buildAuthClaim();
+  const profileClaim = buildProfileClaim();
   const commonPayload = {
     iss: SYNTHETIC_ISSUER,
     aud: SYNTHETIC_AUDIENCE,
@@ -47,6 +54,7 @@ export function createSyntheticProxyAuthSnapshot(now = new Date()): AuthSnapshot
     iat: issuedAt,
     exp: expiresAt,
     "https://api.openai.com/auth": authClaim,
+    "https://api.openai.com/profile": profileClaim,
   };
 
   return {
@@ -57,6 +65,7 @@ export function createSyntheticProxyAuthSnapshot(now = new Date()): AuthSnapshot
       access_token: encodeJwt({
         ...commonPayload,
         scope: "codexm:proxy",
+        email: PROXY_EMAIL,
       }),
       refresh_token: "codexm-proxy-refresh-token",
       id_token: encodeJwt({

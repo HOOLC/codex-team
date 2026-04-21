@@ -184,7 +184,8 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm list [name] [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--json]");
-    expect(output).toContain("codexm daemon <start|status|stop> [--json]");
+    expect(output).toContain("codexm daemon <start|restart|status|stop> [--json]");
+    expect(output).toContain("codexm daemon restart [--json]");
     expect(output).toContain("codexm autoswitch <enable|disable|status> [--json]");
     expect(output).toContain("codexm protect <name> [--json]");
     expect(output).toContain("codexm unprotect <name> [--json]");

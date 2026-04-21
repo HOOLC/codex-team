@@ -95,14 +95,7 @@ export async function disableProxyMode(options: {
     store: options.store,
     state,
   });
-  const stopped = await options.proxyProcessManager.stop();
-  if (state) {
-    await writeProxyState(options.store.paths.codexTeamDir, {
-      ...state,
-      pid: 0,
-      enabled: false,
-    });
-  }
+  const stopped = await options.proxyProcessManager.disable();
   await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
     component: "proxy",
     event: "proxy.disable.completed",
@@ -246,7 +239,7 @@ export async function handleProxyCommand(options: {
     if (options.json) {
       writeJson(options.stdout, payload);
     } else {
-      options.stdout.write("Proxy disabled. Restored previous direct auth/config when backups were available.\n");
+      options.stdout.write("Proxy disabled. Restored previous direct auth/config and removed proxy config when possible.\n");
     }
     return 0;
   }

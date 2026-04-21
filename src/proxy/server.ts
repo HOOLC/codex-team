@@ -10,6 +10,7 @@ import {
   type AuthSnapshot,
 } from "../auth-snapshot.js";
 import { rankAutoSwitchCandidates } from "../cli/quota.js";
+import { normalizeDisplayedScore } from "../plan-quota-profile.js";
 import { extractChatGPTAuth } from "../quota-client.js";
 import {
   CHATGPT_UPSTREAM_BASE_URL,
@@ -22,6 +23,8 @@ import { buildProxyUsagePayloadForStore } from "./quota.js";
 interface ProxyUpstreamAccount {
   account: ManagedAccount;
   snapshot: AuthSnapshot;
+  displayedScore: number | null;
+  forceFastServiceTier: boolean;
 }
 
 export interface StartedProxyServer {
@@ -265,12 +268,13 @@ async function selectProxyAccount(
     return true;
   };
 
-  const rankedNames = rankAutoSwitchCandidates([...quotaByName.values()])
-    .map((candidate) => candidate.name)
-    .filter((name) => {
-      const account = accountByName.get(name);
+  const rankedCandidates = rankAutoSwitchCandidates([...quotaByName.values()])
+    .filter((candidate) => {
+      const account = accountByName.get(candidate.name);
       return account ? typeMatches(account) : false;
     });
+  const rankedCandidateByName = new Map(rankedCandidates.map((candidate) => [candidate.name, candidate] as const));
+  const rankedNames = rankedCandidates.map((candidate) => candidate.name);
   const fallbackNames = eligibleAccounts
     .filter(typeMatches)
     .map((account) => account.name);
@@ -280,14 +284,25 @@ async function selectProxyAccount(
     return null;
   }
 
+  const selectedCandidate = selectedName ? rankedCandidateByName.get(selectedName) ?? null : null;
+  const displayedScore = selectedCandidate
+    ? normalizeDisplayedScore(selectedCandidate.current_score, selectedCandidate.plan_type, { clamp: false })
+    : null;
   return {
     account: selectedAccount,
     snapshot: await readAuthSnapshotFile(selectedAccount.authPath),
+    displayedScore,
+    forceFastServiceTier: displayedScore !== null && displayedScore <= 1,
   };
 }
 
 function upstreamChatGPTUrl(pathname: string, search: string): string {
   return `${CHATGPT_UPSTREAM_BASE_URL}${pathname}${search}`;
+}
+
+function toChatGPTCodexUrl(pathname: string, search: string): string {
+  const suffix = pathname.replace(/^\/v1/u, "");
+  return `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex${suffix}${search}`;
 }
 
 async function readOpenAIBaseUrl(account: ManagedAccount): Promise<string> {
@@ -365,6 +380,20 @@ function buildChatGPTWebSocketHeaders(
     authorization: `Bearer ${auth.accessToken}`,
     "ChatGPT-Account-Id": auth.accountId,
   });
+}
+
+function maybeInjectFastServiceTier<T extends Record<string, unknown>>(
+  body: T,
+  selected: ProxyUpstreamAccount | null,
+): T {
+  if (!selected?.forceFastServiceTier || body.service_tier !== undefined) {
+    return body;
+  }
+
+  return {
+    ...body,
+    service_tier: "priority",
+  };
 }
 
 async function forwardChatGPTBackend(options: {
@@ -492,17 +521,116 @@ function normalizeWebSocketInput(input: unknown): unknown[] {
   return [cloneJsonValue(input)];
 }
 
+function normalizeResponseOutputContentPart(part: unknown): Record<string, unknown> | null {
+  if (typeof part === "string") {
+    return { type: "input_text", text: part };
+  }
+
+  if (typeof part !== "object" || part === null || Array.isArray(part)) {
+    return null;
+  }
+
+  const record = part as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : null;
+  const text = typeof record.text === "string"
+    ? record.text
+    : typeof record.output_text === "string"
+      ? record.output_text
+      : null;
+  if (
+    (type === null || type === "text" || type === "input_text" || type === "output_text")
+    && text !== null
+  ) {
+    return {
+      type: "input_text",
+      text,
+    };
+  }
+
+  if (type === "input_image" && typeof record.image_url === "string") {
+    return {
+      type: "input_image",
+      image_url: record.image_url,
+    };
+  }
+
+  return null;
+}
+
+function normalizeResponseOutputMessageItem(record: Record<string, unknown>): Record<string, unknown> | null {
+  const role = typeof record.role === "string" ? record.role : "assistant";
+  const content = Array.isArray(record.content)
+    ? record.content
+      .map((part) => normalizeResponseOutputContentPart(part))
+      .filter((part): part is Record<string, unknown> => part !== null)
+    : [];
+  if (content.length === 0) {
+    return null;
+  }
+
+  return {
+    role,
+    content,
+  };
+}
+
 function normalizeResponseOutputItem(item: unknown): unknown | null {
   if (typeof item !== "object" || item === null || Array.isArray(item)) {
     return null;
   }
 
-  const type = (item as Record<string, unknown>).type;
+  const record = item as Record<string, unknown>;
+  const type = record.type;
   if (typeof type !== "string" || type.trim() === "") {
     return null;
   }
 
-  return cloneJsonValue(item);
+  if (type === "message") {
+    return normalizeResponseOutputMessageItem(record);
+  }
+
+  if (type === "function_call_output" || type === "mcp_tool_call_output") {
+    if (typeof record.call_id !== "string" || record.output === undefined) {
+      return null;
+    }
+    return {
+      type,
+      call_id: record.call_id,
+      output: cloneJsonValue(record.output),
+    };
+  }
+
+  if (type === "custom_tool_call_output") {
+    if (typeof record.call_id !== "string" || record.output === undefined) {
+      return null;
+    }
+    return {
+      type,
+      call_id: record.call_id,
+      ...(typeof record.name === "string" ? { name: record.name } : {}),
+      output: cloneJsonValue(record.output),
+    };
+  }
+
+  if (type === "tool_search_output") {
+    if (
+      typeof record.call_id !== "string"
+      || typeof record.status !== "string"
+      || typeof record.execution !== "string"
+      || !Array.isArray(record.tools)
+    ) {
+      return null;
+    }
+    return {
+      type,
+      call_id: record.call_id,
+      status: record.status,
+      execution: record.execution,
+      tools: cloneJsonValue(record.tools),
+    };
+  }
+
+  return null;
 }
 
 function responseOutputItemsToConversationItems(items: unknown): unknown[] {
@@ -573,7 +701,7 @@ function normalizeResponsesRequestBody(body: Record<string, unknown>): Record<st
     stream: true,
     input: normalizeResponsesInput(body.input),
   };
-  for (const key of ["temperature", "top_p", "tools", "tool_choice", "response_format", "metadata"]) {
+  for (const key of ["temperature", "top_p", "tools", "tool_choice", "response_format", "metadata", "service_tier"]) {
     if (body[key] !== undefined) {
       next[key] = body[key];
     }
@@ -592,7 +720,7 @@ function chatCompletionToResponsesBody(body: Record<string, unknown>): Record<st
     stream: true,
     input: chatMessagesToResponsesInput(body.messages),
   };
-  for (const key of ["temperature", "top_p", "tools", "tool_choice", "response_format"]) {
+  for (const key of ["temperature", "top_p", "tools", "tool_choice", "response_format", "service_tier"]) {
     if (body[key] !== undefined) {
       next[key] = body[key];
     }
@@ -613,7 +741,7 @@ function completionToResponsesBody(body: Record<string, unknown>): Record<string
     stream: true,
     input: normalizeResponsesInput(body.prompt ?? ""),
   };
-  for (const key of ["temperature", "top_p"]) {
+  for (const key of ["temperature", "top_p", "service_tier"]) {
     if (body[key] !== undefined) {
       next[key] = body[key];
     }
@@ -1021,18 +1149,49 @@ async function forwardTransparentOpenAI(options: {
   };
 }
 
+async function forwardRawChatGPTCompatibleRoute(options: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  bodyText: string;
+  pathname: string;
+  search: string;
+  fetchImpl: typeof fetch;
+  headers: Headers;
+  authKind: "direct-chatgpt" | "synthetic-chatgpt";
+  selected: ProxyUpstreamAccount | null;
+}): Promise<ProxyForwardResult> {
+  const upstream = await options.fetchImpl(
+    toChatGPTCodexUrl(options.pathname, options.search),
+    fetchInitForRequest(
+      options.request,
+      options.headers,
+      options.bodyText,
+    ),
+  );
+
+  return {
+    statusCode: upstream.status,
+    responseBytes: await writeUpstreamResponse(options.response, upstream),
+    authKind: options.authKind,
+    selectedAccount: options.selected?.account.name ?? null,
+    selectedAuthMode: options.selected?.account.auth_mode ?? (options.authKind === "direct-chatgpt" ? "chatgpt" : null),
+    upstreamKind: "chatgpt",
+  };
+}
+
 async function forwardOpenAIViaDirectChatGPT(options: {
   request: IncomingMessage;
   response: ServerResponse;
   bodyText: string;
   pathname: string;
+  search: string;
   fetchImpl: typeof fetch;
 }): Promise<ProxyForwardResult> {
-  const body = parseJsonBody(options.bodyText);
   let upstream: Response;
   let responsePayload: unknown;
 
   if (options.pathname === "/v1/responses") {
+    const body = parseJsonBody(options.bodyText);
     upstream = await options.fetchImpl(
       `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
       {
@@ -1059,6 +1218,7 @@ async function forwardOpenAIViaDirectChatGPT(options: {
   }
 
   if (options.pathname === "/v1/chat/completions") {
+    const body = parseJsonBody(options.bodyText);
     upstream = await options.fetchImpl(
       `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
       {
@@ -1083,6 +1243,7 @@ async function forwardOpenAIViaDirectChatGPT(options: {
   }
 
   if (options.pathname === "/v1/completions") {
+    const body = parseJsonBody(options.bodyText);
     upstream = await options.fetchImpl(
       `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
       {
@@ -1106,14 +1267,17 @@ async function forwardOpenAIViaDirectChatGPT(options: {
     };
   }
 
-  return {
-    statusCode: 501,
-    responseBytes: writeError(options.response, 501, `Unsupported OpenAI-compatible route for direct ChatGPT auth: ${options.pathname}`),
+  return await forwardRawChatGPTCompatibleRoute({
+    request: options.request,
+    response: options.response,
+    bodyText: options.bodyText,
+    pathname: options.pathname,
+    search: options.search,
+    fetchImpl: options.fetchImpl,
+    headers: requestHeadersToFetchHeaders(options.request),
     authKind: "direct-chatgpt",
-    selectedAccount: null,
-    selectedAuthMode: "chatgpt",
-    upstreamKind: "chatgpt",
-  };
+    selected: null,
+  });
 }
 
 async function forwardOpenAIWithApiKey(options: {
@@ -1148,12 +1312,13 @@ async function forwardOpenAIViaChatGPT(options: {
   response: ServerResponse;
   bodyText: string;
   pathname: string;
+  search: string;
   selected: ProxyUpstreamAccount;
   fetchImpl: typeof fetch;
 }): Promise<ProxyForwardResult> {
-  const body = parseJsonBody(options.bodyText);
   if (options.pathname === "/v1/responses") {
-    const requestBody = normalizeResponsesRequestBody(body);
+    const body = parseJsonBody(options.bodyText);
+    const requestBody = maybeInjectFastServiceTier(normalizeResponsesRequestBody(body), options.selected);
     const upstream = await options.fetchImpl(
       `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
       {
@@ -1181,12 +1346,13 @@ async function forwardOpenAIViaChatGPT(options: {
   }
 
   if (options.pathname === "/v1/chat/completions") {
+    const body = parseJsonBody(options.bodyText);
     const upstream = await options.fetchImpl(
       `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
       {
         method: "POST",
         headers: buildChatGPTAuthHeaders(options.request, options.selected),
-        body: JSON.stringify(chatCompletionToResponsesBody(body)),
+        body: JSON.stringify(maybeInjectFastServiceTier(chatCompletionToResponsesBody(body), options.selected)),
       },
     );
     const payload = await readResponsesPayload(upstream);
@@ -1205,12 +1371,13 @@ async function forwardOpenAIViaChatGPT(options: {
   }
 
   if (options.pathname === "/v1/completions") {
+    const body = parseJsonBody(options.bodyText);
     const upstream = await options.fetchImpl(
       `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
       {
         method: "POST",
         headers: buildChatGPTAuthHeaders(options.request, options.selected),
-        body: JSON.stringify(completionToResponsesBody(body)),
+        body: JSON.stringify(maybeInjectFastServiceTier(completionToResponsesBody(body), options.selected)),
       },
     );
     const payload = await readResponsesPayload(upstream);
@@ -1239,14 +1406,17 @@ async function forwardOpenAIViaChatGPT(options: {
     };
   }
 
-  return {
-    statusCode: 501,
-    responseBytes: writeError(options.response, 501, `Unsupported OpenAI-compatible route for ChatGPT upstream: ${options.pathname}`),
+  return await forwardRawChatGPTCompatibleRoute({
+    request: options.request,
+    response: options.response,
+    bodyText: options.bodyText,
+    pathname: options.pathname,
+    search: options.search,
+    fetchImpl: options.fetchImpl,
+    headers: buildChatGPTAuthHeaders(options.request, options.selected),
     authKind: "synthetic-chatgpt",
-    selectedAccount: options.selected.account.name,
-    selectedAuthMode: options.selected.account.auth_mode,
-    upstreamKind: "chatgpt",
-  };
+    selected: options.selected,
+  });
 }
 
 async function handleOpenAIRoute(options: {
@@ -1283,6 +1453,7 @@ async function handleOpenAIRoute(options: {
       response: options.response,
       bodyText: options.bodyText,
       pathname: options.pathname,
+      search: options.search,
       fetchImpl: options.fetchImpl,
     });
   }
@@ -1520,13 +1691,24 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     const outputItems = activeTurn.outputItems.length > 0
       ? activeTurn.outputItems
       : responseOutputItemsToConversationItems(payloadResponseRecord?.output);
+    const normalizedOutputItems = outputItems.length > 0
+      ? outputItems
+      : (() => {
+          const fallbackText = payloadResponseRecord ? extractResponseText(payloadResponseRecord) : "";
+          return fallbackText === ""
+            ? []
+            : [{
+                role: "assistant",
+                content: [{ type: "input_text", text: fallbackText }],
+              }];
+        })();
 
     if (responseId) {
       context.historyByResponseId.set(responseId, {
         accountName: activeTurn.accountName,
         conversationItems: [
           ...cloneJsonValue(activeTurn.fullInput),
-          ...cloneJsonValue(outputItems),
+          ...cloneJsonValue(normalizedOutputItems),
         ],
       });
     }
@@ -1758,6 +1940,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               selectedAccountName: selected.account.name,
               historyByResponseId: context.historyByResponseId,
             });
+            const finalRequestBody = maybeInjectFastServiceTier(rewrittenRequest.requestBody, selected);
 
             if (
               context.upstreamAccount?.account.name !== selected.account.name
@@ -1786,7 +1969,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               responseId: null,
               startedAt: Date.now(),
             };
-            context.upstreamSocket.send(JSON.stringify(rewrittenRequest.requestBody));
+            context.upstreamSocket.send(JSON.stringify(finalRequestBody));
           })
           .catch((error) => {
             options.debugLog?.(`proxy websocket: ${(error as Error).message}`);

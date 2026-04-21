@@ -62,6 +62,15 @@ function trimTrailingBlankLines(lines: string[]): string[] {
   return trimmed;
 }
 
+function sanitizeProxyConfig(rawConfig: string | null): string | null {
+  const sanitizedLines = trimTrailingBlankLines(withoutProxyConfigLines(rawConfig));
+  if (sanitizedLines.length === 0) {
+    return null;
+  }
+
+  return `${sanitizedLines.join("\n")}\n`;
+}
+
 function buildProxyProviderLines(openAIBaseUrl: string): string[] {
   return [
     `[model_providers.${PROXY_MODEL_PROVIDER_ID}]`,
@@ -198,6 +207,16 @@ export async function restoreDirectRuntime(options: {
     await copyFile(state.direct_config_backup_path, options.store.paths.currentConfigPath);
     await chmodIfPossible(options.store.paths.currentConfigPath, FILE_MODE);
     configRestored = true;
+  } else if (await pathExists(options.store.paths.currentConfigPath)) {
+    const rawConfig = await readFile(options.store.paths.currentConfigPath, "utf8");
+    const sanitizedConfig = sanitizeProxyConfig(rawConfig);
+    if (sanitizedConfig === null) {
+      await rm(options.store.paths.currentConfigPath, { force: true });
+      configRestored = true;
+    } else if (sanitizedConfig !== rawConfig) {
+      await atomicWriteFile(options.store.paths.currentConfigPath, sanitizedConfig, FILE_MODE);
+      configRestored = true;
+    }
   }
 
   return {

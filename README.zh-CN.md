@@ -110,7 +110,7 @@ codexm proxy disable
 
 对 `codexm` 托管的 proxy 入口，`codexm` 现在会同时改写 `chatgpt_base_url` 和一个自定义的 `codexm_proxy` model provider。所以 `codexm proxy enable`、`codexm run --proxy`，以及走 proxy 的托管 CLI/Desktop 会同时把实时 Responses websocket turn 和 REST 请求都导向本地 proxy。这个保证仍然只覆盖 `codexm` 托管入口；如果你绕过 `codexm` 直接裸跑 `codex` 或 Desktop，则不保证一定经过本地 proxy。
 
-`codexm daemon start`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力，用 `codexm daemon stop` 停掉整个后台；如果 proxy 模式当前生效，停 daemon 时也会恢复上一份 direct auth/config 备份。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
+`codexm daemon start`、`codexm daemon restart`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力。`codexm daemon stop` 现在只停止进程，但会保留最近一次 daemon feature 状态，所以后续再执行 `codexm daemon start` 或 `codexm daemon restart` 时，会恢复之前的 `autoswitch` 和 `proxy` 开关。只有在你明确想恢复 direct auth/config 并清掉 proxy 配置时，才使用 `codexm proxy disable`。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
 
 当默认 `14555` 端口被占用时，可以设置 `CODEXM_PROXY_PORT=<port>` 统一覆盖共享 proxy/daemon 的监听端口。`codexm daemon start`、`codexm autoswitch enable`、`codexm launch`、`codexm proxy enable` 和 `codexm run --proxy` 都会读取这个环境变量；如果显式传了 `--port`，仍然以命令行参数为准。
 
