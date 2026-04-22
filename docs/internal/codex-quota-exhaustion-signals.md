@@ -71,5 +71,6 @@ Terminal proxy request logs should keep recording:
 
 - `replay_count`
 - `replayed_from_account_names`
+- `request_speed` (`normal` or `fast`)
 
 For websocket turns, these fields belong on the terminal `/v1/responses` record, not on the initial `101` upgrade record.

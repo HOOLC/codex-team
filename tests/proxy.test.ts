@@ -1209,6 +1209,7 @@ describe("codexm proxy", () => {
           route: "/backend-api/wham/usage",
           surface: "backend-api",
           auth_kind: "synthetic-chatgpt",
+          request_speed: "normal",
           synthetic_usage: true,
           status_code: 200,
         });
@@ -1261,6 +1262,7 @@ describe("codexm proxy", () => {
           selected_account_name: "alpha",
           selected_auth_mode: "chatgpt",
           upstream_kind: "chatgpt",
+          request_speed: "normal",
           status_code: 200,
         });
       } finally {
@@ -1662,6 +1664,7 @@ describe("codexm proxy", () => {
       );
 
       const forwardedBodies: unknown[] = [];
+      const requestLogs: Array<Record<string, unknown>> = [];
       const server = await startProxyServer({
         store,
         host: "127.0.0.1",
@@ -1679,6 +1682,9 @@ describe("codexm proxy", () => {
               },
             },
           ]);
+        },
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
         },
       });
 
@@ -1699,6 +1705,11 @@ describe("codexm proxy", () => {
         expect(response.status).toBe(200);
         expect(forwardedBodies[0]).toMatchObject({
           service_tier: "priority",
+        });
+        expect(requestLogs.at(-1)).toMatchObject({
+          route: "/v1/responses",
+          request_speed: "fast",
+          status_code: 200,
         });
       } finally {
         await server.close();
@@ -3068,6 +3079,7 @@ describe("codexm proxy", () => {
     const upstreamHttp = createServer();
     const upstreamWs = new WebSocketServer({ server: upstreamHttp });
     const upstreamBodies: Record<string, unknown>[] = [];
+    const requestLogs: Array<Record<string, unknown>> = [];
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -3106,6 +3118,9 @@ describe("codexm proxy", () => {
         store,
         host: "127.0.0.1",
         port: 0,
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
         connectWebSocketImpl: async (options) => await new Promise<WebSocket>((resolve, reject) => {
           const socket = new WebSocket(upstreamUrl, {
             headers: options.headers,
@@ -3131,9 +3146,15 @@ describe("codexm proxy", () => {
           input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
         });
 
-        expect(upstreamBodies[0]).toMatchObject({
-          service_tier: "priority",
-        });
+      expect(upstreamBodies[0]).toMatchObject({
+        service_tier: "priority",
+      });
+      expect(requestLogs.at(-1)).toMatchObject({
+        method: "WS",
+        route: "/v1/responses",
+        request_speed: "fast",
+        status_code: 200,
+      });
 
         downstream.close();
         await waitForWebSocketClose(downstream);

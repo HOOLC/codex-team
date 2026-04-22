@@ -74,5 +74,6 @@ Proxy request logs now record replay metadata on the final request record:
 
 - `replay_count`
 - `replayed_from_account_names`
+- `request_speed` (`normal` or `fast`)
 
 For websocket turns this is emitted on the terminal `/v1/responses` log entry.

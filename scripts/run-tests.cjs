@@ -78,6 +78,10 @@ function toGlobPath(file) {
   return `**/${relativePath.split(path.sep).join("/")}`;
 }
 
+function toIncludeArgs(files) {
+  return files.flatMap((file) => ["--include", toGlobPath(file)]);
+}
+
 function listFiles(args) {
   return listTasks(["--filesOnly", ...args])
     .filter((item) => typeof item?.file === "string" && item.file.endsWith(".test.ts"))
@@ -101,33 +105,39 @@ if (files.length === 0) {
 }
 
 const sharedArgs = stripTestNamePatternArgs(extraArgs);
+const nonTuiFiles = files.filter((file) => file !== TUI_TEST_PATH);
 
-for (const file of files) {
-  if (file === TUI_TEST_PATH) {
-    const testNames = listTestNamesForFile(file, extraArgs);
-    for (const name of testNames) {
-      const result = runWithRetry(`${TUI_TEST_FILE} :: ${name}`, [
-        "run",
-        "--include",
-        toGlobPath(file),
-        "--testNamePattern",
-        name,
-        ...sharedArgs,
-      ]);
-      process.stdout.write(result.stdout || "");
-      process.stderr.write(result.stderr || "");
-      if (result.status !== 0) {
-        process.stdout.write(`FAILED ${TUI_TEST_FILE} :: ${name} exit=${result.status}\n`);
-        exitWithStatus(result.status);
-      }
-    }
-    continue;
-  }
-
-  const relativeFile = path.relative(process.cwd(), file);
-  const result = runWithRetry(relativeFile, ["run", "--include", toGlobPath(file), ...extraArgs]);
+if (nonTuiFiles.length > 0) {
+  const label = nonTuiFiles.length === 1
+    ? path.relative(process.cwd(), nonTuiFiles[0])
+    : `${nonTuiFiles.length} non-TUI test files`;
+  const result = runWithRetry(label, [
+    "run",
+    ...toIncludeArgs(nonTuiFiles),
+    ...sharedArgs,
+  ]);
   if (result.status !== 0) {
-    process.stdout.write(`FAILED ${relativeFile} exit=${result.status}\n`);
+    process.stdout.write(`FAILED ${label} exit=${result.status}\n`);
     exitWithStatus(result.status);
+  }
+}
+
+if (files.includes(TUI_TEST_PATH)) {
+  const testNames = listTestNamesForFile(TUI_TEST_PATH, extraArgs);
+  for (const name of testNames) {
+    const result = runWithRetry(`${TUI_TEST_FILE} :: ${name}`, [
+      "run",
+      "--include",
+      toGlobPath(TUI_TEST_PATH),
+      "--testNamePattern",
+      name,
+      ...sharedArgs,
+    ]);
+    process.stdout.write(result.stdout || "");
+    process.stderr.write(result.stderr || "");
+    if (result.status !== 0) {
+      process.stdout.write(`FAILED ${TUI_TEST_FILE} :: ${name} exit=${result.status}\n`);
+      exitWithStatus(result.status);
+    }
   }
 }
