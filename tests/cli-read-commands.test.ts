@@ -1500,6 +1500,7 @@ wire_api = "responses"
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
       });
+      await store.setAutoSwitchEligibility("quota-main", false);
       await runCli(["list", "--json"], {
         store,
         stdout: captureWritable().stream,
@@ -1534,7 +1535,7 @@ wire_api = "responses"
       expect(output).toContain("ETA");
       expect(output).toContain("SCORE");
       expect(output).toContain("NEXT RESET");
-      expect(output).toContain("*  quota-main");
+      expect(output).toContain("*  quota-main [P]");
       expect(output).toContain("   quota-backup");
       expect(output).toContain("2.1h");
       expect(output).toContain(

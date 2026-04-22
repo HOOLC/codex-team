@@ -1,5 +1,7 @@
+import { formatAccountListDisplayName, formatAccountListMarkers } from "../account-list-display.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import type { AccountQuotaSummary } from "../account-store/index.js";
+import type { ProxyQuotaAggregate } from "../proxy/quota.js";
 import type { WatchHistoryEtaContext } from "../watch/history.js";
 import {
   colorizeBlockedRow,
@@ -12,13 +14,14 @@ import {
   formatResetAt,
   formatUsagePercent,
   isAccountFullyUnavailable,
+  normalizeAccountScore,
   normalizePlusScore,
   stripAnsi,
   toQuotaEtaSummary,
   visibleWidth,
 } from "./quota-display.js";
 import { buildListSummary } from "./quota-summary.js";
-import { rankListCandidates, selectCurrentNextResetWindow, toAutoSwitchCandidate } from "./quota-ranking.js";
+import { rankListCandidates, selectCurrentNextResetWindow, toDisplayAutoSwitchCandidate } from "./quota-ranking.js";
 import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
 import type {
   AutoSwitchCandidate,
@@ -234,6 +237,7 @@ function describeQuotaAccounts(
     daemonFeatureLine?: string | null;
     proxyLastUpstreamLine?: string | null;
     proxyLastUpstreamAccountName?: string | null;
+    proxyAggregate?: ProxyQuotaAggregate | null;
     summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {
@@ -259,7 +263,7 @@ function describeQuotaAccounts(
   const rankedCandidates = rankListCandidates(accounts);
   const autoSwitchCandidates = new Map(
     accounts
-      .map(toAutoSwitchCandidate)
+      .map((account) => toDisplayAutoSwitchCandidate(account, options.proxyAggregate))
       .filter((candidate): candidate is AutoSwitchCandidate => candidate !== null)
       .map((candidate) => [candidate.name, candidate] as const),
   );
@@ -289,16 +293,21 @@ function describeQuotaAccounts(
   const rows = orderedAccounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
-    const currentScore = candidate ? normalizePlusScore(candidate.current_score, account.plan_type) : null;
+    const currentScore = candidate ? normalizeAccountScore(candidate.current_score, account, options.proxyAggregate) : null;
     const nextResetAt = candidate
       ? formatResetAt(selectCurrentNextResetWindow(account, candidate))
       : "-";
-    const displayName = account.status === "stale"
-      ? `${account.name} [stale]`
-      : account.name;
-    const proxyMarker = options.proxyLastUpstreamAccountName === account.name ? "@" : " ";
+    const displayName = formatAccountListDisplayName({
+      name: account.name,
+      refreshStatus: account.status,
+      autoSwitchEligible: account.auto_switch_eligible,
+    });
+    const proxyUpstreamActive = options.proxyLastUpstreamAccountName === account.name;
     const row: Record<string, string> = {
-      name: `${currentAccounts.has(account.name) ? "*" : " "}${proxyMarker} ${displayName}`,
+      name: `${formatAccountListMarkers({
+        current: currentAccounts.has(account.name),
+        proxyUpstreamActive,
+      })}${displayName}`,
       account_id: compactTableIdentity(maskAccountId(account.identity), "IDENTITY".length),
       plan_type: account.account_id === PROXY_ACCOUNT_ID ? "" : (account.plan_type ?? "-"),
       eta: formatEtaSummary(eta),
@@ -320,7 +329,7 @@ function describeQuotaAccounts(
       row.projected_5h_in_1w_units_1h = candidate
         ? formatRawScore(candidate.projected_5h_in_1w_units_1h)
         : "-";
-      const score1h = candidate ? normalizePlusScore(candidate.score_1h, account.plan_type) : null;
+      const score1h = candidate ? normalizeAccountScore(candidate.score_1h, account, options.proxyAggregate) : null;
       row.score_1h = candidate
         ? colorizeScore(formatRemainingPercent(score1h), score1h)
         : "-";
@@ -348,7 +357,7 @@ function describeQuotaAccounts(
     : false;
 
   const columns: TableColumn[] = [
-    { key: "name", label: "   NAME" },
+    { key: "name", label: `${formatAccountListMarkers({})}NAME` },
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN" },
     { key: "score", label: "SCORE", align: "right", headerAlign: "right" },
@@ -423,6 +432,7 @@ export function describeQuotaRefresh(
     daemonFeatureLine?: string | null;
     proxyLastUpstreamLine?: string | null;
     proxyLastUpstreamAccountName?: string | null;
+    proxyAggregate?: ProxyQuotaAggregate | null;
     summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {

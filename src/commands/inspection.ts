@@ -832,6 +832,7 @@ export async function handleListCommand(options: {
         daemonFeatureLine: describeDaemonFeatureLine(daemonStatus),
         proxyLastUpstreamLine,
         proxyLastUpstreamAccountName: proxyCurrentUpstreamName ?? proxyLastUpstream?.accountName ?? null,
+        proxyAggregate,
         summaryAccounts: result.successes,
       })}\n`,
     );

@@ -1,3 +1,4 @@
+import { formatAccountListDisplayName, formatAccountListMarkers } from "../account-list-display.js";
 import type { LocalUsageSummary } from "../local-usage/types.js";
 import {
   formatTuiUsageSummaryLine,
@@ -361,9 +362,11 @@ function compactIdentity(value: string, width: number): string {
 }
 
 function displayAccountName(account: AccountDashboardAccount): string {
-  const staleTag = account.refreshStatusLabel === "stale" ? " [stale]" : "";
-  const protectionTag = account.autoSwitchEligible ? "" : " [P]";
-  return `${account.name}${staleTag}${protectionTag}`;
+  return formatAccountListDisplayName({
+    name: account.name,
+    refreshStatus: account.refreshStatusLabel,
+    autoSwitchEligible: account.autoSwitchEligible,
+  });
 }
 
 function compactDetailLine(line: string, width: number): string {
@@ -795,7 +798,7 @@ function normalizeStateForViewport(
 
 function styleListLine(line: string, account: AccountDashboardAccount, selected: boolean): string {
   if (selected) {
-    return invert(line);
+    return invert(stripAnsi(line));
   }
 
   if (account.oneWeekBlocked) {
@@ -885,11 +888,13 @@ function renderWideListRow(
     resetWidth,
   } = columns;
   const displayName = displayAccountName(account);
+  const markers = formatAccountListMarkers({
+    selected,
+    current: account.current,
+    proxyUpstreamActive: account.proxyUpstreamActive,
+  });
   const line = [
-    selected ? ">" : " ",
-    account.current ? "*" : " ",
-    account.proxyUpstreamActive ? "@" : " ",
-    " ",
+    markers,
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
     " ",
     padEndVisible(compactIdentity(account.identityLabel, identityWidth), identityWidth),
@@ -919,17 +924,19 @@ function renderCompactListRow(
   const includeIdentity = width >= 64 && account.identityLabel !== "";
   const includeReset = width >= 58;
   const firstFixedWidth =
-    3 + 1 + 1 + 1 +
+    formatAccountListMarkers({ selected: false }).length +
     (includePlan ? 1 + WIDE_PLAN_MAX_WIDTH : 0) +
     1 + WIDE_SCORE_MAX_WIDTH +
     (showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0);
   const nameWidth = Math.max(8, width - firstFixedWidth);
   const displayName = displayAccountName(account);
+  const markers = formatAccountListMarkers({
+    selected,
+    current: account.current,
+    proxyUpstreamActive: account.proxyUpstreamActive,
+  });
   const firstLine = [
-    selected ? ">" : " ",
-    account.current ? "*" : " ",
-    account.proxyUpstreamActive ? "@" : " ",
-    " ",
+    markers,
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
     includePlan ? ` ${padEndVisible(truncate(account.planLabel, WIDE_PLAN_MAX_WIDTH), WIDE_PLAN_MAX_WIDTH)}` : "",
     " ",

@@ -21,12 +21,12 @@ import {
   formatResetAt,
   formatUsagePercent,
   isAccountFullyUnavailable,
-  normalizePlusScore,
+  normalizeAccountScore,
   orderListAccounts,
   toQuotaEtaSummary,
 } from "../cli/quota-display.js";
 import { buildListSummary } from "../cli/quota-summary.js";
-import { selectCurrentNextResetWindow, toAutoSwitchCandidate } from "../cli/quota-ranking.js";
+import { selectCurrentNextResetWindow, toDisplayAutoSwitchCandidate } from "../cli/quota-ranking.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
 import {
   isOnlyManagedDesktopInstanceRunning,
@@ -289,8 +289,9 @@ function buildAccountDetailLines(options: {
   score: number | null;
   eta: WatchHistoryEtaContext | undefined;
   reasonLabel: string;
-  candidate: ReturnType<typeof toAutoSwitchCandidate>;
+  candidate: ReturnType<typeof toDisplayAutoSwitchCandidate>;
   now: Date;
+  proxyAggregate?: Awaited<ReturnType<typeof buildProxyQuotaAggregate>> | null;
   proxyLastUpstreamLabel?: string | null;
 }): string[] {
   const {
@@ -302,6 +303,7 @@ function buildAccountDetailLines(options: {
     reasonLabel,
     candidate,
     now,
+    proxyAggregate,
     proxyLastUpstreamLabel,
   } = options;
   const etaSummary = toQuotaEtaSummary(eta);
@@ -310,8 +312,8 @@ function buildAccountDetailLines(options: {
   const formattedOneWeek = formatUsagePercent(account.one_week);
   const formattedRefresh = colorizeRefreshStatus(account.status, account.status);
   const formattedReason = colorizeReason(reasonLabel, account.status);
-  const score1h = candidate ? normalizePlusScore(candidate.score_1h, account.plan_type) : null;
-  const projectedOneWeek1h = candidate ? normalizePlusScore(candidate.projected_1w_1h, account.plan_type) : null;
+  const score1h = candidate ? normalizeAccountScore(candidate.score_1h, account, proxyAggregate) : null;
+  const projectedOneWeek1h = candidate?.projected_1w_1h ?? null;
   const isProxyAccount = accountMeta?.auth_mode === "proxy";
 
   const lines = [
@@ -435,9 +437,9 @@ function buildDashboardSnapshot(options: {
     warnings: options.warnings,
     failures: options.failures,
     accounts: orderedAccounts.map((account) => {
-      const candidate = toAutoSwitchCandidate(account);
+      const candidate = toDisplayAutoSwitchCandidate(account, options.proxyAggregate);
       const eta = etaByName.get(account.name);
-      const score = candidate ? normalizePlusScore(candidate.current_score, account.plan_type) : null;
+      const score = candidate ? normalizeAccountScore(candidate.current_score, account, options.proxyAggregate) : null;
       const nextResetWindow = candidate ? selectCurrentNextResetWindow(account, candidate) : null;
       const nextResetLabel = nextResetWindow ? formatResetAt(nextResetWindow) : "-";
       const availabilityLabel = deriveAvailability(account);
@@ -505,6 +507,7 @@ function buildDashboardSnapshot(options: {
           reasonLabel,
           candidate,
           now,
+          proxyAggregate: options.proxyAggregate,
           proxyLastUpstreamLabel,
         }),
       };

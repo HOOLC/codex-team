@@ -491,6 +491,35 @@ describe("Account Dashboard TUI", () => {
     expect(screen).not.toContain("p prot");
   });
 
+  test("keeps selected row highlighting uniform when usage labels are colorized", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.accounts[0] = {
+      ...snapshot.accounts[0]!,
+      scoreLabel: "\u001b[32m88%\u001b[0m",
+      fiveHourLabel: "\u001b[93m18%\u001b[0m",
+      nextResetLabel: "04-16 19:30 \u001b[36m(6h)\u001b[0m",
+    };
+
+    const screen = renderAccountDashboardScreen({
+      snapshot,
+      state: createInitialAccountDashboardState(),
+      width: 120,
+      height: 28,
+    });
+    const lines = screen.split("\n");
+    const selectedRow = lines.find((line) => (
+      line.includes("alpha")
+      && line.includes("88%")
+      && line.includes("18%")
+      && line.includes("04-16 19:30")
+    ));
+
+    expect(selectedRow).toContain("\u001b[7m");
+    expect(selectedRow).not.toContain("\u001b[32m");
+    expect(selectedRow).not.toContain("\u001b[93m");
+    expect(selectedRow).not.toContain("\u001b[36m");
+  });
+
   test("caps list name growth on wide terminals and leaves extra width to the detail pane", () => {
     const snapshot = createSnapshot("alpha");
     snapshot.accounts[0] = {
@@ -3594,6 +3623,11 @@ describe("Account Dashboard TUI", () => {
         authModeLabel: "proxy",
         current: false,
       });
+      expect((snapshot.accounts[0]?.detailLines ?? []).map((line) => stripAnsi(line))).toEqual(
+        expect.arrayContaining([
+          "1W 1H: 58%",
+        ]),
+      );
       expect(snapshot.accounts[0]?.proxyLastUpstreamLabel ?? null).toBeNull();
       expect(snapshot.accounts[1]).toMatchObject({
         name: "alpha",

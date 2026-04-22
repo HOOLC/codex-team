@@ -1,8 +1,10 @@
 import { describe, expect, test } from "@rstest/core";
 
 import type { AccountQuotaSummary } from "../src/account-store/index.js";
+import { normalizeAccountScore } from "../src/cli/quota-display.js";
 import { rankAutoSwitchCandidates } from "../src/cli/quota.js";
-import { rankListCandidates } from "../src/cli/quota-ranking.js";
+import { rankListCandidates, toDisplayAutoSwitchCandidate } from "../src/cli/quota-ranking.js";
+import { buildProxyQuotaAggregateFromAccounts } from "../src/proxy/quota.js";
 
 describe("auto switch ranking", () => {
   test("keeps candidates with only one quota window", () => {
@@ -469,5 +471,39 @@ describe("auto switch ranking", () => {
       "proxy",
       "prolite",
     ]);
+  });
+
+  test("uses the proxy aggregate profile instead of the synthetic plan for proxy display normalization", () => {
+    const sourceAccount: AccountQuotaSummary = {
+      name: "source-plus",
+      account_id: "acct-source-plus",
+      user_id: null,
+      identity: "acct-source-plus",
+      plan_type: "plus",
+      credits_balance: 0,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 12,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T05:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 34,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+      auto_switch_eligible: true,
+    };
+
+    const aggregate = buildProxyQuotaAggregateFromAccounts([sourceAccount]);
+    expect(aggregate).not.toBeNull();
+
+    const candidate = toDisplayAutoSwitchCandidate(aggregate!.summary, aggregate);
+    expect(candidate).not.toBeNull();
+    expect(candidate?.current_score).toBeCloseTo(13.2, 2);
+    expect(normalizeAccountScore(candidate?.current_score ?? null, aggregate!.summary, aggregate)).toBeCloseTo(88, 2);
   });
 });

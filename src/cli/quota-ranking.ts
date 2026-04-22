@@ -4,7 +4,8 @@ import {
   convertOneWeekPercentToPlusWeeklyUnits,
   resolveFiveHourToOneWeekRawRatio,
 } from "../plan-quota-profile.js";
-import { PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
+import type { ProxyQuotaAggregate } from "../proxy/quota.js";
 import { computeAvailability } from "./quota-core.js";
 import type { AutoSwitchCandidate, QuotaWindowKey } from "./quota-types.js";
 
@@ -235,6 +236,82 @@ function compareCandidateResets(
   );
 }
 
+function convertPercentWithCapacityToPlusUnits(
+  remainingPercent: number | null,
+  totalCapacityInPlusUnits: number | null,
+): number | null {
+  if (remainingPercent === null || totalCapacityInPlusUnits === null || totalCapacityInPlusUnits <= 0) {
+    return null;
+  }
+
+  return roundScore((remainingPercent / 100) * totalCapacityInPlusUnits);
+}
+
+function toProxyAggregateCandidate(
+  account: AccountQuotaSummary,
+  proxyAggregate: ProxyQuotaAggregate,
+): AutoSwitchCandidate | null {
+  if (account.status !== "ok") {
+    return null;
+  }
+
+  const fiveHourCapacityInPlusUnits = proxyAggregate.displayProfile.fiveHourCapacityInPlusUnits;
+  const oneWeekCapacityInPlusUnits = proxyAggregate.displayProfile.oneWeekCapacityInPlusUnits;
+  const fiveHourToOneWeekRatio = proxyAggregate.displayProfile.fiveHourToOneWeekRawRatio;
+  if (
+    fiveHourCapacityInPlusUnits === null
+    || oneWeekCapacityInPlusUnits === null
+    || fiveHourToOneWeekRatio === null
+    || fiveHourCapacityInPlusUnits <= 0
+    || oneWeekCapacityInPlusUnits <= 0
+  ) {
+    return null;
+  }
+
+  const remain5h = computeRemainingPercent(account.five_hour?.used_percent);
+  const remain1w = computeRemainingPercent(account.one_week?.used_percent);
+  if (remain5h === null && remain1w === null) {
+    return null;
+  }
+
+  const remain5hEq1w = convertPercentWithCapacityToPlusUnits(remain5h, fiveHourCapacityInPlusUnits);
+  const remain1wEq = convertPercentWithCapacityToPlusUnits(remain1w, oneWeekCapacityInPlusUnits);
+  const projected5hScore = computeProjectedRemainingPercent(account.fetched_at, account.five_hour);
+  const projected5hEq1wScore = convertPercentWithCapacityToPlusUnits(projected5hScore, fiveHourCapacityInPlusUnits);
+  const projected1wScore = computeProjectedRemainingPercent(account.fetched_at, account.one_week);
+  const projected1wEqScore = convertPercentWithCapacityToPlusUnits(projected1wScore, oneWeekCapacityInPlusUnits);
+  const currentScore = resolveBottleneckScore(remain5hEq1w, remain1wEq);
+  const effectiveScore = resolveBottleneckScore(projected5hEq1wScore, projected1wEqScore);
+
+  if (currentScore === null || effectiveScore === null) {
+    return null;
+  }
+
+  return {
+    name: account.name,
+    account_id: account.account_id,
+    identity: account.identity,
+    plan_type: account.plan_type,
+    available: computeAvailability(account),
+    refresh_status: "ok",
+    current_score: currentScore,
+    score_1h: effectiveScore,
+    projected_5h_1h: projected5hScore,
+    projected_5h_in_1w_units_1h: projected5hEq1wScore,
+    projected_1w_1h: projected1wScore,
+    projected_1w_in_plus_units_1h: projected1wEqScore,
+    remain_5h: remain5h,
+    remain_5h_in_1w_units: remain5hEq1w,
+    remain_1w: remain1w,
+    remain_1w_in_plus_units: remain1wEq,
+    five_hour_to_one_week_ratio: fiveHourToOneWeekRatio,
+    five_hour_used: account.five_hour?.used_percent ?? null,
+    one_week_used: account.one_week?.used_percent ?? null,
+    five_hour_reset_at: account.five_hour?.reset_at ?? null,
+    one_week_reset_at: account.one_week?.reset_at ?? null,
+  };
+}
+
 export function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchCandidate | null {
   if (account.status !== "ok") {
     return null;
@@ -289,6 +366,21 @@ export function toAutoSwitchCandidate(account: AccountQuotaSummary): AutoSwitchC
     five_hour_reset_at: account.five_hour?.reset_at ?? null,
     one_week_reset_at: account.one_week?.reset_at ?? null,
   };
+}
+
+export function toDisplayAutoSwitchCandidate(
+  account: AccountQuotaSummary,
+  proxyAggregate: ProxyQuotaAggregate | null | undefined = null,
+): AutoSwitchCandidate | null {
+  if (
+    proxyAggregate
+    && account.account_id === PROXY_ACCOUNT_ID
+    && account.name === PROXY_ACCOUNT_NAME
+  ) {
+    return toProxyAggregateCandidate(account, proxyAggregate);
+  }
+
+  return toAutoSwitchCandidate(account);
 }
 
 export function rankAutoSwitchCandidates(accounts: AccountQuotaSummary[]): AutoSwitchCandidate[] {

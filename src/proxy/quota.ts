@@ -74,6 +74,11 @@ export interface ProxyAccountCheckV4Payload {
 }
 
 export interface ProxyQuotaAggregate {
+  displayProfile: {
+    fiveHourCapacityInPlusUnits: number | null;
+    oneWeekCapacityInPlusUnits: number | null;
+    fiveHourToOneWeekRawRatio: number | null;
+  };
   summary: AccountQuotaSummary;
   watchEtaTarget: WatchHistoryTargetSnapshot;
 }
@@ -103,6 +108,7 @@ function eligibleForProxyPool(account: AccountQuotaSummary): boolean {
 }
 
 interface AggregatedWindowResult {
+  capacityPlusUnits: number;
   snapshot: QuotaWindowSnapshot;
   remainingPercent: number;
   remainingPlusUnits: number;
@@ -190,6 +196,7 @@ function aggregateWindow(
   const remainingPercent = roundToOne((totalRemaining / totalCapacity) * 100);
 
   return {
+    capacityPlusUnits: totalCapacity,
     snapshot: {
       used_percent: roundToOne(Math.max(0, 100 - remainingPercent)),
       window_seconds: firstWindowSeconds ?? defaultWindowSeconds,
@@ -217,6 +224,12 @@ export function buildProxyQuotaAggregateFromAccounts(
     .filter((value): value is string => typeof value === "string" && value !== "")
     .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? new Date().toISOString();
   const hasOk = eligibleAccounts.some((account) => account.status === "ok");
+  const fiveHourCapacityInPlusUnits = fiveHour?.capacityPlusUnits ?? null;
+  const oneWeekCapacityInPlusUnits = oneWeek?.capacityPlusUnits ?? null;
+  const fiveHourToOneWeekRawRatio =
+    fiveHourCapacityInPlusUnits && oneWeekCapacityInPlusUnits
+      ? roundToTwo((100 * oneWeekCapacityInPlusUnits) / fiveHourCapacityInPlusUnits)
+      : null;
 
   const summary: AccountQuotaSummary = {
     name: PROXY_ACCOUNT_NAME,
@@ -235,6 +248,11 @@ export function buildProxyQuotaAggregateFromAccounts(
   };
 
   return {
+    displayProfile: {
+      fiveHourCapacityInPlusUnits,
+      oneWeekCapacityInPlusUnits,
+      fiveHourToOneWeekRawRatio,
+    },
     summary,
     watchEtaTarget: {
       plan_type: PROXY_PLAN_TYPE,
