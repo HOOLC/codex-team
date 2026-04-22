@@ -2812,6 +2812,173 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy websocket auto-replays wrapped usage_limit_reached errors with status_code and writes them to the error logger", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    const upstreamHttp = createServer();
+    const upstreamWs = new WebSocketServer({ server: upstreamHttp });
+    const upstreamConnections: Array<{
+      accountId: string | null;
+      bodies: Record<string, unknown>[];
+    }> = [];
+    const requestLogs: Array<Record<string, unknown>> = [];
+    const errorLogs: Array<Record<string, unknown>> = [];
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        upstreamHttp.once("error", reject);
+        upstreamHttp.listen(0, "127.0.0.1", () => {
+          upstreamHttp.off("error", reject);
+          resolve();
+        });
+      });
+      const upstreamAddress = upstreamHttp.address();
+      const upstreamPort = typeof upstreamAddress === "object" && upstreamAddress ? upstreamAddress.port : 0;
+      const upstreamUrl = `ws://127.0.0.1:${upstreamPort}/backend-api/codex/responses`;
+
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "plus", "user-beta"));
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      upstreamWs.on("connection", (socket, request) => {
+        const connection = {
+          accountId: typeof request.headers["chatgpt-account-id"] === "string"
+            ? request.headers["chatgpt-account-id"]
+            : null,
+          bodies: [] as Record<string, unknown>[],
+        };
+        upstreamConnections.push(connection);
+        socket.on("message", (raw) => {
+          const body = JSON.parse(raw.toString()) as Record<string, unknown>;
+          connection.bodies.push(body);
+          if (connection.accountId === "acct-alpha") {
+            socket.send(JSON.stringify({
+              type: "error",
+              status_code: 429,
+              error: {
+                type: "usage_limit_reached",
+                message: "The usage limit has been reached",
+                plan_type: "pro",
+                resets_at: 1738888888,
+              },
+              headers: {
+                "x-codex-primary-used-percent": "100.0",
+              },
+            }));
+            return;
+          }
+
+          socket.send(JSON.stringify({
+            type: "response.created",
+            response: { id: "resp_wrapped_retry" },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: "resp_wrapped_retry",
+              output: [],
+            },
+          }));
+        });
+      });
+
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        errorRequestLogger: async (payload) => {
+          errorLogs.push(payload);
+        },
+        connectWebSocketImpl: async (options) => await new Promise<WebSocket>((resolve, reject) => {
+          const socket = new WebSocket(upstreamUrl, {
+            headers: options.headers,
+            perMessageDeflate: false,
+          });
+          socket.once("open", () => resolve(socket));
+          socket.once("error", reject);
+        }),
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const downstream = new WebSocket(`${server.openaiBaseUrl.replace(/^http/u, "ws")}/responses`, {
+          headers: {
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          perMessageDeflate: false,
+        });
+        await waitForWebSocketOpen(downstream);
+
+        const events = await sendWebSocketTurnAndCollectTerminal(downstream, {
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        });
+
+        expect(events.map((event) => event.type)).toEqual([
+          "response.created",
+          "response.completed",
+        ]);
+        expect(upstreamConnections.map((connection) => connection.accountId)).toEqual(["acct-alpha", "acct-beta"]);
+        expect(
+          requestLogs.find((entry) => entry.route === "/v1/responses" && entry.status_code === 200),
+        ).toMatchObject({
+          selected_account_name: "beta",
+          replay_count: 1,
+          replayed_from_account_names: ["alpha"],
+          replay_succeeded: true,
+        });
+        expect(errorLogs).toHaveLength(1);
+        expect(errorLogs[0]).toMatchObject({
+          method: "WS",
+          route: "/v1/responses",
+          auth_kind: "synthetic-chatgpt",
+          selected_account_name: "alpha",
+          selected_auth_mode: "chatgpt",
+          upstream_kind: "chatgpt",
+          status_code: 429,
+          upstream_url: "wss://chatgpt.com/backend-api/codex/responses",
+          response_headers: null,
+        });
+        expect(String(errorLogs[0]?.request_body_text ?? "")).toContain("\"type\":\"response.create\"");
+        expect(String(errorLogs[0]?.response_body_text ?? "")).toContain("\"usage_limit_reached\"");
+        expect(String(errorLogs[0]?.response_body_text ?? "")).toContain("\"status_code\":429");
+
+        downstream.close();
+        await waitForWebSocketClose(downstream);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      for (const client of upstreamWs.clients) {
+        client.terminate();
+      }
+      upstreamWs.close();
+      await new Promise<void>((resolve) => upstreamHttp.close(() => resolve()));
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("proxy websocket still replays after protocol prelude events when user-visible output has not started", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");

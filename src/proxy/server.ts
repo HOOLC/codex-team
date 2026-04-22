@@ -235,6 +235,23 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return result;
 }
 
+function outgoingHeadersToRecord(
+  headers: OutgoingHttpHeaders,
+): Record<string, string | string[]> {
+  const result: Record<string, string | string[]> = {};
+  for (const [key, rawValue] of Object.entries(headers)) {
+    if (rawValue === undefined) {
+      continue;
+    }
+    if (Array.isArray(rawValue)) {
+      result[key] = rawValue.map((value) => String(value));
+      continue;
+    }
+    result[key] = String(rawValue);
+  }
+  return result;
+}
+
 function upstreamResponseHeadersToRecord(upstream: Response): Record<string, string> {
   const headers: Record<string, string> = {};
   upstream.headers.forEach((value, key) => {
@@ -355,8 +372,8 @@ function writeBufferedResponse(
 }
 
 function upstreamRequestHeadersToRecord(
-  headers: Headers | Record<string, string> | null,
-): Record<string, string> | null {
+  headers: Headers | Record<string, string | string[]> | null,
+): Record<string, string | string[]> | null {
   if (!headers) {
     return null;
   }
@@ -376,7 +393,7 @@ function buildRequestResponseLogPayload(options: {
   request: IncomingMessage;
   bodyText: string;
   upstreamUrl: string | null;
-  upstreamRequestHeaders: Headers | Record<string, string> | null;
+  upstreamRequestHeaders: Headers | Record<string, string | string[]> | null;
   responseHeaders: Record<string, string> | null;
   responseBodyText: string;
 }): Record<string, unknown> {
@@ -713,6 +730,40 @@ function isRetryableQuotaFailure(statusCode: number, payload: unknown): boolean 
   }
 
   return statusCode === 429 && hasExhaustedRateLimitSignal(payload);
+}
+
+function resolveProxyTerminalStatusCode(
+  fallbackStatusCode: number,
+  payload: Record<string, unknown> | null,
+): number {
+  if (payload && Number.isInteger(payload.status)) {
+    return payload.status as number;
+  }
+
+  if (payload && Number.isInteger(payload.status_code)) {
+    return payload.status_code as number;
+  }
+
+  const error = payload?.error;
+  if (
+    typeof error === "object"
+    && error !== null
+    && !Array.isArray(error)
+    && Number.isInteger((error as Record<string, unknown>).status)
+  ) {
+    return (error as Record<string, unknown>).status as number;
+  }
+
+  if (
+    typeof error === "object"
+    && error !== null
+    && !Array.isArray(error)
+    && Number.isInteger((error as Record<string, unknown>).status_code)
+  ) {
+    return (error as Record<string, unknown>).status_code as number;
+  }
+
+  return fallbackStatusCode;
 }
 
 function toProxyReplayDiagnostic(options: {
@@ -2887,7 +2938,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       service_tier: activeTurn.serviceTier,
       status_code: terminalStatusCode,
       duration_ms: Date.now() - activeTurn.startedAt,
-      request_bytes: Buffer.byteLength(JSON.stringify({ input: activeTurn.fullInput })),
+      request_bytes: Buffer.byteLength(JSON.stringify(activeTurn.requestBody)),
       response_bytes: payload ? Buffer.byteLength(JSON.stringify(payload)) : 0,
       synthetic_usage: false,
       ...toProxyReplayDiagnostic({
@@ -2901,6 +2952,48 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     });
 
     context.activeTurn = null;
+  };
+
+  const recordWebSocketTerminalError = async (
+    context: ProxyWebSocketContext,
+    request: IncomingMessage,
+    payload: Record<string, unknown> | null,
+    terminalStatusCode: number,
+  ): Promise<void> => {
+    const activeTurn = context.activeTurn;
+    if (!activeTurn || !shouldRecordErrorPayload(terminalStatusCode)) {
+      return;
+    }
+
+    const selected = context.upstreamAccount;
+    const requestBodyText = JSON.stringify(activeTurn.requestBody);
+    const responseBodyText = payload ? JSON.stringify(payload) : "";
+    await options.errorRequestLogger?.({
+      ts: new Date().toISOString(),
+      request_id: activeTurn.requestId,
+      pid: process.pid,
+      method: "WS",
+      route: "/v1/responses",
+      surface: "v1",
+      auth_kind: context.downstreamAuthKind,
+      selected_account_name: selected?.account.name ?? activeTurn.accountName,
+      selected_auth_mode: selected?.account.auth_mode ?? "chatgpt",
+      upstream_kind: "chatgpt",
+      service_tier: activeTurn.serviceTier,
+      status_code: terminalStatusCode,
+      duration_ms: Date.now() - activeTurn.startedAt,
+      request_bytes: Buffer.byteLength(requestBodyText),
+      response_bytes: Buffer.byteLength(responseBodyText),
+      synthetic_usage: false,
+      ...buildRequestResponseLogPayload({
+        request,
+        bodyText: requestBodyText,
+        upstreamUrl: upstreamChatGPTWebSocketUrl(),
+        upstreamRequestHeaders: selected ? outgoingHeadersToRecord(buildChatGPTWebSocketHeaders(request, selected)) : null,
+        responseHeaders: null,
+        responseBodyText,
+      }),
+    });
   };
 
   const flushBufferedTurnMessages = (activeTurn: ProxyActiveTurn, downstream: WebSocket) => {
@@ -3006,6 +3099,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       activeTurn.replayCount += 1;
       activeTurn.replaySkipReason = null;
       activeTurn.replayedFromAccountNames = [...activeTurn.replayedFromAccountNames, previousAccountName];
+      activeTurn.requestBody = cloneJsonValue(finalRequestBody);
       activeTurn.serviceTier = resolveProxyServiceTier(finalRequestBody);
       activeTurn.responseId = null;
       context.upstreamSocket?.send(JSON.stringify(finalRequestBody));
@@ -3053,11 +3147,15 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     }
 
     if (payloadType === "response.failed") {
-      if (await replayActiveTurnAfterQuotaFailure(context, downstream, request, payload, 502)) {
+      const terminalStatusCode = resolveProxyTerminalStatusCode(502, payload);
+      await recordWebSocketTerminalError(context, request, payload, terminalStatusCode);
+      if (await replayActiveTurnAfterQuotaFailure(context, downstream, request, payload, terminalStatusCode)) {
         return;
       }
     } else if (payloadType === "error") {
-      if (await replayActiveTurnAfterQuotaFailure(context, downstream, request, payload, 500)) {
+      const terminalStatusCode = resolveProxyTerminalStatusCode(500, payload);
+      await recordWebSocketTerminalError(context, request, payload, terminalStatusCode);
+      if (await replayActiveTurnAfterQuotaFailure(context, downstream, request, payload, terminalStatusCode)) {
         return;
       }
     }
@@ -3086,12 +3184,12 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     }
 
     if (payloadType === "response.failed") {
-      await finalizeActiveTurn(context, payload, 502);
+      await finalizeActiveTurn(context, payload, resolveProxyTerminalStatusCode(502, payload));
       return;
     }
 
     if (payloadType === "error") {
-      await finalizeActiveTurn(context, payload, 500);
+      await finalizeActiveTurn(context, payload, resolveProxyTerminalStatusCode(500, payload));
       context.activeTurn = null;
     }
   };
@@ -3281,7 +3379,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               replayLockedByType: null,
               replaySkipReason: null,
               replayedFromAccountNames: [],
-              requestBody: cloneJsonValue(requestBody),
+              requestBody: cloneJsonValue(finalRequestBody),
               requestId,
               serviceTier: resolveProxyServiceTier(finalRequestBody),
               responseId: null,
@@ -3295,9 +3393,11 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
           })
           .catch((error) => {
             options.debugLog?.(`proxy websocket: ${(error as Error).message}`);
+            const requestId = createRequestId();
+            const responseBodyText = buildProxyErrorResponseText((error as Error).message);
             void options.requestLogger?.({
               ts: new Date().toISOString(),
-              request_id: createRequestId(),
+              request_id: requestId,
               pid: process.pid,
               method: "WS",
               route: pathname,
@@ -3314,6 +3414,38 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               synthetic_usage: false,
               error_class: (error as Error).name,
               error_message_short: (error as Error).message,
+            });
+            void options.errorRequestLogger?.({
+              ts: new Date().toISOString(),
+              request_id: requestId,
+              pid: process.pid,
+              method: "WS",
+              route: pathname,
+              surface: "v1",
+              auth_kind: context.downstreamAuthKind,
+              selected_account_name: context.upstreamAccount?.account.name ?? null,
+              selected_auth_mode: context.upstreamAccount?.account.auth_mode ?? null,
+              upstream_kind: "chatgpt",
+              service_tier: context.activeTurn?.serviceTier ?? "default",
+              status_code: 500,
+              duration_ms: 0,
+              request_bytes: context.activeTurn ? Buffer.byteLength(JSON.stringify(context.activeTurn.requestBody)) : 0,
+              response_bytes: Buffer.byteLength(responseBodyText),
+              synthetic_usage: false,
+              error_class: (error as Error).name,
+              error_message_short: (error as Error).message,
+              ...buildRequestResponseLogPayload({
+                request,
+                bodyText: context.activeTurn ? JSON.stringify(context.activeTurn.requestBody) : "",
+                upstreamUrl: context.upstreamAccount ? upstreamChatGPTWebSocketUrl() : null,
+                upstreamRequestHeaders: context.upstreamAccount
+                  ? outgoingHeadersToRecord(buildChatGPTWebSocketHeaders(request, context.upstreamAccount))
+                  : null,
+                responseHeaders: {
+                  "content-type": "application/json",
+                },
+                responseBodyText,
+              }),
             });
             if (downstream.readyState === WebSocket.OPEN) {
               downstream.close(1011, (error as Error).message);

@@ -22,7 +22,21 @@ describe("quota exhaustion signals", () => {
       },
     })).toBe(true);
     expect(hasQuotaExhaustionSignal({
+      error: {
+        type: "usage_limit_reached",
+        message: "The usage limit has been reached",
+      },
+    })).toBe(true);
+    expect(hasQuotaExhaustionSignal({
       detail: "Request failed because you hit your usage limit for this workspace.",
+    })).toBe(true);
+  });
+
+  test("detects app-server camelCase quota exhaustion payloads", () => {
+    expect(hasQuotaExhaustionSignal({
+      error: {
+        codexErrorInfo: "usageLimitExceeded",
+      },
     })).toBe(true);
   });
 

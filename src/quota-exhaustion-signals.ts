@@ -8,12 +8,15 @@ export const QUOTA_EXHAUSTION_ERROR_CODES = new Set([
   "insufficient_quota",
   "quota_exceeded",
   "rate_limit_exceeded",
+  "usageLimitExceeded",
+  "usage_limit_reached",
   "usage_limit_exceeded",
 ]);
 
 export const QUOTA_EXHAUSTION_MESSAGE_PHRASES = [
   "insufficient quota",
   "quota exceeded",
+  "usage limit has been reached",
   "usage limit exceeded",
   "hit your usage limit",
   "rate limit exceeded",
@@ -32,7 +35,7 @@ export function hasQuotaExhaustionSignal(value: unknown, depth = 0): boolean {
     return false;
   }
 
-  if (value.codex_error_info === "usage_limit_exceeded") {
+  if (value.codex_error_info === "usage_limit_exceeded" || value.codexErrorInfo === "usageLimitExceeded") {
     return true;
   }
 
