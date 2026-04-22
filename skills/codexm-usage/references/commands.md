@@ -4,8 +4,7 @@
 - Open the dashboard explicitly, optionally with an initial filter: `codexm tui [query]`
 - Dashboard keymap and prompt behavior: [dashboard.md](dashboard.md)
 - Proxy mode guide: [proxy.md](proxy.md)
-- Check the current local auth and best-effort live usage: `codexm current`
-- Force a fresh current-account usage refresh: `codexm current --refresh`
+- Check the current local auth plus best-effort quota from the proxy aggregate, direct runtime, or saved managed snapshot: `codexm current`
 - Diagnose local auth, direct runtime, and managed Desktop consistency: `codexm doctor`
 - Generate shell completion scripts: `codexm completion <zsh|bash>`
 - Add a new managed ChatGPT account with browser login: `codexm add <name>`
@@ -44,7 +43,6 @@
 - Use [dashboard.md](dashboard.md) when the user is asking what the interactive dashboard hotkeys, prompts, confirmations, or proxy-row actions do.
 - Use [proxy.md](proxy.md) when the user is asking how proxy mode routes traffic, picks the current upstream, replays quota-exhausted requests, or differs from `run --proxy`.
 - Use `codexm current` when the user does not know what auth is active now or wants a quick current-usage summary.
-- Use `codexm current --refresh` when the user explicitly wants the latest usage data instead of best-effort live data.
 - Use `codexm doctor` when the user is debugging mismatches between local auth, direct runtime reads, and managed Desktop state.
 - Use `codexm list` when the user wants to compare saved accounts or inspect quota state.
 - Use `codexm list --verbose` when the user wants score details behind auto-switch ranking.

@@ -240,24 +240,24 @@ function hasRuntimeAuthDifference(
   return left.auth_mode !== right.auth_mode;
 }
 
-async function tryReadCurrentRuntimeQuota(
+async function tryReadDirectRuntimeQuota(
   desktopLauncher: CodexDesktopLauncher,
   debugLog?: DebugLogger,
 ): Promise<CurrentRuntimeQuotaView | null> {
   try {
-    const quotaResult = await desktopLauncher.readCurrentRuntimeQuotaResult();
-    if (!quotaResult) {
-      debugLog?.("current: runtime quota unavailable");
+    const quotaSnapshot = await desktopLauncher.readDirectRuntimeQuota();
+    if (!quotaSnapshot) {
+      debugLog?.("current: direct runtime quota unavailable");
       return null;
     }
 
-    debugLog?.(`current: using ${quotaResult.source} runtime quota`);
+    debugLog?.("current: using direct runtime quota");
     return {
-      quota: toCliQuotaSummaryFromRuntimeQuota(quotaResult.snapshot),
-      source: quotaResult.source,
+      quota: toCliQuotaSummaryFromRuntimeQuota(quotaSnapshot),
+      source: "direct",
     };
   } catch (error) {
-    debugLog?.(`current: runtime quota read failed: ${(error as Error).message}`);
+    debugLog?.(`current: direct runtime quota read failed: ${(error as Error).message}`);
     return null;
   }
 }
@@ -557,7 +557,6 @@ export async function handleCurrentCommand(options: {
   stdout: NodeJS.WriteStream;
   debugLog: DebugLogger;
   json: boolean;
-  refresh: boolean;
 }): Promise<number> {
   const localStatus = await options.store.getCurrentStatus();
   const runtimeAccount = await tryReadCurrentRuntimeAccount(options.desktopLauncher, options.debugLog);
@@ -567,70 +566,57 @@ export async function handleCurrentCommand(options: {
   let usageSourceLabel: string | null = null;
   const isProxyCurrent = result.account_id === PROXY_ACCOUNT_ID;
 
-  if (!options.refresh && result.exists && (result.matched_accounts.length === 1 || isProxyCurrent)) {
-    const runtimeQuota = await tryReadCurrentRuntimeQuota(options.desktopLauncher, options.debugLog);
+  if (!result.exists) {
+    usageUnavailableReason = "unavailable (current auth is missing)";
+  } else if (isProxyCurrent) {
+    const proxyAggregate = await buildProxyQuotaAggregate({
+      store: options.store,
+      includeWhenDisabled: true,
+    });
+    quota = proxyAggregate ? toCliQuotaSummary(proxyAggregate.summary) : null;
+    if (quota) {
+      usageSourceLabel = "proxy aggregate";
+    } else {
+      usageUnavailableReason = "unavailable (proxy aggregate quota is unavailable)";
+    }
+  } else {
+    const runtimeQuota = await tryReadDirectRuntimeQuota(options.desktopLauncher, options.debugLog);
     if (runtimeQuota) {
       quota = runtimeQuota.quota;
-      usageSourceLabel = runtimeQuota.source === "desktop" ? "live Desktop runtime" : "direct runtime";
-    } else if (isProxyCurrent) {
-      const proxyAggregate = await buildProxyQuotaAggregate({
-        store: options.store,
-        includeWhenDisabled: true,
-      });
-      quota = proxyAggregate ? toCliQuotaSummary(proxyAggregate.summary) : null;
-      if (quota) {
-        usageSourceLabel = "proxy aggregate";
-      }
-    }
-  }
-
-  if (options.refresh) {
-    if (!result.exists) {
-      usageUnavailableReason = "unavailable (current auth is missing)";
-    } else if (!isProxyCurrent && result.matched_accounts.length === 0) {
-      usageUnavailableReason = "unavailable (current auth is unmanaged)";
-    } else if (result.matched_accounts.length > 1) {
-      usageUnavailableReason = "unavailable (current auth matches multiple managed accounts)";
-    } else {
-      const runtimeQuota = await tryReadCurrentRuntimeQuota(options.desktopLauncher, options.debugLog);
-      if (runtimeQuota) {
-        quota = runtimeQuota.quota;
-        usageSourceLabel =
-          runtimeQuota.source === "desktop"
-            ? "refreshed via Desktop runtime"
-            : "refreshed via direct runtime";
-      } else if (isProxyCurrent) {
-        const proxyAggregate = await buildProxyQuotaAggregate({
-          store: options.store,
-          includeWhenDisabled: true,
+      usageSourceLabel = "direct runtime";
+    } else if (result.matched_accounts.length === 1) {
+      const currentName = result.matched_accounts[0];
+      try {
+        const quotaResult = await options.store.refreshQuotaForAccount(currentName, {
+          allowCachedQuotaFallback: true,
         });
-        quota = proxyAggregate ? toCliQuotaSummary(proxyAggregate.summary) : null;
-        if (quota) {
-          usageSourceLabel = "refreshed via proxy aggregate";
-        } else {
-          usageUnavailableReason = "unavailable (proxy aggregate quota is unavailable)";
-        }
-      } else {
-        const currentName = result.matched_accounts[0];
-        const quotaResult = await options.store.refreshQuotaForAccount(currentName);
         const quotaList = await options.store.listQuotaSummaries();
         const matched =
           quotaList.accounts.find((account) => account.name === quotaResult.account.name) ?? null;
         quota = matched ? toCliQuotaSummary(matched) : null;
         if (quota) {
-          usageSourceLabel = "refreshed via api";
+          usageSourceLabel =
+            quota.refresh_status === "stale" ? "saved account cache" : "refreshed via api";
+        } else {
+          usageUnavailableReason = "unavailable (saved account quota is unavailable)";
         }
+      } catch (error) {
+        usageUnavailableReason = `unavailable (${(error as Error).message})`;
       }
+    } else if (result.matched_accounts.length > 1) {
+      usageUnavailableReason = "unavailable (current auth matches multiple managed accounts)";
+    } else {
+      usageUnavailableReason = "unavailable (direct runtime quota is unavailable)";
     }
   }
 
   options.debugLog(
-    `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"} source=${result.source} runtime_differs=${result.runtime_differs_from_local} refresh=${options.refresh} quota_refreshed=${quota !== null} quota_source=${usageSourceLabel ?? "none"}`,
+    `current: exists=${result.exists} managed=${result.managed} matched_accounts=${result.matched_accounts.length} auth_mode=${result.auth_mode ?? "null"} source=${result.source} runtime_differs=${result.runtime_differs_from_local} quota_present=${quota !== null} quota_source=${usageSourceLabel ?? "none"} quota_unavailable=${usageUnavailableReason ?? "none"}`,
   );
   if (options.json) {
     writeJson(
       options.stdout,
-      options.refresh || quota
+      quota
         ? {
             ...result,
             quota,
@@ -641,19 +627,13 @@ export async function handleCurrentCommand(options: {
     options.stdout.write(
       `${describeCurrentStatus(
         result,
-        options.refresh
+        result.exists || usageUnavailableReason
           ? {
               quota,
               unavailableReason: usageUnavailableReason,
               sourceLabel: usageSourceLabel ?? undefined,
             }
-          : quota
-            ? {
-                quota,
-                unavailableReason: usageUnavailableReason,
-                sourceLabel: usageSourceLabel ?? undefined,
-              }
-            : undefined,
+          : undefined,
       )}\n`,
     );
   }

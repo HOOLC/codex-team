@@ -39,7 +39,7 @@ Any compatible coding agent can install the same `skills/codexm-usage` path from
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.22
+  --ref v0.0.23
 ```
 
 Replace `--ref` with the release tag that matches your installed CLI version. Restart or reload your coding agent after installing the skill if it caches available skills.
@@ -156,7 +156,7 @@ This is the main command to use when deciding which account to switch to next.
 ### Inspect quota and status
 
 - `codexm`: open the interactive account dashboard when running in a TTY
-- `codexm current [--refresh]`: show the current account and optionally refresh quota
+- `codexm current`: show the current account plus best-effort quota
 - `codexm doctor`: diagnose local auth, runtime probes, and managed Desktop consistency
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: show saved accounts plus an embedded local usage summary
 - `codexm list --json`: machine-readable output, including proxy current-upstream metadata and last-upstream metadata when available

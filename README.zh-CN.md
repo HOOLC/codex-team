@@ -39,7 +39,7 @@ npm install -g codex-team
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.22
+  --ref v0.0.23
 ```
 
 请把 `--ref` 替换成与你安装的 CLI 版本对应的 release tag。如果你的 coding agent 会缓存已安装 skill，安装后请重启或重新加载它。
@@ -156,7 +156,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 ### 查看状态与 quota
 
 - `codexm`: 在交互式终端里直接打开账号面板
-- `codexm current [--refresh]`: 查看当前账号；可选刷新 quota
+- `codexm current`: 查看当前账号和尽力获取的 quota 摘要
 - `codexm doctor`: 诊断本地 auth、runtime 探测和托管 Desktop 一致性
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: 查看所有保存账号，并附带一行本地 usage 摘要
 - `codexm list --json`: 输出机器可读 JSON；包含 proxy 当前上游信息，以及有数据时最近一次上游命中信息

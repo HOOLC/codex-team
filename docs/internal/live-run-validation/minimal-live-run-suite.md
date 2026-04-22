@@ -43,7 +43,7 @@ Use this map to decide whether a README or `skills/codexm-usage` claim needs a c
 
 | Claim surface | Cases |
 | --- | --- |
-| `current`, `current --refresh`, `list`, `list --refresh`, `list --verbose`, `usage`, `doctor`, `completion` | `CLI-READ-01` |
+| `current`, `list`, `list --refresh`, `list --verbose`, `usage`, `doctor`, `completion` | `CLI-READ-01` |
 | account save/update/rename/protect/export/import/remove bundle flow | `CLI-ACCOUNT-01` |
 | `switch`, `switch --auto --dry-run`, overlay lifecycle, isolated `run --account` | `CLI-RUNTIME-01` |
 | shared daemon lifecycle, persisted feature state, `daemon restart`, `autoswitch`, `watch --no-auto-switch`, `proxy enable/disable/status/stop`, isolated `run --proxy` | `CLI-DAEMON-01` |
@@ -67,18 +67,17 @@ Use this map to decide whether a README or `skills/codexm-usage` claim needs a c
 - `Setup`: temp runtime with current auth; copy `~/.codex-team/accounts` if you want non-empty `list` output
 - `Operation path`:
   1. `"$CODEXM_BIN" current`
-  2. `"$CODEXM_BIN" current --refresh`
-  3. `"$CODEXM_BIN" current --json`
-  4. `"$CODEXM_BIN" list --refresh`
-  5. `"$CODEXM_BIN" list --verbose`
-  6. `"$CODEXM_BIN" list --json`
-  7. `"$CODEXM_BIN" usage --window 7d --json`
-  8. `"$CODEXM_BIN" doctor --json`
-  9. `"$CODEXM_BIN" completion zsh > "$TMP_ROOT/_codexm"`
-  10. `"$CODEXM_BIN" completion --accounts`
+  2. `"$CODEXM_BIN" current --json`
+  3. `"$CODEXM_BIN" list --refresh`
+  4. `"$CODEXM_BIN" list --verbose`
+  5. `"$CODEXM_BIN" list --json`
+  6. `"$CODEXM_BIN" usage --window 7d --json`
+  7. `"$CODEXM_BIN" doctor --json`
+  8. `"$CODEXM_BIN" completion zsh > "$TMP_ROOT/_codexm"`
+  9. `"$CODEXM_BIN" completion --accounts`
 - `Validation points`:
   - every command exits `0`
-  - `current`, `current --refresh`, and `list` identify the same effective current account when the temp store has a managed current account
+  - `current` and `list` identify the same effective current account when the temp store has a managed current account
   - `list --refresh` does not regress the normal `list` rendering contract while still queuing the background auth refresh path
   - `list --verbose` exposes the score-breakdown columns described in README/usage without corrupting the base list ordering
   - `list --json` includes stable row metadata and does not drop the synthetic `proxy` row unexpectedly

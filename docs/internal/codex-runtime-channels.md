@@ -92,18 +92,20 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 ### 3.1 `current`
 
-`current` 保持 **Desktop 优先**。
+`current` 继续把 **当前活体身份** 保持为 Desktop 优先，但 **quota** 不再走 Desktop MCP 优先。
 
-原因：
+原因拆成两层：
 
-- 这个命令的语义更接近“当前这台受管 Desktop 里正在跑的 runtime 是谁”
-- 如果 Desktop 还没 reload 完，direct client 读到的只是磁盘 auth 对应的新 runtime，不一定等于用户眼前的 Desktop
+- 这个命令的身份语义仍然更接近“当前这台受管 Desktop 里正在跑的 runtime 是谁”，所以账号身份继续优先读 Desktop bridge，再回退到 direct client。
+- quota 数字则更适合走稳定的一次性读取，不应该再绑定 Desktop 页面是否正好可读、是否已经 reload 完。
 
-因此优先级是：
+因此 `current` 现在分成两段：
 
-1. 受管 Desktop 可用时，先读 Desktop bridge
-2. Desktop 不可用，或 bridge 读取失败时，回退到 direct client
-3. 如果这两条都失败，再由更上层决定是否继续回退到本地/usage API
+1. **账号身份**：受管 Desktop 可用时先读 Desktop bridge；Desktop 不可用或 bridge 读取失败时回退到 direct client。
+2. **quota**：
+   - synthetic `proxy` 当前账号时，读 proxy aggregate
+   - 其他账号时，先读 direct client 的 `account/rateLimits/read`
+   - direct quota 不可用且当前账号唯一匹配某个托管账号时，再回退到保存快照的 quota refresh / stale cache
 
 ### 3.2 `watch`
 
@@ -126,7 +128,7 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 这两个动作都是 Desktop 运行态动作，不是一次性读取动作。
 
-另外，受管 Desktop refresh 不只会失效 quota 相关 query；当当前账号是 synthetic proxy auth 时，还会直接 seed Desktop usage/account 相关的 renderer query cache，包括 `["vscode", "account-info"]`、`["rate-limit-status"]` 和 `["accounts", "check"]`，这样 plan / usage 相关菜单不会继续卡在旧 error 或 `null` 状态。这个步骤不依赖页面 reload；`switch` 仍会在需要让 app-server 重新读取本地 auth/config 时走 app-server restart。
+另外，受管 Desktop refresh 现在只保留 app-server restart 这条最小必要路径，不再做 renderer query cache seed、invalidate 或 refetch 注入。
 
 ### 3.4 后续 `doctor`
 
@@ -160,7 +162,7 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 - `RuntimeAccountSnapshot`
 - `RuntimeQuotaSnapshot`
 - `readCurrentRuntimeAccountResult()`
-- `readCurrentRuntimeQuotaResult()`
+- `readDirectRuntimeQuota()`
 - `RuntimeReadSource`
 - `RuntimeReadResult<T>`
 
@@ -171,13 +173,12 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 - `readManagedCurrentAccount()`
 - `readManagedCurrentQuota()`
 - `readCurrentRuntimeAccount()`
-- `readCurrentRuntimeQuota()`
 
 语义分别是：
 
 - `readManagedCurrent*`：Desktop-only，给 `watch` / `switch` 这类必须绑定 Desktop 活体状态的逻辑使用
-- `readCurrentRuntime*Result`：Desktop 优先，direct fallback，并显式返回来源
-- `readCurrentRuntime*`：只是对 `readCurrentRuntime*Result` 的无来源简化包装
+- `readCurrentRuntimeAccount*`：Desktop 优先，direct fallback，并显式返回来源
+- `readDirectRuntimeQuota()`：只读 direct client quota，给 `current` / `doctor` 这类稳定一次性 quota 读取使用
 
 ## 5. 维护边界
 
@@ -195,7 +196,7 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 当前仓库里的稳定边界就是：
 
-- `current`：Desktop 优先，direct fallback
+- `current`：账号身份 Desktop 优先，quota direct / proxy 优先
 - `watch`：Desktop only
 - `switch`：Desktop only
 - `doctor`：direct 优先，Desktop 只做补充一致性检查

@@ -31,8 +31,7 @@
   "completionAccountCommands": ["launch", "list", "protect", "remove", "rename", "switch", "unprotect"],
   "notes": [
     "In an interactive terminal, running plain codexm opens the account dashboard; use \"codexm tui [query]\" for an explicit entry or initial filter.",
-    "codexm current shows live usage when a managed Codex Desktop session is available.",
-    "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
+    "codexm current keeps the live runtime identity and shows best-effort quota from the proxy aggregate, direct runtime, or the saved managed snapshot.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
     "codexm list refreshes quota data, shows the current managed account, marks current rows with \"*\", and marks the configured proxy upstream row with \"@\" while proxy mode is enabled; if refresh fails it can reuse the account-scoped last good quota snapshot for up to 7 days and tag the row as stale; use --refresh to ensure a background auth refresh and --verbose to expand score inputs.",
     "codexm launch starts Codex Desktop on macOS and ensures the shared background daemon is running.",
@@ -46,10 +45,10 @@
   "commands": [
     {
       "name": "current",
-      "flags": ["--json", "--refresh"],
-      "helpUsages": ["codexm current [--refresh] [--json]"],
+      "flags": ["--json"],
+      "helpUsages": ["codexm current [--json]"],
       "usageErrors": {
-        "default": "codexm current [--refresh] [--json]"
+        "default": "codexm current [--json]"
       }
     },
     {
@@ -125,13 +124,7 @@
       "name": "daemon",
       "flags": ["--json", "--host", "--port"],
       "completionSubcommands": ["start", "restart", "status", "stop"],
-      "helpUsages": [
-        "codexm daemon <start|restart|status|stop> [--json]",
-        "codexm daemon start [--json]",
-        "codexm daemon restart [--json]",
-        "codexm daemon status [--json]",
-        "codexm daemon stop [--json]"
-      ],
+      "helpUsages": ["codexm daemon <start|restart|status|stop> [--json]"],
       "usageErrors": {
         "default": "codexm daemon <start|restart|status|stop> [--json]"
       }
@@ -140,12 +133,7 @@
       "name": "autoswitch",
       "flags": ["--json"],
       "completionSubcommands": ["enable", "disable", "status"],
-      "helpUsages": [
-        "codexm autoswitch <enable|disable|status> [--json]",
-        "codexm autoswitch enable [--json]",
-        "codexm autoswitch disable [--json]",
-        "codexm autoswitch status [--json]"
-      ],
+      "helpUsages": ["codexm autoswitch <enable|disable|status> [--json]"],
       "usageErrors": {
         "default": "codexm autoswitch <enable|disable|status> [--json]"
       }
@@ -154,13 +142,7 @@
       "name": "proxy",
       "flags": ["--dry-run", "--force", "--json", "--host", "--port"],
       "completionSubcommands": ["enable", "disable", "status", "stop"],
-      "helpUsages": [
-        "codexm proxy <enable|disable|status|stop> [--json]",
-        "codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]",
-        "codexm proxy status [--json]",
-        "codexm proxy stop [--json]",
-        "codexm proxy disable [--force] [--json]"
-      ],
+      "helpUsages": ["codexm proxy <enable|disable|status|stop> [--json]"],
       "usageErrors": {
         "default": "codexm proxy <enable|disable|status|stop> [--json]"
       }
@@ -185,12 +167,7 @@
       "name": "overlay",
       "flags": ["--json", "--owner-pid"],
       "completionSubcommands": ["create", "delete", "gc"],
-      "helpUsages": [
-        "codexm overlay <create|delete|gc> ...",
-        "codexm overlay create <name> [--owner-pid <pid>] [--json]",
-        "codexm overlay delete <run-id|path> [--json]",
-        "codexm overlay gc [--json]"
-      ],
+      "helpUsages": ["codexm overlay <create|delete|gc> ..."],
       "usageErrors": {
         "default": "codexm overlay <create|delete|gc> ...",
         "create": "codexm overlay create <name> [--owner-pid <pid>] [--json]",
@@ -369,10 +346,10 @@
             }
           },
           {
-            "usage": "codexm current [--refresh]",
+            "usage": "codexm current",
             "description": {
-              "en": "show the current account and optionally refresh quota",
-              "zh-CN": "查看当前账号；可选刷新 quota"
+              "en": "show the current account plus best-effort quota",
+              "zh-CN": "查看当前账号和尽力获取的 quota 摘要"
             }
           },
           {

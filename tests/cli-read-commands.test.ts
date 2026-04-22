@@ -180,28 +180,31 @@ describe("CLI Read Commands", () => {
         stderr: stderr.stream,
       });
 
-      expect(exitCode).toBe(0);
+    expect(exitCode).toBe(0);
       return stdout.read();
     })();
 
     expect(output).toContain("codexm --version");
+    expect(output).toContain("codexm current [--json]");
     expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm list [name] [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--json]");
     expect(output).toContain("codexm daemon <start|restart|status|stop> [--json]");
-    expect(output).toContain("codexm daemon restart [--json]");
     expect(output).toContain("codexm autoswitch <enable|disable|status> [--json]");
     expect(output).toContain("codexm protect <name> [--json]");
     expect(output).toContain("codexm unprotect <name> [--json]");
     expect(output).toContain("codexm overlay <create|delete|gc> ...");
     expect(output).toContain("codexm watch [--no-auto-switch]");
     expect(output).toContain("codexm proxy <enable|disable|status|stop> [--json]");
-    expect(output).toContain("codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]");
-    expect(output).toContain("codexm proxy disable [--force] [--json]");
     expect(output).toContain("codexm tui [query]");
     expect(output).toContain("codexm run [--account <name>|--proxy] [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
+    expect(output).not.toContain("codexm current [--refresh] [--json]");
+    expect(output).not.toContain("codexm daemon restart [--json]");
+    expect(output).not.toContain("codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]");
+    expect(output).not.toContain("codexm proxy disable [--force] [--json]");
+    expect(output).not.toContain("codexm overlay create <name> [--owner-pid <pid>] [--json]");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(output).toContain("Command aliases: ls=list");
     expect(output).toContain(
@@ -600,7 +603,7 @@ run_case daemon-flags codexm daemon --
     }
   });
 
-  test("current best-effort shows Desktop runtime usage when available", async () => {
+  test("current best-effort uses direct runtime usage when available", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -638,6 +641,22 @@ run_case daemon-flags codexm daemon --
             },
             fetched_at: "2026-04-08T13:28:00.000Z",
           }),
+          readDirectRuntimeQuota: async () => ({
+            plan_type: "plus",
+            credits_balance: 11,
+            unlimited: false,
+            five_hour: {
+              used_percent: 9,
+              window_seconds: 18_000,
+              reset_at: "2026-03-18T21:17:21.000Z",
+            },
+            one_week: {
+              used_percent: 31,
+              window_seconds: 604_800,
+              reset_at: "2026-03-19T03:14:00.000Z",
+            },
+            fetched_at: "2026-04-08T13:28:00.000Z",
+          }),
         }),
         stdout: stdout.stream,
         stderr: captureWritable().stream,
@@ -647,7 +666,7 @@ run_case daemon-flags codexm daemon --
       const output = stdout.read();
       expect(output).toContain("Source: managed Desktop runtime (mcp + auth.json)");
       expect(output).toContain("Managed account: current-live");
-      expect(output).toContain("Usage: available | 5H 12% used | 1W 47% used | live Desktop runtime");
+      expect(output).toContain("Usage: available | 5H 9% used | 1W 31% used | direct runtime");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -931,7 +950,7 @@ run_case daemon-flags codexm daemon --
     }
   });
 
-  test("current --refresh shows a one-line usage summary for the current managed account", async () => {
+  test("current falls back to the saved managed quota refresh when direct runtime quota is unavailable", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -974,10 +993,10 @@ run_case daemon-flags codexm daemon --
       });
 
       const stdout = captureWritable();
-      const exitCode = await runCli(["current", "--refresh"], {
+      const exitCode = await runCli(["current"], {
         store,
         desktopLauncher: createDesktopLauncherStub({
-          readManagedCurrentQuota: async () => null,
+          readDirectRuntimeQuota: async () => null,
         }),
         stdout: stdout.stream,
         stderr: captureWritable().stream,
@@ -992,7 +1011,7 @@ run_case daemon-flags codexm daemon --
     }
   });
 
-  test("current --refresh prefers managed MCP quota over the usage API", async () => {
+  test("current prefers direct runtime quota over the saved managed quota refresh fallback", async () => {
     const homeDir = await createTempHome();
     let fetchCalled = false;
 
@@ -1011,10 +1030,10 @@ run_case daemon-flags codexm daemon --
       });
 
       const stdout = captureWritable();
-      const exitCode = await runCli(["current", "--refresh"], {
+      const exitCode = await runCli(["current"], {
         store,
         desktopLauncher: createDesktopLauncherStub({
-          readManagedCurrentQuota: async () => ({
+          readDirectRuntimeQuota: async () => ({
             plan_type: "plus",
             credits_balance: 11,
             unlimited: false,
@@ -1037,15 +1056,13 @@ run_case daemon-flags codexm daemon --
 
       expect(exitCode).toBe(0);
       expect(fetchCalled).toBe(false);
-      expect(stdout.read()).toContain(
-        "Usage: available | 5H 9% used | 1W 31% used | refreshed via Desktop runtime",
-      );
+      expect(stdout.read()).toContain("Usage: available | 5H 9% used | 1W 31% used | direct runtime");
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("current --refresh shows proxy aggregate usage for the synthetic proxy auth", async () => {
+  test("current shows proxy aggregate usage for the synthetic proxy auth", async () => {
     const homeDir = await createTempHome();
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
 
@@ -1094,10 +1111,10 @@ run_case daemon-flags codexm daemon --
       );
 
       const stdout = captureWritable();
-      const exitCode = await runCli(["current", "--refresh"], {
+      const exitCode = await runCli(["current"], {
         store,
         desktopLauncher: createDesktopLauncherStub({
-          readManagedCurrentQuota: async () => null,
+          readDirectRuntimeQuota: async () => null,
         }),
         stdout: stdout.stream,
         stderr: captureWritable().stream,
@@ -1107,14 +1124,14 @@ run_case daemon-flags codexm daemon --
       const output = stdout.read();
       expect(output).toContain("Managed account: proxy");
       expect(output).toContain(
-        "Usage: available | 5H 12% used | 1W 47% used | refreshed via proxy aggregate",
+        "Usage: available | 5H 12% used | 1W 47% used | proxy aggregate",
       );
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("current --refresh --json includes refreshed quota data", async () => {
+  test("current --json includes quota data from the saved managed quota refresh fallback", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -1157,10 +1174,10 @@ run_case daemon-flags codexm daemon --
       });
 
       const stdout = captureWritable();
-      const exitCode = await runCli(["current", "--refresh", "--json"], {
+      const exitCode = await runCli(["current", "--json"], {
         store,
         desktopLauncher: createDesktopLauncherStub({
-          readManagedCurrentQuota: async () => null,
+          readDirectRuntimeQuota: async () => null,
         }),
         stdout: stdout.stream,
         stderr: captureWritable().stream,

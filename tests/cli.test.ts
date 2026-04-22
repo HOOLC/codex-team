@@ -1946,6 +1946,28 @@ describe("CLI", () => {
     }
   });
 
+  test("errors when current is passed the removed --refresh flag", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["current", "--refresh"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('Unknown flag "--refresh" for command "current".');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("refreshes quota automatically after switch", async () => {
     const homeDir = await createTempHome();
 

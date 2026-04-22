@@ -224,7 +224,6 @@ export async function runCli(
           stdout: streams.stdout,
           debugLog,
           json,
-          refresh: parsed.flags.has("--refresh"),
         });
       }
 
