@@ -45,16 +45,16 @@ Detailed design notes live in `docs/internal/`.
 
 - For user-visible CLI behavior changes, run `pnpm typecheck` and `pnpm test`.
 - Do not add unit tests whose only purpose is to assert static configuration, constant mappings, package script strings, generated README/spec synchronization, or copied implementation snippets. Prefer behavior-level tests or build/generation checks.
-- Automated tests and real self-tests must run against cloned temporary runtime state. Never point them at the operator's real `~/.codex` auth/config/store, live Codex TUI sessions, or live Codex Desktop processes.
+- Automated tests and live-run validation must run against cloned temporary runtime state. Never point them at the operator's real `~/.codex` auth/config/store, live Codex TUI sessions, or live Codex Desktop processes.
 - Prefer copying only the runtime artifacts needed for the scenario into a temp `HOME` or temp workdir, then use env overrides to exercise the real CLI against that clone.
-- Real self-tests may use live ChatGPT/OpenAI services and auth when needed, but must not write to the operator's local session/thread data or interfere with existing CLI, TUI, or Desktop instances. Use a temp `HOME`, isolated `CODEX_HOME`, or codexm overlay so generated sessions, logs, sockets, and auth/config writes stay outside the live runtime.
-- For user-visible CLI, TUI, proxy, daemon, watch, run, share-bundle, or Desktop behavior changes, run the smallest relevant real self-test subset from `docs/internal/real-self-tests/` before pushing or updating a PR. This is not required for every inner-loop development iteration.
+- Live-run validation may use live ChatGPT/OpenAI services and auth when needed, but must not write to the operator's local session/thread data or interfere with existing CLI, TUI, or Desktop instances. Use a temp `HOME`, isolated `CODEX_HOME`, or codexm overlay so generated sessions, logs, sockets, and auth/config writes stay outside the live runtime.
+- For user-visible CLI, TUI, proxy, daemon, watch, run, share-bundle, or Desktop behavior changes, run the smallest relevant live-run validation subset from `docs/internal/live-run-validation/` before pushing or updating a PR. This is not required for every inner-loop development iteration.
 - Verification must cover resource and lifecycle hygiene, not just happy-path assertions. Explicitly watch for idle busy-loops and CPU/memory/IO spikes; check graceful quit and forced-interrupt paths; and confirm timers, workers, child processes, fs watchers, sockets, lockfiles, temp files, raw-mode/alt-screen state, and cloned runtime directories are released after success, failure, or cancellation.
 
 ## References
 
 - `docs/internal/codex-runtime-channels.md`
-- `docs/internal/real-self-tests/README.md`
+- `docs/internal/live-run-validation/overview.md`
 
 ## User Docs
 

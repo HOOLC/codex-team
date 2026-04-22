@@ -235,7 +235,7 @@ pnpm test
 pnpm build
 ```
 
-真实自测可以在需要时调用线上 ChatGPT/OpenAI 服务，但必须使用临时 `HOME`、隔离 `CODEX_HOME` 或 codexm overlay，避免写入本地真实 threads、sessions、auth/config、socket，也不能干扰正在运行的 CLI/TUI/Desktop 实例。
+实际运行验证可以在需要时调用线上 ChatGPT/OpenAI 服务，但必须使用临时 `HOME`、隔离 `CODEX_HOME` 或 codexm overlay，避免写入本地真实 threads、sessions、auth/config、socket，也不能干扰正在运行的 CLI/TUI/Desktop 实例。
 
 ## License
 

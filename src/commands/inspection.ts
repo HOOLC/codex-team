@@ -827,6 +827,7 @@ export async function handleListCommand(options: {
     options.stdout.write(
       `${describeQuotaRefresh(displayResult, current, {
         verbose: options.verbose,
+        terminalWidth: options.stdout.isTTY ? options.stdout.columns : null,
         etaByName,
         usageLine,
         daemonFeatureLine: describeDaemonFeatureLine(daemonStatus),

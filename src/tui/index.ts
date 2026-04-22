@@ -506,16 +506,16 @@ function getWideColumnWidths(
     return [currentWidth + appliedGrowth, desiredGrowth - appliedGrowth];
   };
 
-  [planWidth] = consumeGrowth(planWidth, desiredFixedGrowths.planWidth);
-  [scoreWidth] = consumeGrowth(scoreWidth, desiredFixedGrowths.scoreWidth);
-  [fiveHourWidth] = consumeGrowth(fiveHourWidth, desiredFixedGrowths.fiveHourWidth);
-  [oneWeekWidth] = consumeGrowth(oneWeekWidth, desiredFixedGrowths.oneWeekWidth);
-  [resetWidth] = consumeGrowth(resetWidth, desiredFixedGrowths.resetWidth);
-
   const nameGrowth = Math.max(0, desiredNameWidth - nameWidth);
   const appliedNameGrowth = Math.min(remainingFlexibleWidth, nameGrowth);
   nameWidth += appliedNameGrowth;
   remainingFlexibleWidth -= appliedNameGrowth;
+
+  [scoreWidth] = consumeGrowth(scoreWidth, desiredFixedGrowths.scoreWidth);
+  [fiveHourWidth] = consumeGrowth(fiveHourWidth, desiredFixedGrowths.fiveHourWidth);
+  [oneWeekWidth] = consumeGrowth(oneWeekWidth, desiredFixedGrowths.oneWeekWidth);
+  [resetWidth] = consumeGrowth(resetWidth, desiredFixedGrowths.resetWidth);
+  [planWidth] = consumeGrowth(planWidth, desiredFixedGrowths.planWidth);
 
   const identityGrowth = Math.max(0, desiredIdentityWidth - identityWidth);
   const appliedIdentityGrowth = Math.min(remainingFlexibleWidth, identityGrowth);
@@ -920,15 +920,19 @@ function renderCompactListRow(
   width: number,
   showEtaColumn: boolean,
 ): string[] {
-  const includePlan = width >= 64 && account.planLabel !== "";
-  const includeIdentity = width >= 64 && account.identityLabel !== "";
-  const includeReset = width >= 58;
-  const firstFixedWidth =
-    formatAccountListMarkers({ selected: false }).length +
-    (includePlan ? 1 + WIDE_PLAN_MAX_WIDTH : 0) +
-    1 + WIDE_SCORE_MAX_WIDTH +
-    (showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0);
-  const nameWidth = Math.max(8, width - firstFixedWidth);
+  const markersWidth = formatAccountListMarkers({ selected: false }).length;
+  const scoreWidth = visibleWidth(account.scoreLabel);
+  const etaWidth = showEtaColumn ? visibleWidth(account.etaLabel) : 0;
+  const planWidth = account.planLabel === ""
+    ? 0
+    : Math.min(WIDE_PLAN_MAX_WIDTH, visibleWidth(account.planLabel));
+  const minimumNameWidth = 10;
+  const reservedCoreWidth = markersWidth + 1 + scoreWidth + (showEtaColumn ? 1 + etaWidth : 0) + minimumNameWidth;
+  const includePlan = account.planLabel !== "" && width - reservedCoreWidth >= 1 + planWidth;
+  const nameWidth = Math.max(
+    8,
+    width - markersWidth - 1 - scoreWidth - (showEtaColumn ? 1 + etaWidth : 0) - (includePlan ? 1 + planWidth : 0),
+  );
   const displayName = displayAccountName(account);
   const markers = formatAccountListMarkers({
     selected,
@@ -938,19 +942,29 @@ function renderCompactListRow(
   const firstLine = [
     markers,
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
-    includePlan ? ` ${padEndVisible(truncate(account.planLabel, WIDE_PLAN_MAX_WIDTH), WIDE_PLAN_MAX_WIDTH)}` : "",
+    includePlan ? ` ${padEndVisible(truncate(account.planLabel, planWidth), planWidth)}` : "",
     " ",
-    padStartVisible(account.scoreLabel, WIDE_SCORE_MAX_WIDTH),
-    showEtaColumn ? ` ${padStartVisible(account.etaLabel, WIDE_ETA_WIDTH)}` : "",
+    padStartVisible(account.scoreLabel, scoreWidth),
+    showEtaColumn ? ` ${padStartVisible(account.etaLabel, etaWidth)}` : "",
   ].join("");
 
-  const secondSegments = [
-    includeIdentity ? compactIdentity(account.identityLabel, Math.max(8, Math.min(24, Math.floor(width / 3)))) : null,
-    `5H ${account.fiveHourLabel}`,
-    `1W ${account.oneWeekLabel}`,
-    includeReset ? account.nextResetLabel : null,
-  ].filter((segment): segment is string => segment !== null);
-  const secondLine = `    ${truncate(secondSegments.join(" | "), Math.max(0, width - 4))}`;
+  const secondLineIndent = " ".repeat(markersWidth);
+  const secondLineWidth = Math.max(0, width - markersWidth);
+  const secondSegments = [`5H ${account.fiveHourLabel}`, `1W ${account.oneWeekLabel}`];
+  if (
+    account.nextResetLabel !== "-"
+    && visibleWidth([...secondSegments, account.nextResetLabel].join(" | ")) <= secondLineWidth
+  ) {
+    secondSegments.push(account.nextResetLabel);
+  }
+  const identityWidth = Math.min(
+    24,
+    Math.max(0, secondLineWidth - visibleWidth(secondSegments.join(" | ")) - 3),
+  );
+  if (account.identityLabel !== "" && identityWidth >= 8) {
+    secondSegments.push(compactIdentity(account.identityLabel, identityWidth));
+  }
+  const secondLine = `${secondLineIndent}${truncate(secondSegments.join(" | "), secondLineWidth)}`;
 
   return [
     styleListLine(firstLine, account, selected),

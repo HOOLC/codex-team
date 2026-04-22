@@ -807,6 +807,33 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("27%");
   });
 
+  test("shows next reset before plan and identity in compact list mode when width is tight", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.accounts[1] = {
+      ...snapshot.accounts[1]!,
+      planLabel: "prolite",
+      identityLabel: "acct-beta-very-long:user-beta-very-long",
+      nextResetLabel: "04-16 18:10",
+    };
+
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot,
+        state: {
+          ...createInitialAccountDashboardState("beta@example.com"),
+          selected: 1,
+        },
+        width: 56,
+        height: 24,
+      }),
+    );
+
+    expect(screen).toContain("prolite 64% 3.5h");
+    expect(screen).toContain("5H 36% | 1W 27% | 04-16 18:10");
+    expect(screen).toContain("acct-beta-v..ong");
+    expect(screen).not.toContain("acct-beta-very-long:user-beta-very-long");
+  });
+
   test("hides the trend line on shorter terminals while keeping the usage summary", () => {
     const screen = stripAnsi(
       renderAccountDashboardScreen({

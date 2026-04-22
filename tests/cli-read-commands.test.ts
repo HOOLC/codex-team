@@ -2370,6 +2370,86 @@ wire_api = "responses"
     }
   });
 
+  test("list fits quota table columns into the tty width budget", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedWatchHistory(homeDir, "very-long-primary-account-name");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const isPrimary = accountId === "acct-cli-budget-primary";
+          return jsonResponse({
+            plan_type: isPrimary ? "plus" : "prolite",
+            rate_limit: {
+              primary_window: {
+                used_percent: isPrimary ? 24 : 61,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: isPrimary ? 1_200 : 2_400,
+                reset_at: isPrimary ? 1_773_868_641 : 1_773_873_200,
+              },
+              secondary_window: {
+                used_percent: isPrimary ? 43 : 18,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-budget-primary");
+      await runCli(["save", "very-long-primary-account-name", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-budget-backup");
+      await runCli(["save", "backup-prolite-account", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      listStdout.stream.isTTY = true;
+      listStdout.stream.columns = 72;
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+      const output = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = output.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME") && line.includes("NEXT RESET"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 5);
+      const primaryRow = tableLines.find((line) => line.includes("very-long"));
+
+      expect(tableStartIndex).toBeGreaterThanOrEqual(0);
+      expect(tableLines.every((line) => line.length <= 72)).toBe(true);
+      expect(primaryRow).toBeDefined();
+      expect(primaryRow).toContain("very-long");
+      expect(primaryRow).not.toContain("very-long-primary-account-name");
+      expect(tableLines[0]).toContain("NEXT RESET");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("list shows no ETA for accounts that are already unavailable", async () => {
     const homeDir = await createTempHome();
 

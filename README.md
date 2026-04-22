@@ -236,7 +236,7 @@ pnpm test
 pnpm build
 ```
 
-Real self-tests may call live ChatGPT/OpenAI services when needed, but must use a temp `HOME`, isolated `CODEX_HOME`, or codexm overlay so local threads, sessions, auth/config, sockets, and live CLI/TUI/Desktop instances are not modified.
+Live-run validation may call live ChatGPT/OpenAI services when needed, but must use a temp `HOME`, isolated `CODEX_HOME`, or codexm overlay so local threads, sessions, auth/config, sockets, and live CLI/TUI/Desktop instances are not modified.
 
 ## License
 
