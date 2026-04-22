@@ -40,6 +40,7 @@ export function createDesktopLauncherStub(overrides: Partial<{
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
   clearManagedState: () => Promise<void>;
   isManagedDesktopRunning: () => Promise<boolean>;
+  readManagedLaunchApiBaseUrl: () => Promise<string | null | undefined>;
   readDirectRuntimeAccount: () => Promise<RuntimeAccountSnapshot | null>;
   readDirectRuntimeQuota: () => Promise<RuntimeQuotaSnapshot | null>;
   readCurrentRuntimeAccountResult: () => Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null>;
@@ -109,6 +110,7 @@ export function createDesktopLauncherStub(overrides: Partial<{
     readManagedState: overrides.readManagedState ?? (async () => null),
     clearManagedState: overrides.clearManagedState ?? (async () => undefined),
     isManagedDesktopRunning: overrides.isManagedDesktopRunning ?? (async () => false),
+    readManagedLaunchApiBaseUrl: overrides.readManagedLaunchApiBaseUrl ?? (async () => undefined),
     readDirectRuntimeAccount:
       overrides.readDirectRuntimeAccount
       ?? overrides.readCurrentRuntimeAccount

@@ -89,6 +89,7 @@ export interface CodexDesktopLauncher {
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;
   isManagedDesktopRunning(): Promise<boolean>;
+  readManagedLaunchApiBaseUrl(): Promise<string | null | undefined>;
   readDirectRuntimeAccount(): Promise<RuntimeAccountSnapshot | null>;
   readDirectRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null>;
   readCurrentRuntimeAccountResult(): Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null>;

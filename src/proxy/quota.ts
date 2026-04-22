@@ -128,6 +128,48 @@ function toWatchWindowSnapshot(
   };
 }
 
+function buildEmptyProxyQuotaAggregate(accounts: AccountQuotaSummary[]): ProxyQuotaAggregate {
+  const fetchedAt = accounts
+    .map((account) => account.fetched_at)
+    .filter((value): value is string => typeof value === "string" && value !== "")
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+  const hasEligibleAccounts = accounts.some((account) => account.auto_switch_eligible !== false);
+  const summary: AccountQuotaSummary = {
+    name: PROXY_ACCOUNT_NAME,
+    account_id: PROXY_ACCOUNT_ID,
+    user_id: PROXY_USER_ID,
+    identity: PROXY_IDENTITY,
+    auto_switch_eligible: true,
+    plan_type: PROXY_PLAN_TYPE,
+    credits_balance: null,
+    status: "stale",
+    fetched_at: fetchedAt,
+    error_message: accounts.length === 0
+      ? "proxy pool has no saved accounts yet"
+      : hasEligibleAccounts
+        ? "proxy pool has no quota snapshots yet"
+        : "proxy pool has no eligible accounts yet",
+    unlimited: true,
+    five_hour: null,
+    one_week: null,
+  };
+
+  return {
+    displayProfile: {
+      fiveHourCapacityInPlusUnits: null,
+      oneWeekCapacityInPlusUnits: null,
+      fiveHourToOneWeekRawRatio: null,
+    },
+    summary,
+    watchEtaTarget: {
+      plan_type: PROXY_PLAN_TYPE,
+      available: computeAvailability(summary),
+      five_hour: null,
+      one_week: null,
+    },
+  };
+}
+
 function resolveWindowCapacityInPlusUnits(
   key: "five_hour" | "one_week",
   planType: string | null,
@@ -403,7 +445,20 @@ export async function buildProxyQuotaAggregate(options: {
   }
 
   const { accounts } = await options.store.listQuotaSummaries();
-  return buildProxyQuotaAggregateFromAccounts(accounts);
+  const aggregate = buildProxyQuotaAggregateFromAccounts(accounts);
+  if (aggregate) {
+    return aggregate;
+  }
+
+  const hasProxyPoolCandidates = accounts.some((account) =>
+    account.auto_switch_eligible !== false
+    && (account.user_id !== null || account.plan_type !== null || account.unlimited)
+  );
+  if (state?.enabled === true || hasProxyPoolCandidates) {
+    return buildEmptyProxyQuotaAggregate(accounts);
+  }
+
+  return null;
 }
 
 export async function buildProxyUsagePayloadForStore(store: AccountStore): Promise<ProxyUsagePayload> {

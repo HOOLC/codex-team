@@ -1,5 +1,5 @@
 import { createDaemonProcessManager } from "../daemon/process.js";
-import { defaultDaemonState, writeDaemonState } from "../daemon/state.js";
+import { defaultDaemonState } from "../daemon/state.js";
 import {
   DEFAULT_PROXY_HOST,
   DEFAULT_PROXY_PORT,
@@ -16,11 +16,6 @@ export interface ProxyProcessManager {
   }): Promise<ProxyProcessState>;
   getStatus(): Promise<ProxyStatus>;
   stop(): Promise<{
-    running: boolean;
-    state: ProxyProcessState | null;
-    stopped: boolean;
-  }>;
-  disable(): Promise<{
     running: boolean;
     state: ProxyProcessState | null;
     stopped: boolean;
@@ -126,56 +121,9 @@ export function createProxyProcessManager(codexTeamDir: string): ProxyProcessMan
     };
   }
 
-  async function disable(): Promise<{
-    running: boolean;
-    state: ProxyProcessState | null;
-    stopped: boolean;
-  }> {
-    const status = await getStatus();
-    const daemonStatus = await daemonProcessManager.getStatus();
-    const state = status.state ?? await readProxyState(codexTeamDir);
-    const current = daemonStatus.state ?? defaultDaemonState(codexTeamDir);
-
-    if (daemonStatus.running && daemonStatus.state) {
-      await daemonProcessManager.ensureConfig({
-        stayalive: daemonStatus.state.stayalive,
-        watch: daemonStatus.state.watch,
-        auto_switch: daemonStatus.state.watch ? daemonStatus.state.auto_switch : false,
-        proxy: false,
-        host: daemonStatus.state.host,
-        port: daemonStatus.state.port,
-        debug: daemonStatus.state.debug,
-        base_url: daemonStatus.state.base_url,
-        openai_base_url: daemonStatus.state.openai_base_url,
-      });
-    } else {
-      await writeDaemonState(codexTeamDir, {
-        ...current,
-        pid: 0,
-        started_at: "",
-        proxy: false,
-      });
-    }
-
-    if (state) {
-      await writeProxyState(codexTeamDir, {
-        ...state,
-        pid: 0,
-        enabled: false,
-      });
-    }
-
-    return {
-      running: false,
-      state,
-      stopped: status.running,
-    };
-  }
-
   return {
     startDetached,
     getStatus,
     stop,
-    disable,
   };
 }

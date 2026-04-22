@@ -20,6 +20,7 @@ import {
   isManagedDesktopProcess,
   launchManagedDesktopProcess,
   pathExistsViaStat,
+  readProcessEnvironmentVariable,
   readProcessParentAndCommand,
   type LaunchProcessLike,
 } from "./process.js";
@@ -300,6 +301,24 @@ export function createCodexDesktopLauncher(options: {
 
     const runningApps = await listRunningApps();
     return isManagedDesktopProcess(runningApps, state);
+  }
+
+  async function readManagedLaunchApiBaseUrl(): Promise<string | null | undefined> {
+    try {
+      const state = await readManagedState();
+      if (!state) {
+        return undefined;
+      }
+
+      const runningApps = await listRunningApps();
+      if (!isManagedDesktopProcess(runningApps, state)) {
+        return undefined;
+      }
+
+      return await readProcessEnvironmentVariable(execFileImpl, state.pid, "CODEX_API_BASE_URL");
+    } catch {
+      return undefined;
+    }
   }
 
   async function readDesktopRuntimeSnapshot<TSnapshot>(
@@ -851,6 +870,7 @@ export function createCodexDesktopLauncher(options: {
     writeManagedState,
     clearManagedState,
     isManagedDesktopRunning,
+    readManagedLaunchApiBaseUrl,
     readDirectRuntimeAccount,
     readDirectRuntimeQuota,
     readCurrentRuntimeAccountResult,

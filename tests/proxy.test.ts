@@ -80,15 +80,6 @@ function createProxyProcessManagerStub(overrides: Partial<{
           stopped: wasRunning,
         };
       },
-      disable: async () => {
-        const wasRunning = running;
-        running = false;
-        return {
-          running: false,
-          state: wasRunning ? state : null,
-          stopped: wasRunning,
-        };
-      },
     },
   };
 }
@@ -357,7 +348,23 @@ describe("codexm proxy", () => {
         ok: true,
         action: "proxy.disable",
         enabled: false,
-        stopped: true,
+        running: true,
+        base_url: "http://127.0.0.1:14555/backend-api",
+      });
+      const statusStdout = captureWritable();
+      const statusCode = await runCli(["proxy", "status", "--json"], {
+        store,
+        stdout: statusStdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+      expect(statusCode).toBe(0);
+      expect(JSON.parse(statusStdout.read())).toMatchObject({
+        ok: true,
+        action: "proxy.status",
+        enabled: false,
+        running: true,
       });
       const restoredAuth = await readCurrentAuth(homeDir);
       expect(getSnapshotAccountId(restoredAuth)).toBe("acct-direct");
@@ -766,6 +773,37 @@ describe("codexm proxy", () => {
 
       expect(exitCode).toBe(0);
       expect(stderr.read()).toContain("Warning: --force is only meaningful with a managed Desktop session.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy disable keeps the shared daemon listener running while restoring direct runtime", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-direct", "chatgpt", "plus", "user-direct");
+      const store = createAccountStore(homeDir);
+      const proxyProcess = createProxyProcessManagerStub({ running: true });
+      await runCli(["proxy", "enable", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["proxy", "disable"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        desktopLauncher: createDesktopLauncherStub(),
+        proxyProcessManager: proxyProcess.manager,
+      } as never);
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain("Proxy daemon is still listening at http://127.0.0.1:14555/backend-api.");
     } finally {
       await cleanupTempHome(homeDir);
     }

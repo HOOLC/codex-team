@@ -30,7 +30,7 @@
 - Run the codex CLI through the restart-and-resume wrapper: `codexm run -- --model o3`
 - Enable the local synthetic proxy account: `codexm proxy enable`
 - Inspect or stop the proxy daemon: `codexm proxy status`, `codexm proxy stop`
-- Restore the previous direct auth/config backup and stop proxy mode: `codexm proxy disable`
+- Restore the previous direct auth/config backup and clear local proxy mode without stopping the shared daemon listener: `codexm proxy disable`
 - Run codex through the proxy in an isolated runtime: `codexm run --proxy -- --model o3`
 - Override the shared proxy/daemon port for this shell: `CODEXM_PROXY_PORT=16655 codexm daemon start`
 - Override only one proxy-enable call explicitly: `codexm proxy enable --port 16655`

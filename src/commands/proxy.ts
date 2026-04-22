@@ -11,7 +11,7 @@ import {
 import { restoreDirectRuntime, writeSyntheticProxyRuntime } from "../proxy/config.js";
 import type { ProxyProcessManager } from "../proxy/process.js";
 import { startProxyServer } from "../proxy/server.js";
-import { readProxyState, writeProxyState, type ProxyProcessState } from "../proxy/state.js";
+import { readProxyState, writeProxyState, type ProxyProcessState, type ProxyStatus } from "../proxy/state.js";
 import {
   appendEventLog,
   appendProxyErrorLog,
@@ -103,19 +103,19 @@ export async function disableProxyMode(options: {
 }): Promise<{
   state: ProxyProcessState | null;
   restored: { auth_restored: boolean; config_restored: boolean };
-  stopped: { running: boolean; state: ProxyProcessState | null; stopped: boolean };
+  listener: ProxyStatus;
 }> {
   const state = await readProxyState(options.store.paths.codexTeamDir);
   const restored = await restoreDirectRuntime({
     store: options.store,
     state,
   });
-  const stopped = await options.proxyProcessManager.disable();
-  const disabledState = stopped.state ?? state;
+  const listener = await options.proxyProcessManager.getStatus();
+  const disabledState = listener.state ?? state;
   if (disabledState) {
     await writeProxyState(options.store.paths.codexTeamDir, {
       ...disabledState,
-      pid: 0,
+      pid: listener.running ? disabledState.pid : 0,
       enabled: false,
     });
   }
@@ -124,16 +124,16 @@ export async function disableProxyMode(options: {
     event: "proxy.disable.completed",
     trigger: "cli",
     fields: {
-      pid: stopped.state?.pid ?? null,
+      pid: listener.state?.pid ?? null,
       auth_restored: restored.auth_restored,
       config_restored: restored.config_restored,
-      stopped: stopped.stopped,
+      daemon_running: listener.running,
     },
   }));
   return {
     state,
     restored,
-    stopped,
+    listener,
   };
 }
 
@@ -198,12 +198,12 @@ export async function disableProxyModeWithDesktopRefresh(options: {
   managedDesktopWaitStatusIntervalMs: number;
 }): Promise<{
   restored: { auth_restored: boolean; config_restored: boolean };
-  stopped: { running: boolean; state: ProxyProcessState | null; stopped: boolean };
+  listener: ProxyStatus;
   warnings: string[];
   desktopForceWarning: string | null;
 }> {
   const warnings: string[] = [];
-  const { restored, stopped } = await disableProxyMode({
+  const { restored, listener } = await disableProxyMode({
     store: options.store,
     proxyProcessManager: options.proxyProcessManager,
   });
@@ -223,7 +223,7 @@ export async function disableProxyModeWithDesktopRefresh(options: {
 
   return {
     restored,
-    stopped,
+    listener,
     warnings,
     desktopForceWarning: options.force && refreshOutcome === "none"
       ? PROXY_FORCE_WARNING
@@ -382,7 +382,7 @@ export async function handleProxyCommand(options: {
     }
 
     let restored: { auth_restored: boolean; config_restored: boolean };
-    let stopped: { running: boolean; state: ProxyProcessState | null; stopped: boolean };
+    let listener: ProxyStatus;
     let warnings: string[] = [];
     let desktopForceWarning: string | null = null;
     try {
@@ -397,7 +397,7 @@ export async function handleProxyCommand(options: {
         managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
       });
       restored = disabled.restored;
-      stopped = disabled.stopped;
+      listener = disabled.listener;
       warnings = disabled.warnings;
       desktopForceWarning = disabled.desktopForceWarning;
     } finally {
@@ -407,7 +407,9 @@ export async function handleProxyCommand(options: {
       ok: true,
       action: "proxy.disable",
       enabled: false,
-      stopped: stopped.stopped,
+      running: listener.running,
+      base_url: listener.state?.base_url ?? null,
+      openai_base_url: listener.state?.openai_base_url ?? null,
       auth_restored: restored.auth_restored,
       config_restored: restored.config_restored,
       warnings,
@@ -415,7 +417,12 @@ export async function handleProxyCommand(options: {
     if (options.json) {
       writeJson(options.stdout, payload);
     } else {
-      options.stdout.write("Proxy disabled. Restored previous direct auth/config and removed proxy config when possible.\n");
+      options.stdout.write(
+        "Proxy disabled for the local runtime. Restored previous direct auth/config and removed proxy config when possible.\n",
+      );
+      if (listener.running && listener.state) {
+        options.stdout.write(`Proxy daemon is still listening at ${listener.state.base_url}.\n`);
+      }
       for (const warning of warnings) {
         options.stdout.write(`Warning: ${warning}\n`);
       }

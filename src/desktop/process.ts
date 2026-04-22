@@ -56,6 +56,33 @@ export async function readProcessParentAndCommand(
   }
 }
 
+export async function readProcessEnvironmentVariable(
+  execFileImpl: ExecFileLike,
+  pid: number,
+  name: string,
+): Promise<string | null | undefined> {
+  try {
+    const { stdout } = await execFileImpl("ps", ["eww", "-p", String(pid)]);
+    const line = stdout
+      .split("\n")
+      .map((entry) => entry.trim())
+      .find((entry) => entry !== "" && !entry.startsWith("PID "));
+    if (!line) {
+      return null;
+    }
+
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = line.match(new RegExp(`(?:^|\\s)${escapedName}=([^\\s]*)`, "u"));
+    if (!match) {
+      return null;
+    }
+
+    return match[1] === "" ? null : match[1];
+  } catch {
+    return undefined;
+  }
+}
+
 export async function launchManagedDesktopProcess(options: {
   appPath: string;
   binaryPath: string;

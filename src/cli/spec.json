@@ -536,8 +536,8 @@
           {
             "usage": "codexm proxy disable",
             "description": {
-              "en": "restore the previous direct auth/config backup and stop the proxy daemon",
-              "zh-CN": "恢复上一次 direct auth/config 备份并停止 proxy daemon"
+              "en": "restore the previous direct auth/config backup while leaving the shared proxy daemon state untouched",
+              "zh-CN": "恢复上一次 direct auth/config 备份，同时不改动共享 proxy daemon 的监听状态"
             }
           },
           {

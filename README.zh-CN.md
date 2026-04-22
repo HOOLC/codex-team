@@ -110,7 +110,7 @@ codexm proxy disable
 
 对 `codexm` 托管的 proxy 入口，`codexm proxy enable` 现在会改写 `chatgpt_base_url` 和 `openai_base_url`，但不再改 live provider 身份；`codexm run --proxy` 仍然会在隔离 overlay 里使用自定义 provider。这样 live proxy CLI/Desktop 能继续共用历史，而隔离 proxy run 仍然可以把实时 Responses websocket turn 和 REST 请求都强制导向本地 proxy。这个保证仍然只覆盖 `codexm` 托管入口；如果你绕过 `codexm` 直接裸跑 `codex` 或 Desktop，则不保证一定经过本地 proxy。
 
-`codexm daemon start`、`codexm daemon restart`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力。`codexm daemon stop` 现在只停止进程，但会保留最近一次 daemon feature 状态，所以后续再执行 `codexm daemon start` 或 `codexm daemon restart` 时，会恢复之前的 `autoswitch` 和 `proxy` 开关。对于 `codexm` 托管的 Desktop，会话内的账号刷新仍然走 `codexm switch <name>` 触发的 Codex app server restart；默认会等当前 thread 跑完，`--force` 才会跳过等待。proxy 路由切换是另一条链路：managed Desktop 的 `/backend-api/*` 请求会使用 `codexm launch` 启动 Desktop 时注入的 `CODEX_API_BASE_URL`，所以如果 Desktop 已经在跑，再执行 `codexm proxy enable/disable` 不会伪装成热更新成功，而是明确提示你重新执行一次 `codexm launch`，让新的 proxy 或 direct backend 路由在 Desktop 侧生效。`codexm switch <name>` 不会再隐式关闭 proxy：它会更新保存的 direct 当前账号，而这个账号会在 proxy 保持启用时立刻成为当前上游，直到后续某次 autoswitch 因耗尽信号再把它切走。只有在你明确想恢复 direct auth/config 并清掉 proxy 配置时，才使用 `codexm proxy disable`。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
+`codexm daemon start`、`codexm daemon restart`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力。`codexm daemon stop` 现在只停止进程，但会保留最近一次 daemon feature 状态，所以后续再执行 `codexm daemon start` 或 `codexm daemon restart` 时，会恢复之前的 `autoswitch` 和 `proxy` 开关。对于 `codexm` 托管的 Desktop，会话内的账号刷新仍然走 `codexm switch <name>` 触发的 Codex app server restart；默认会等当前 thread 跑完，`--force` 才会跳过等待。proxy 路由切换是另一条链路：managed Desktop 的 `/backend-api/*` 请求会使用 `codexm launch` 启动 Desktop 时注入的 `CODEX_API_BASE_URL`，所以如果 Desktop 已经在跑，再执行 `codexm proxy enable/disable` 不会伪装成热更新成功，而是明确提示你重新执行一次 `codexm launch`，让新的 proxy 或 direct backend 路由在 Desktop 侧生效。这个提示在可探测时会优先读取当前 Desktop 进程启动时的代理环境变量，而不是只信任保存下来的 state。`codexm switch <name>` 不会再隐式关闭 proxy：它会更新保存的 direct 当前账号，而这个账号会在 proxy 保持启用时立刻成为当前上游，直到后续某次 autoswitch 因耗尽信号再把它切走。只有在你明确想恢复 direct auth/config 并清掉本地 proxy 接线时，才使用 `codexm proxy disable`；它不会关闭已经在监听的共享 proxy daemon，所以其他工具仍可继续走这个端口，除非你显式执行 `codexm proxy stop` 或 `codexm daemon stop`。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
 
 非 `200` 的 proxy 请求还会额外写入独立的 `proxy-errors-YYYY-MM-DD.jsonl`，里面保留 req/resp 诊断信息。结构化 JSONL 日志始终带 `codexm_version`，proxy request log 还会记录 `service_tier`（`default` / `priority`）；设置 `CODEXM_LOG_BUILD_META=1` 后，还会额外记录本地构建元信息，例如 `codexm_git_sha`，方便排查 daemon 和 proxy 实际跑的是哪份代码。
 
@@ -183,7 +183,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm run [--account <name>] [-- ...codexArgs]`: 以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行
 - `codexm run --proxy [-- ...codexArgs]`: 用隔离 CODEX_HOME 通过本地 proxy 运行 codex
 - `codexm proxy enable`: 启用由本地 proxy 提供的全局 synthetic ChatGPT auth；在 proxy 耗尽且用户可见输出尚未开始时会自动重放一次
-- `codexm proxy disable`: 恢复上一次 direct auth/config 备份并停止 proxy daemon
+- `codexm proxy disable`: 恢复上一次 direct auth/config 备份，同时不改动共享 proxy daemon 的监听状态
 - `codexm overlay create <name>`: 为其他工具创建隔离的 CODEX_HOME overlay
 <!-- GENERATED:CORE_COMMANDS:END -->
 

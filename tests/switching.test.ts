@@ -117,4 +117,35 @@ describe("switching lock", () => {
     expect(warnings[0]).toContain("Relaunch Codex Desktop via \"codexm launch\"");
     expect(warnings[0]).toContain("http://127.0.0.1:14555/backend-api");
   });
+
+  test("uses the running Desktop launch env before falling back to saved managed state", async () => {
+    const warnings: string[] = [];
+    let applyManagedSwitchCalls = 0;
+
+    const outcome = await refreshManagedDesktopAfterSwitch(
+      warnings,
+      createDesktopLauncherStub({
+        readManagedState: async () => ({
+          pid: 123,
+          app_path: "/Applications/Codex.app",
+          remote_debugging_port: 39223,
+          managed_by_codexm: true,
+          started_at: "2026-04-22T00:00:00.000Z",
+          desktop_api_base_url: "http://127.0.0.1:14555/backend-api",
+        }),
+        readManagedLaunchApiBaseUrl: async () => null,
+        applyManagedSwitch: async () => {
+          applyManagedSwitchCalls += 1;
+          return true;
+        },
+      }),
+      {
+        desiredDesktopApiBaseUrl: null,
+      },
+    );
+
+    expect(outcome).toBe("applied");
+    expect(applyManagedSwitchCalls).toBe(1);
+    expect(warnings).toHaveLength(0);
+  });
 });

@@ -1426,11 +1426,6 @@ describe("Account Dashboard TUI", () => {
             state: proxyState,
             stopped: false,
           }),
-          disable: async () => ({
-            running: false,
-            state: proxyState,
-            stopped: false,
-          }),
         },
         streams: {
           stdin,
@@ -1511,11 +1506,6 @@ describe("Account Dashboard TUI", () => {
             state: proxyState,
           }),
           stop: async () => ({
-            running: false,
-            state: proxyState,
-            stopped: false,
-          }),
-          disable: async () => ({
             running: false,
             state: proxyState,
             stopped: false,
@@ -3651,6 +3641,103 @@ describe("Account Dashboard TUI", () => {
           expect.stringMatching(/^Last upstream: alpha \(chatgpt,/u),
         ]),
       );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("keeps the proxy row visible in dashboard snapshots when the pool has no quota snapshots yet", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const snapshot = await buildAccountDashboardSnapshot({
+        store: {
+          paths: {
+            codexTeamDir: `${homeDir}/.codex-team`,
+          },
+          listAccounts: async () => ({
+            warnings: [],
+            accounts: [
+              {
+                name: "alpha",
+                auth_mode: "chatgpt",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                email: "alpha@example.com",
+                created_at: "2026-03-18T04:30:00.000Z",
+                updated_at: "2026-04-16T05:23:00.000Z",
+                last_switched_at: "2026-04-16T05:24:00.000Z",
+                quota: {
+                  status: "error",
+                  error_message: "rate limit fetch failed",
+                  fetched_at: "2026-04-16T05:30:00.000Z",
+                  plan_type: "plus",
+                  five_hour: null,
+                  one_week: null,
+                  credits_balance: null,
+                  unlimited: true,
+                },
+                authPath: `${homeDir}/alpha/auth.json`,
+                metaPath: `${homeDir}/alpha/meta.json`,
+                configPath: null,
+                duplicateAccountId: false,
+                auto_switch_eligible: true,
+              },
+            ],
+          }),
+          refreshAllQuotas: async () => ({
+            successes: [],
+            failures: [],
+            warnings: [],
+          }),
+          getCurrentStatus: async () => ({
+            exists: true,
+            auth_mode: "chatgpt",
+            account_id: "acct-alpha",
+            user_id: "user-alpha",
+            identity: "acct-alpha:user-alpha",
+            matched_accounts: ["alpha"],
+            managed: true,
+            duplicate_match: false,
+            warnings: [],
+          }),
+          listQuotaSummaries: async () => ({
+            accounts: [
+              {
+                name: "alpha",
+                account_id: "acct-alpha",
+                user_id: "user-alpha",
+                identity: "acct-alpha:user-alpha",
+                auto_switch_eligible: true,
+                plan_type: "plus",
+                credits_balance: null,
+                status: "error",
+                fetched_at: "2026-04-16T05:30:00.000Z",
+                error_message: "rate limit fetch failed",
+                unlimited: true,
+                five_hour: null,
+                one_week: null,
+              },
+            ],
+          }),
+        } as never,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+        }) as never,
+      });
+
+      expect(snapshot.accounts[0]).toMatchObject({
+        name: "proxy",
+        authModeLabel: "proxy",
+        current: false,
+      });
+      expect(snapshot.accounts[1]).toMatchObject({
+        name: "alpha",
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

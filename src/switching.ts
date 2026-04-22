@@ -171,7 +171,12 @@ export async function refreshManagedDesktopAfterSwitch(
   try {
     const managedState = await desktopLauncher.readManagedState();
     if (managedState && Object.prototype.hasOwnProperty.call(options, "desiredDesktopApiBaseUrl")) {
-      const currentDesktopApiBaseUrl = normalizeDesktopApiBaseUrl(managedState.desktop_api_base_url);
+      const inspectedDesktopApiBaseUrl = await desktopLauncher.readManagedLaunchApiBaseUrl();
+      const currentDesktopApiBaseUrl = normalizeDesktopApiBaseUrl(
+        inspectedDesktopApiBaseUrl === undefined
+          ? managedState.desktop_api_base_url
+          : inspectedDesktopApiBaseUrl,
+      );
       const desiredDesktopApiBaseUrl = normalizeDesktopApiBaseUrl(options.desiredDesktopApiBaseUrl);
       if (currentDesktopApiBaseUrl !== desiredDesktopApiBaseUrl) {
         warnings.push(

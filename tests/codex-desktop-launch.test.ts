@@ -146,6 +146,92 @@ describe("codex-desktop-launch", () => {
     }
   });
 
+  test("reads the managed Desktop launch-time CODEX_API_BASE_URL from the running process env", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const launcher = createCodexDesktopLauncher({
+      statePath,
+      execFileImpl: async (file, args = []) => {
+        if (file === "ps" && args[0] === "-Ao") {
+          return {
+            stdout: "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
+            stderr: "",
+          };
+        }
+
+        if (file === "ps" && args[0] === "eww") {
+          return {
+            stdout:
+              "  PID   TT  STAT      TIME COMMAND\n"
+              + "123 ?? S 0:00.10 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223 CODEX_API_BASE_URL=http://127.0.0.1:14555/backend-api\n",
+            stderr: "",
+          };
+        }
+
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    });
+
+    try {
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: 39223,
+        managed_by_codexm: true,
+        started_at: "2026-04-22T00:00:00.000Z",
+        desktop_api_base_url: null,
+      });
+
+      await expect(launcher.readManagedLaunchApiBaseUrl()).resolves.toBe(
+        "http://127.0.0.1:14555/backend-api",
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("treats an empty managed Desktop launch-time CODEX_API_BASE_URL as the direct backend", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const launcher = createCodexDesktopLauncher({
+      statePath,
+      execFileImpl: async (file, args = []) => {
+        if (file === "ps" && args[0] === "-Ao") {
+          return {
+            stdout: "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
+            stderr: "",
+          };
+        }
+
+        if (file === "ps" && args[0] === "eww") {
+          return {
+            stdout:
+              "  PID   TT  STAT      TIME COMMAND\n"
+              + "123 ?? S 0:00.10 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223 CODEX_API_BASE_URL=\n",
+            stderr: "",
+          };
+        }
+
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    });
+
+    try {
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: 39223,
+        managed_by_codexm: true,
+        started_at: "2026-04-22T00:00:00.000Z",
+        desktop_api_base_url: "http://127.0.0.1:14555/backend-api",
+      });
+
+      await expect(launcher.readManagedLaunchApiBaseUrl()).resolves.toBeNull();
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("lists running Codex Desktop processes from ps output", async () => {
     const launcher = createCodexDesktopLauncher({
       execFileImpl: async (file) => {
