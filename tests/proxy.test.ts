@@ -1209,7 +1209,7 @@ describe("codexm proxy", () => {
           route: "/backend-api/wham/usage",
           surface: "backend-api",
           auth_kind: "synthetic-chatgpt",
-          request_speed: "normal",
+          service_tier: "default",
           synthetic_usage: true,
           status_code: 200,
         });
@@ -1262,7 +1262,7 @@ describe("codexm proxy", () => {
           selected_account_name: "alpha",
           selected_auth_mode: "chatgpt",
           upstream_kind: "chatgpt",
-          request_speed: "normal",
+          service_tier: "default",
           status_code: 200,
         });
       } finally {
@@ -1708,7 +1708,7 @@ describe("codexm proxy", () => {
         });
         expect(requestLogs.at(-1)).toMatchObject({
           route: "/v1/responses",
-          request_speed: "fast",
+          service_tier: "priority",
           status_code: 200,
         });
       } finally {
@@ -3157,7 +3157,7 @@ describe("codexm proxy", () => {
       expect(requestLogs.at(-1)).toMatchObject({
         method: "WS",
         route: "/v1/responses",
-        request_speed: "fast",
+        service_tier: "priority",
         status_code: 200,
       });
 

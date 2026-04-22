@@ -69,7 +69,7 @@ interface ProxyForwardResult {
   selectedAccount: string | null;
   selectedAuthMode: string | null;
   upstreamKind: "chatgpt" | "openai";
-  requestSpeed?: ProxyRequestSpeed;
+  serviceTier?: ProxyServiceTier;
   syntheticUsage?: boolean;
   diagnostic?: Record<string, unknown>;
   errorPayload?: Record<string, unknown>;
@@ -94,7 +94,7 @@ interface ProxyActiveTurn {
   replayedFromAccountNames: string[];
   requestBody: Record<string, unknown>;
   requestId: string;
-  requestSpeed: ProxyRequestSpeed;
+  serviceTier: ProxyServiceTier;
   responseId: string | null;
   startedAt: number;
 }
@@ -109,7 +109,6 @@ interface ProxyWebSocketContext {
 }
 
 type ProxyServiceTier = "default" | "priority";
-type ProxyRequestSpeed = "normal" | "fast";
 type ProxyReplaySkipReason =
   | "already_replayed"
   | "no_replay_candidate"
@@ -701,14 +700,6 @@ function resolveProxyServiceTierFromBodyText(bodyText: string): ProxyServiceTier
   } catch {
     return "default";
   }
-}
-
-function resolveProxyRequestSpeed(body: Record<string, unknown> | null | undefined): ProxyRequestSpeed {
-  return resolveProxyServiceTier(body) === "priority" ? "fast" : "normal";
-}
-
-function resolveProxyRequestSpeedFromBodyText(bodyText: string): ProxyRequestSpeed {
-  return resolveProxyServiceTierFromBodyText(bodyText) === "priority" ? "fast" : "normal";
 }
 
 function isRetryableQuotaFailure(statusCode: number, payload: unknown): boolean {
@@ -1729,7 +1720,7 @@ async function forwardRawChatGPTCompatibleRoute(options: {
         selectedAccount: replayed.selected.account.name,
         selectedAuthMode: replayed.selected.account.auth_mode,
         upstreamKind: "chatgpt",
-        requestSpeed: replayed.requestSpeed,
+        serviceTier: replayed.serviceTier,
         diagnostic: toProxyReplayDiagnostic(replayed.replay),
         errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
           ? undefined
@@ -1818,7 +1809,7 @@ async function forwardOpenAIViaDirectChatGPT(options: {
         selectedAccount: null,
         selectedAuthMode: "chatgpt",
         upstreamKind: "chatgpt",
-        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        serviceTier: resolveProxyServiceTier(requestBody),
         errorPayload: logged.errorPayload,
       };
     }
@@ -1835,7 +1826,7 @@ async function forwardOpenAIViaDirectChatGPT(options: {
       selectedAccount: null,
       selectedAuthMode: "chatgpt",
       upstreamKind: "chatgpt",
-      requestSpeed: resolveProxyRequestSpeed(requestBody),
+      serviceTier: resolveProxyServiceTier(requestBody),
       errorPayload: upstream.ok
         ? undefined
         : buildRequestResponseLogPayload({
@@ -1875,7 +1866,7 @@ async function forwardOpenAIViaDirectChatGPT(options: {
       selectedAccount: null,
       selectedAuthMode: "chatgpt",
       upstreamKind: "chatgpt",
-      requestSpeed: resolveProxyRequestSpeed(requestBody),
+      serviceTier: resolveProxyServiceTier(requestBody),
       errorPayload: upstream.ok
         ? undefined
         : buildRequestResponseLogPayload({
@@ -1915,7 +1906,7 @@ async function forwardOpenAIViaDirectChatGPT(options: {
       selectedAccount: null,
       selectedAuthMode: "chatgpt",
       upstreamKind: "chatgpt",
-      requestSpeed: resolveProxyRequestSpeed(requestBody),
+      serviceTier: resolveProxyServiceTier(requestBody),
       errorPayload: upstream.ok
         ? undefined
         : buildRequestResponseLogPayload({
@@ -1956,7 +1947,7 @@ function isBufferedProxyReplayRoute(pathname: string, body: Record<string, unkno
 interface ProxyBufferedReplayResult {
   payload: unknown;
   replay: ProxyReplayDiagnostic;
-  requestSpeed: ProxyRequestSpeed;
+  serviceTier: ProxyServiceTier;
   selected: ProxyUpstreamAccount;
   upstreamStatus: number;
   responseHeaders: Record<string, string>;
@@ -1998,7 +1989,7 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
             : null,
           replayedFromAccountNames,
         }),
-        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        serviceTier: resolveProxyServiceTier(requestBody),
         selected,
         upstreamStatus: upstream.status,
         responseHeaders: buffered.responseHeaders,
@@ -2016,7 +2007,7 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
           replaySkipReason: replaySelected ? "same_account_only" : "no_replay_candidate",
           replayedFromAccountNames,
         }),
-        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        serviceTier: resolveProxyServiceTier(requestBody),
         selected,
         upstreamStatus: upstream.status,
         responseHeaders: buffered.responseHeaders,
@@ -2068,7 +2059,7 @@ async function fetchSyntheticChatGPTRawJsonPayloadWithReplay(options: {
             : null,
           replayedFromAccountNames,
         }),
-        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        serviceTier: resolveProxyServiceTier(requestBody),
         selected,
         upstreamStatus: upstream.status,
         responseHeaders: buffered.responseHeaders,
@@ -2086,7 +2077,7 @@ async function fetchSyntheticChatGPTRawJsonPayloadWithReplay(options: {
           replaySkipReason: replaySelected ? "same_account_only" : "no_replay_candidate",
           replayedFromAccountNames,
         }),
-        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        serviceTier: resolveProxyServiceTier(requestBody),
         selected,
         upstreamStatus: upstream.status,
         responseHeaders: buffered.responseHeaders,
@@ -2142,7 +2133,7 @@ async function forwardOpenAIWithApiKey(options: {
         selectedAccount: options.selected.account.name,
         selectedAuthMode: options.selected.account.auth_mode,
         upstreamKind: "openai",
-        requestSpeed: resolveProxyRequestSpeed(parsedBody),
+        serviceTier: resolveProxyServiceTier(parsedBody),
         errorPayload: logged.errorPayload,
       };
   }
@@ -2176,7 +2167,7 @@ async function forwardOpenAIWithApiKey(options: {
         selectedAccount: selected.account.name,
         selectedAuthMode: selected.account.auth_mode,
         upstreamKind: "openai",
-        requestSpeed: resolveProxyRequestSpeed(parsedBody),
+        serviceTier: resolveProxyServiceTier(parsedBody),
         diagnostic: toProxyReplayDiagnostic({
           replayAttempted: replayedFromAccountNames.length > 0 || isRetryableQuotaFailure(upstream.status, buffered.payload),
           replayCount: replayedFromAccountNames.length,
@@ -2222,7 +2213,7 @@ async function forwardOpenAIWithApiKey(options: {
         selectedAccount: selected.account.name,
         selectedAuthMode: selected.account.auth_mode,
         upstreamKind: "openai",
-        requestSpeed: resolveProxyRequestSpeed(parsedBody),
+        serviceTier: resolveProxyServiceTier(parsedBody),
         diagnostic: toProxyReplayDiagnostic({
           replayAttempted: true,
           replayCount: replayedFromAccountNames.length,
@@ -2278,7 +2269,7 @@ async function forwardOpenAIViaChatGPT(options: {
         selectedAccount: options.selected.account.name,
         selectedAuthMode: options.selected.account.auth_mode,
         upstreamKind: "chatgpt",
-        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        serviceTier: resolveProxyServiceTier(requestBody),
         errorPayload: logged.errorPayload,
       };
     }
@@ -2302,7 +2293,7 @@ async function forwardOpenAIViaChatGPT(options: {
       selectedAccount: replayed.selected.account.name,
       selectedAuthMode: replayed.selected.account.auth_mode,
       upstreamKind: "chatgpt",
-      requestSpeed: replayed.requestSpeed,
+      serviceTier: replayed.serviceTier,
       diagnostic: toProxyReplayDiagnostic(replayed.replay),
       errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
         ? undefined
@@ -2342,7 +2333,7 @@ async function forwardOpenAIViaChatGPT(options: {
       selectedAccount: replayed.selected.account.name,
       selectedAuthMode: replayed.selected.account.auth_mode,
       upstreamKind: "chatgpt",
-      requestSpeed: replayed.requestSpeed,
+      serviceTier: replayed.serviceTier,
       diagnostic: toProxyReplayDiagnostic(replayed.replay),
       errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
         ? undefined
@@ -2382,7 +2373,7 @@ async function forwardOpenAIViaChatGPT(options: {
       selectedAccount: replayed.selected.account.name,
       selectedAuthMode: replayed.selected.account.auth_mode,
       upstreamKind: "chatgpt",
-      requestSpeed: replayed.requestSpeed,
+      serviceTier: replayed.serviceTier,
       diagnostic: toProxyReplayDiagnostic(replayed.replay),
       errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
         ? undefined
@@ -2572,7 +2563,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             selected_account_name: null,
             selected_auth_mode: null,
             upstream_kind: "chatgpt",
-            request_speed: "normal",
+            service_tier: "default",
             status_code: 200,
           duration_ms: Date.now() - startedAt,
           request_bytes: requestBytes,
@@ -2598,7 +2589,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             selected_account_name: null,
             selected_auth_mode: null,
             upstream_kind: "chatgpt",
-            request_speed: "normal",
+            service_tier: "default",
             status_code: 200,
             duration_ms: Date.now() - startedAt,
             request_bytes: requestBytes,
@@ -2633,7 +2624,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             selected_account_name: null,
             selected_auth_mode: null,
             upstream_kind: "chatgpt",
-            request_speed: "normal",
+            service_tier: "default",
             status_code: 200,
             duration_ms: Date.now() - startedAt,
             request_bytes: requestBytes,
@@ -2668,7 +2659,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             selected_account_name: null,
             selected_auth_mode: null,
             upstream_kind: "chatgpt",
-            request_speed: "normal",
+            service_tier: "default",
             status_code: 200,
             duration_ms: Date.now() - startedAt,
             request_bytes: requestBytes,
@@ -2703,7 +2694,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             selected_account_name: null,
             selected_auth_mode: null,
             upstream_kind: "chatgpt",
-            request_speed: "normal",
+            service_tier: "default",
             status_code: 200,
             duration_ms: Date.now() - startedAt,
             request_bytes: requestBytes,
@@ -2771,7 +2762,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         selected_account_name: forwardResult.selectedAccount,
         selected_auth_mode: forwardResult.selectedAuthMode,
         upstream_kind: forwardResult.upstreamKind,
-        request_speed: forwardResult.requestSpeed ?? resolveProxyRequestSpeedFromBodyText(bodyText),
+        service_tier: forwardResult.serviceTier ?? resolveProxyServiceTierFromBodyText(bodyText),
         status_code: forwardResult.statusCode,
         duration_ms: Date.now() - startedAt,
         request_bytes: requestBytes,
@@ -2806,7 +2797,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         selected_account_name: null,
         selected_auth_mode: null,
         upstream_kind: String(request.url ?? "").startsWith("/v1/") ? "openai" : "chatgpt",
-        request_speed: resolveProxyRequestSpeedFromBodyText(requestBodyText),
+        service_tier: resolveProxyServiceTierFromBodyText(requestBodyText),
         status_code: response.headersSent ? response.statusCode : 500,
         duration_ms: 0,
         request_bytes: 0,
@@ -2888,7 +2879,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       selected_account_name: context.upstreamAccount?.account.name ?? activeTurn.accountName,
       selected_auth_mode: context.upstreamAccount?.account.auth_mode ?? "chatgpt",
       upstream_kind: "chatgpt",
-      request_speed: activeTurn.requestSpeed,
+      service_tier: activeTurn.serviceTier,
       status_code: terminalStatusCode,
       duration_ms: Date.now() - activeTurn.startedAt,
       request_bytes: Buffer.byteLength(JSON.stringify({ input: activeTurn.fullInput })),
@@ -3010,7 +3001,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       activeTurn.replayCount += 1;
       activeTurn.replaySkipReason = null;
       activeTurn.replayedFromAccountNames = [...activeTurn.replayedFromAccountNames, previousAccountName];
-      activeTurn.requestSpeed = resolveProxyRequestSpeed(finalRequestBody);
+      activeTurn.serviceTier = resolveProxyServiceTier(finalRequestBody);
       activeTurn.responseId = null;
       context.upstreamSocket?.send(JSON.stringify(finalRequestBody));
       return true;
@@ -3178,7 +3169,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         selected_account_name: null,
         selected_auth_mode: null,
         upstream_kind: "chatgpt",
-        request_speed: "normal",
+        service_tier: "default",
         status_code: 101,
         duration_ms: 0,
         request_bytes: 0,
@@ -3224,7 +3215,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
                 selected_account_name: null,
                 selected_auth_mode: null,
                 upstream_kind: passthroughAuthKind === "direct-chatgpt" ? "chatgpt" : "openai",
-                request_speed: requestType === "response.create" ? resolveProxyRequestSpeed(requestBody) : "normal",
+                service_tier: requestType === "response.create" ? resolveProxyServiceTier(requestBody) : "default",
                 status_code: 101,
                 duration_ms: 0,
                 request_bytes: Buffer.byteLength(rawText),
@@ -3250,7 +3241,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
                 selected_account_name: context.upstreamAccount?.account.name ?? null,
                 selected_auth_mode: context.upstreamAccount?.account.auth_mode ?? null,
                 upstream_kind: "chatgpt",
-                request_speed: requestType === "response.create" ? resolveProxyRequestSpeed(requestBody) : "normal",
+                service_tier: requestType === "response.create" ? resolveProxyServiceTier(requestBody) : "default",
                 status_code: 101,
                 duration_ms: 0,
                 request_bytes: Buffer.byteLength(rawText),
@@ -3287,7 +3278,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               replayedFromAccountNames: [],
               requestBody: cloneJsonValue(requestBody),
               requestId,
-              requestSpeed: resolveProxyRequestSpeed(finalRequestBody),
+              serviceTier: resolveProxyServiceTier(finalRequestBody),
               responseId: null,
               startedAt: Date.now(),
             };
@@ -3310,7 +3301,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               selected_account_name: context.upstreamAccount?.account.name ?? null,
               selected_auth_mode: context.upstreamAccount?.account.auth_mode ?? null,
               upstream_kind: "chatgpt",
-              request_speed: "normal",
+              service_tier: "default",
               status_code: 500,
               duration_ms: 0,
               request_bytes: 0,

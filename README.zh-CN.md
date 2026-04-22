@@ -112,7 +112,7 @@ codexm proxy disable
 
 `codexm daemon start`、`codexm daemon restart`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力。`codexm daemon stop` 现在只停止进程，但会保留最近一次 daemon feature 状态，所以后续再执行 `codexm daemon start` 或 `codexm daemon restart` 时，会恢复之前的 `autoswitch` 和 `proxy` 开关。对于 `codexm` 托管的 Desktop，会话内的账号刷新仍然走 `codexm switch <name>` 触发的 Codex app server restart；默认会等当前 thread 跑完，`--force` 才会跳过等待。proxy 路由切换是另一条链路：managed Desktop 的 `/backend-api/*` 请求会使用 `codexm launch` 启动 Desktop 时注入的 `CODEX_API_BASE_URL`，所以如果 Desktop 已经在跑，再执行 `codexm proxy enable/disable` 不会伪装成热更新成功，而是明确提示你重新执行一次 `codexm launch`，让新的 proxy 或 direct backend 路由在 Desktop 侧生效。`codexm switch <name>` 不会再隐式关闭 proxy：它会更新保存的 direct 当前账号，而这个账号会在 proxy 保持启用时立刻成为当前上游，直到后续某次 autoswitch 因耗尽信号再把它切走。只有在你明确想恢复 direct auth/config 并清掉 proxy 配置时，才使用 `codexm proxy disable`。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
 
-非 `200` 的 proxy 请求还会额外写入独立的 `proxy-errors-YYYY-MM-DD.jsonl`，里面保留 req/resp 诊断信息。结构化 JSONL 日志始终带 `codexm_version`，proxy request log 还会记录 `request_speed`（`normal` / `fast`）；设置 `CODEXM_LOG_BUILD_META=1` 后，还会额外记录本地构建元信息，例如 `codexm_git_sha`，方便排查 daemon 和 proxy 实际跑的是哪份代码。
+非 `200` 的 proxy 请求还会额外写入独立的 `proxy-errors-YYYY-MM-DD.jsonl`，里面保留 req/resp 诊断信息。结构化 JSONL 日志始终带 `codexm_version`，proxy request log 还会记录 `service_tier`（`default` / `priority`）；设置 `CODEXM_LOG_BUILD_META=1` 后，还会额外记录本地构建元信息，例如 `codexm_git_sha`，方便排查 daemon 和 proxy 实际跑的是哪份代码。
 
 当默认 `14555` 端口被占用时，可以设置 `CODEXM_PROXY_PORT=<port>` 统一覆盖共享 proxy/daemon 的监听端口。`codexm daemon start`、`codexm autoswitch enable`、`codexm launch`、`codexm proxy enable` 和 `codexm run --proxy` 都会读取这个环境变量；如果显式传了 `--port`，仍然以命令行参数为准。
 
