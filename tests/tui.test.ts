@@ -47,7 +47,7 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
   return {
     headerLine: `codexm | current ${currentName} | 2/3 usable | updated 13:24`,
     currentStatusLine: `Current managed account: ${currentName}`,
-    summaryLine: "Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, pro x1",
+    summaryLine: "Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | pro x1, plus x2",
     poolLine: "Available: bottleneck 0.55 | 5H->1W 0.82 | 1W 0.55 (plus 1W)",
     usageSummary: {
       generated_at: "2026-04-16T13:24:00.000Z",
@@ -338,6 +338,24 @@ describe("Account Dashboard TUI", () => {
     expect(headerLine).toBeDefined();
     expect(alphaRow).toBeDefined();
     expect(headerLine?.indexOf("NAME")).toBe(alphaRow?.indexOf("alpha"));
+  });
+
+  test("shows prolite in the wide plan column without truncation", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.accounts[0] = {
+      ...snapshot.accounts[0],
+      planLabel: "prolite",
+    };
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot,
+        state: createInitialAccountDashboardState(),
+        width: 120,
+        height: 28,
+      }),
+    );
+
+    expect(screen).toContain("prolite");
   });
 
   test("centers the USED group label over 5H and 1W", () => {
@@ -3151,7 +3169,7 @@ describe("Account Dashboard TUI", () => {
       expect(snapshot.currentStatusLine).toBe(
         "Current managed account: alpha | [daemon:off] [proxy:off] [autoswitch:off]",
       );
-      expect(snapshot.summaryLine).toBe("Accounts: 2/3 usable | blocked: 1W 0, 5H 0 | plus x2, pro x1");
+      expect(snapshot.summaryLine).toBe("Accounts: 2/3 usable | blocked: 1W 0, 5H 0 | pro x1, plus x2");
       expect(snapshot.poolLine).toContain("Available: bottleneck");
       expect(snapshot.warnings).toEqual(["beta using cached quota"]);
       expect(snapshot.failures).toEqual([{ name: "gamma", error: "quota failed" }]);

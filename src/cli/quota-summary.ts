@@ -1,4 +1,5 @@
 import type { AccountQuotaSummary } from "../account-store/index.js";
+import { resolvePlanQuotaTier, type PlanQuotaTier } from "../plan-quota-profile.js";
 import { PROXY_ACCOUNT_ID } from "../proxy/constants.js";
 import { computeAvailability } from "./quota-core.js";
 import { toAutoSwitchCandidate } from "./quota-ranking.js";
@@ -19,6 +20,25 @@ function formatPoolValue(value: number | null): string {
   }
 
   return String(roundToTwo(value / 100));
+}
+
+const PLAN_SUMMARY_ORDER: Record<PlanQuotaTier, number> = {
+  pro: 0,
+  prolite: 1,
+  plus: 2,
+  team: 3,
+  free: 4,
+  unknown: 5,
+};
+
+function comparePlanSummaryEntries(left: [string, number], right: [string, number]): number {
+  const leftRank = PLAN_SUMMARY_ORDER[resolvePlanQuotaTier(left[0])];
+  const rightRank = PLAN_SUMMARY_ORDER[resolvePlanQuotaTier(right[0])];
+  if (leftRank !== rightRank) {
+    return leftRank - rightRank;
+  }
+
+  return left[0].localeCompare(right[0]);
 }
 
 export function buildListSummary(accounts: AccountQuotaSummary[]): {
@@ -68,7 +88,7 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
   }
 
   const plansSegment = [...planCounts.entries()]
-    .sort((left, right) => left[0].localeCompare(right[0]))
+    .sort(comparePlanSummaryEntries)
     .map(([plan, count]) => `${plan} x${count}`)
     .join(", ");
 

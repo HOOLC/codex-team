@@ -2542,6 +2542,105 @@ wire_api = "responses"
     }
   });
 
+  test("list summary orders account plans from highest to lowest tier", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const planByAccountId: Record<string, string> = {
+        "acct-cli-plan-pro": "pro",
+        "acct-cli-plan-prolite": "prolite",
+        "acct-cli-plan-plus": "plus",
+        "acct-cli-plan-team": "team",
+        "acct-cli-plan-free": "free",
+      };
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          return jsonResponse({
+            plan_type: accountId ? planByAccountId[accountId] : "unknown",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 1_200,
+                reset_at: 1_775_000_000,
+              },
+              secondary_window: {
+                used_percent: 20,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 86_400,
+                reset_at: 1_775_086_400,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-pro");
+      await runCli(["save", "quota-pro", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-prolite");
+      await runCli(["save", "quota-prolite", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-plus");
+      await runCli(["save", "quota-plus", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-team");
+      await runCli(["save", "quota-team", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-free");
+      await runCli(["save", "quota-free", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+
+      expect(lines[2]).toBe(
+        "Accounts: 5/5 usable | blocked: 1W 0, 5H 0 | pro x1, prolite x1, plus x1, team x1, free x1",
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("list --json includes eta metadata per account", async () => {
     const homeDir = await createTempHome();
 

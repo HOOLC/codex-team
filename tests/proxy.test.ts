@@ -3053,7 +3053,12 @@ describe("codexm proxy", () => {
           requestLogs.find((entry) => entry.route === "/v1/responses" && entry.status_code === 502),
         ).toMatchObject({
           selected_account_name: "alpha",
+          replay_attempted: true,
           replay_count: 0,
+          replay_locked_by_item_type: "message",
+          replay_locked_by_type: "response.output_item.done",
+          replay_skip_reason: "replay_locked",
+          replay_succeeded: false,
         });
 
         downstream.close();
@@ -3581,6 +3586,118 @@ describe("codexm proxy", () => {
             compression: "auto",
           },
         });
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy replays synthetic responses/compact requests after quota exhaustion", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "plus", "user-beta"));
+      await writeQuotaMeta(
+        (await store.getManagedAccount("alpha")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 100, one_week_used: 10 },
+      );
+      await writeQuotaMeta(
+        (await store.getManagedAccount("beta")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 20, one_week_used: 10 },
+      );
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      const forwarded: Array<{ accountId: string | null; body: Record<string, unknown> }> = [];
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        fetchImpl: async (_url, init) => {
+          const headers = new Headers(init?.headers);
+          const accountId = headers.get("ChatGPT-Account-Id");
+          const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          forwarded.push({
+            accountId,
+            body,
+          });
+          if (accountId === "acct-alpha") {
+            return jsonResponse({
+              error: {
+                codex_error_info: "usage_limit_exceeded",
+                message: "You've hit your usage limit.",
+              },
+            }, 429);
+          }
+          return jsonResponse({
+            id: "compact_retry",
+            object: "response.compact",
+            summary: "ok",
+          });
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const response = await fetch(`${server.baseUrl}/v1/responses/compact`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            response_id: "resp_123",
+            compression: "auto",
+          }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          id: "compact_retry",
+          object: "response.compact",
+        });
+        expect(forwarded.slice(-2).map((entry) => entry.accountId)).toEqual(["acct-alpha", "acct-beta"]);
+        expect(forwarded.slice(-1)[0]?.body).toMatchObject({
+          model: "gpt-5.4",
+          response_id: "resp_123",
+          compression: "auto",
+        });
+        expect(
+          requestLogs.find((entry) => entry.route === "/v1/responses/compact" && entry.status_code === 200),
+        ).toMatchObject({
+          selected_account_name: "beta",
+          replay_attempted: true,
+          replay_count: 1,
+          replay_skip_reason: null,
+          replay_succeeded: true,
+          replayed_from_account_names: ["alpha"],
+        });
+        expect((await readAuthSnapshotFile(join(homeDir, ".codex-team", "proxy", "last-direct-auth.json"))).tokens?.account_id)
+          .toBe("acct-beta");
       } finally {
         await server.close();
       }

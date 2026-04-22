@@ -4,6 +4,7 @@ import {
   convertOneWeekPercentToPlusWeeklyUnits,
   resolveFiveHourToOneWeekRawRatio,
 } from "../plan-quota-profile.js";
+import { PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
 import { computeAvailability } from "./quota-core.js";
 import type { AutoSwitchCandidate, QuotaWindowKey } from "./quota-types.js";
 
@@ -351,6 +352,10 @@ export function rankListCandidates(accounts: AccountQuotaSummary[]): AutoSwitchC
     .map(toAutoSwitchCandidate)
     .filter((candidate): candidate is AutoSwitchCandidate => candidate !== null)
     .sort((left, right) => {
+      if (left.name === PROXY_ACCOUNT_NAME || right.name === PROXY_ACCOUNT_NAME) {
+        return left.name === PROXY_ACCOUNT_NAME ? -1 : 1;
+      }
+
       if (right.current_score !== left.current_score) {
         return right.current_score - left.current_score;
       }

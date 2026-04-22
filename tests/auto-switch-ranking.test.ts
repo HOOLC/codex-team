@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import type { AccountQuotaSummary } from "../src/account-store/index.js";
 import { rankAutoSwitchCandidates } from "../src/cli/quota.js";
+import { rankListCandidates } from "../src/cli/quota-ranking.js";
 
 describe("auto switch ranking", () => {
   test("keeps candidates with only one quota window", () => {
@@ -423,6 +424,50 @@ describe("auto switch ranking", () => {
         current_score: 10,
         score_1h: 10,
       },
+    ]);
+  });
+
+  test("keeps the synthetic proxy account at the top of list ordering", () => {
+    const proxyAccount: AccountQuotaSummary = {
+      name: "proxy",
+      account_id: "codexm-proxy-account",
+      user_id: "codexm-proxy",
+      identity: "proxy@codexm.local",
+      plan_type: "pro",
+      credits_balance: 0,
+      status: "ok",
+      fetched_at: "2026-04-22T00:00:00.000Z",
+      error_message: null,
+      unlimited: true,
+      five_hour: {
+        used_percent: 64,
+        window_seconds: 18_000,
+        reset_at: "2026-04-22T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 18,
+        window_seconds: 604_800,
+        reset_at: "2026-04-29T00:00:00.000Z",
+      },
+    };
+
+    const proliteAccount: AccountQuotaSummary = {
+      ...proxyAccount,
+      name: "prolite",
+      account_id: "acct-prolite",
+      user_id: null,
+      identity: "acct-prolite",
+      plan_type: "prolite",
+      five_hour: {
+        used_percent: 0,
+        window_seconds: 18_000,
+        reset_at: "2026-04-22T02:00:00.000Z",
+      },
+    };
+
+    expect(rankListCandidates([proliteAccount, proxyAccount]).map((candidate) => candidate.name)).toEqual([
+      "proxy",
+      "prolite",
     ]);
   });
 });

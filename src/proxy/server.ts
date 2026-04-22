@@ -85,8 +85,12 @@ interface ProxyActiveTurn {
   bufferedMessages: string[];
   fullInput: unknown[];
   outputItems: unknown[];
+  replayAttempted: boolean;
   replayCount: number;
   replayLocked: boolean;
+  replayLockedByItemType: string | null;
+  replayLockedByType: string | null;
+  replaySkipReason: ProxyReplaySkipReason | null;
   replayedFromAccountNames: string[];
   requestBody: Record<string, unknown>;
   requestId: string;
@@ -104,7 +108,24 @@ interface ProxyWebSocketContext {
   upstreamSocket: WebSocket | null;
 }
 
+type ProxyServiceTier = "default" | "priority";
 type ProxyRequestSpeed = "normal" | "fast";
+type ProxyReplaySkipReason =
+  | "already_replayed"
+  | "no_replay_candidate"
+  | "not_retryable_quota_failure"
+  | "replay_locked"
+  | "replay_upstream_error"
+  | "same_account_only";
+
+interface ProxyReplayDiagnostic {
+  replayAttempted: boolean;
+  replayCount: number;
+  replayLockedByItemType: string | null;
+  replayLockedByType: string | null;
+  replaySkipReason: ProxyReplaySkipReason | null;
+  replayedFromAccountNames: string[];
+}
 
 const DEFAULT_CODEX_INSTRUCTIONS = "You are Codex.";
 
@@ -670,16 +691,24 @@ function maybeInjectFastServiceTier<T extends Record<string, unknown>>(
   };
 }
 
+function resolveProxyServiceTier(body: Record<string, unknown> | null | undefined): ProxyServiceTier {
+  return body?.service_tier === "priority" ? "priority" : "default";
+}
+
+function resolveProxyServiceTierFromBodyText(bodyText: string): ProxyServiceTier {
+  try {
+    return resolveProxyServiceTier(parseJsonBody(bodyText));
+  } catch {
+    return "default";
+  }
+}
+
 function resolveProxyRequestSpeed(body: Record<string, unknown> | null | undefined): ProxyRequestSpeed {
-  return body?.service_tier === "priority" ? "fast" : "normal";
+  return resolveProxyServiceTier(body) === "priority" ? "fast" : "normal";
 }
 
 function resolveProxyRequestSpeedFromBodyText(bodyText: string): ProxyRequestSpeed {
-  try {
-    return resolveProxyRequestSpeed(parseJsonBody(bodyText));
-  } catch {
-    return "normal";
-  }
+  return resolveProxyServiceTierFromBodyText(bodyText) === "priority" ? "fast" : "normal";
 }
 
 function isRetryableQuotaFailure(statusCode: number, payload: unknown): boolean {
@@ -688,6 +717,100 @@ function isRetryableQuotaFailure(statusCode: number, payload: unknown): boolean 
   }
 
   return statusCode === 429 && hasExhaustedRateLimitSignal(payload);
+}
+
+function toProxyReplayDiagnostic(options: {
+  replayAttempted?: boolean;
+  replayCount: number;
+  replayLockedByItemType?: string | null;
+  replayLockedByType?: string | null;
+  replaySkipReason?: ProxyReplaySkipReason | null;
+  replayedFromAccountNames: string[];
+}): Record<string, unknown> {
+  return {
+    replay_attempted: options.replayAttempted ?? false,
+    replay_count: options.replayCount,
+    replay_locked_by_item_type: options.replayLockedByItemType ?? null,
+    replay_locked_by_type: options.replayLockedByType ?? null,
+    replay_skip_reason: options.replaySkipReason ?? null,
+    replay_succeeded: options.replayCount > 0,
+    replayed_from_account_names: options.replayedFromAccountNames,
+  };
+}
+
+function buildProxyReplayDiagnostic(options: {
+  replayAttempted?: boolean;
+  replayCount: number;
+  replayLockedByItemType?: string | null;
+  replayLockedByType?: string | null;
+  replaySkipReason?: ProxyReplaySkipReason | null;
+  replayedFromAccountNames: string[];
+}): ProxyReplayDiagnostic {
+  return {
+    replayAttempted: options.replayAttempted ?? false,
+    replayCount: options.replayCount,
+    replayLockedByItemType: options.replayLockedByItemType ?? null,
+    replayLockedByType: options.replayLockedByType ?? null,
+    replaySkipReason: options.replaySkipReason ?? null,
+    replayedFromAccountNames: options.replayedFromAccountNames,
+  };
+}
+
+function inferNormalizedOutputItemType(item: unknown): string | null {
+  return typeof item === "object"
+    && item !== null
+    && !Array.isArray(item)
+    && typeof (item as Record<string, unknown>).type === "string"
+    ? (item as Record<string, unknown>).type as string
+    : null;
+}
+
+function describeProxyWebSocketReplayLock(
+  payloadType: string | null,
+  payload: Record<string, unknown> | null,
+): {
+  locked: boolean;
+  itemType: string | null;
+  type: string | null;
+} {
+  if (payloadType === null) {
+    return {
+      locked: true,
+      itemType: null,
+      type: "unknown_non_json_frame",
+    };
+  }
+
+  if (payloadType === "response.output_text.delta") {
+    return {
+      locked: typeof payload?.delta === "string" && payload.delta !== "",
+      itemType: null,
+      type: payloadType,
+    };
+  }
+
+  if (payloadType === "response.output_text.done") {
+    return {
+      locked: typeof payload?.text === "string" && payload.text !== "",
+      itemType: null,
+      type: payloadType,
+    };
+  }
+
+  if (payloadType === "response.output_item.done" && payload?.item !== undefined) {
+    const normalized = normalizeResponseOutputItem(payload.item);
+    return {
+      locked: normalized !== null,
+      itemType: inferNormalizedOutputItemType(normalized) ?? inferNormalizedOutputItemType(payload.item),
+      type: payloadType,
+    };
+  }
+
+  return {
+    locked: false,
+    itemType: null,
+    type: payloadType,
+  };
 }
 
 function isProxyWebSocketTerminalEvent(payloadType: string | null): boolean {
@@ -701,23 +824,7 @@ function doesProxyWebSocketEventLockReplay(
   payloadType: string | null,
   payload: Record<string, unknown> | null,
 ): boolean {
-  if (payloadType === null) {
-    return true;
-  }
-
-  if (payloadType === "response.output_text.delta") {
-    return typeof payload?.delta === "string" && payload.delta !== "";
-  }
-
-  if (payloadType === "response.output_text.done") {
-    return typeof payload?.text === "string" && payload.text !== "";
-  }
-
-  if (payloadType === "response.output_item.done" && payload?.item !== undefined) {
-    return normalizeResponseOutputItem(payload.item) !== null;
-  }
-
-  return false;
+  return describeProxyWebSocketReplayLock(payloadType, payload).locked;
 }
 
 function shouldBufferProxyWebSocketPreludeEvent(
@@ -1587,11 +1694,60 @@ async function forwardRawChatGPTCompatibleRoute(options: {
   bodyText: string;
   pathname: string;
   search: string;
+  store: AccountStore | null;
   fetchImpl: typeof fetch;
   headers: Headers;
   authKind: "direct-chatgpt" | "synthetic-chatgpt";
   selected: ProxyUpstreamAccount | null;
 }): Promise<ProxyForwardResult> {
+  if (options.authKind === "synthetic-chatgpt" && options.selected && options.store && options.bodyText.trim() !== "") {
+    let parsedBody: Record<string, unknown> | null = null;
+    try {
+      parsedBody = parseJsonBody(options.bodyText);
+    } catch {
+      parsedBody = null;
+    }
+    if (parsedBody) {
+      const replayed = await fetchSyntheticChatGPTRawJsonPayloadWithReplay({
+        request: options.request,
+        store: options.store,
+        selected: options.selected,
+        fetchImpl: options.fetchImpl,
+        pathname: options.pathname,
+        search: options.search,
+        buildRequestBody: (selected) => maybeInjectFastServiceTier(cloneJsonValue(parsedBody), selected),
+      });
+      const responseBytes = writeJson(
+        options.response,
+        replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300 ? 200 : replayed.upstreamStatus,
+        replayed.payload,
+      );
+      return {
+        statusCode: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300 ? 200 : replayed.upstreamStatus,
+        responseBytes,
+        authKind: options.authKind,
+        selectedAccount: replayed.selected.account.name,
+        selectedAuthMode: replayed.selected.account.auth_mode,
+        upstreamKind: "chatgpt",
+        requestSpeed: replayed.requestSpeed,
+        diagnostic: toProxyReplayDiagnostic(replayed.replay),
+        errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
+          ? undefined
+          : {
+              ...buildRequestResponseLogPayload({
+                request: options.request,
+                bodyText: options.bodyText,
+                upstreamUrl: toChatGPTCodexUrl(options.pathname, options.search),
+                upstreamRequestHeaders: buildChatGPTAuthHeaders(options.request, replayed.selected),
+                responseHeaders: replayed.responseHeaders,
+                responseBodyText: replayed.responseBodyText,
+              }),
+              ...toProxyReplayDiagnostic(replayed.replay),
+            },
+      };
+    }
+  }
+
   const upstreamUrl = toChatGPTCodexUrl(options.pathname, options.search);
   const upstream = await options.fetchImpl(
     upstreamUrl,
@@ -1779,6 +1935,7 @@ async function forwardOpenAIViaDirectChatGPT(options: {
     bodyText: options.bodyText,
     pathname: options.pathname,
     search: options.search,
+    store: null,
     fetchImpl: options.fetchImpl,
     headers: requestHeadersToFetchHeaders(options.request),
     authKind: "direct-chatgpt",
@@ -1796,22 +1953,23 @@ function isBufferedProxyReplayRoute(pathname: string, body: Record<string, unkno
   return false;
 }
 
+interface ProxyBufferedReplayResult {
+  payload: unknown;
+  replay: ProxyReplayDiagnostic;
+  requestSpeed: ProxyRequestSpeed;
+  selected: ProxyUpstreamAccount;
+  upstreamStatus: number;
+  responseHeaders: Record<string, string>;
+  responseBodyText: string;
+}
+
 async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
   request: IncomingMessage;
   store: AccountStore;
   selected: ProxyUpstreamAccount;
   fetchImpl: typeof fetch;
   buildRequestBody: (selected: ProxyUpstreamAccount) => Record<string, unknown>;
-}): Promise<{
-  payload: unknown;
-  replayCount: number;
-  replayedFromAccountNames: string[];
-  requestSpeed: ProxyRequestSpeed;
-  selected: ProxyUpstreamAccount;
-  upstreamStatus: number;
-  responseHeaders: Record<string, string>;
-  responseBodyText: string;
-}> {
+}): Promise<ProxyBufferedReplayResult> {
   let selected = options.selected;
   const replayedFromAccountNames: string[] = [];
   const attemptedAccountNames = new Set<string>();
@@ -1832,8 +1990,14 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
     if (!isRetryableQuotaFailure(upstream.status, payload) || replayedFromAccountNames.length >= 1) {
       return {
         payload,
-        replayCount: replayedFromAccountNames.length,
-        replayedFromAccountNames,
+        replay: buildProxyReplayDiagnostic({
+          replayAttempted: replayedFromAccountNames.length > 0 || isRetryableQuotaFailure(upstream.status, payload),
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: isRetryableQuotaFailure(upstream.status, payload) && replayedFromAccountNames.length >= 1
+            ? "already_replayed"
+            : null,
+          replayedFromAccountNames,
+        }),
         requestSpeed: resolveProxyRequestSpeed(requestBody),
         selected,
         upstreamStatus: upstream.status,
@@ -1846,8 +2010,82 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
     if (!replaySelected || replaySelected.account.name === selected.account.name) {
       return {
         payload,
-        replayCount: replayedFromAccountNames.length,
-        replayedFromAccountNames,
+        replay: buildProxyReplayDiagnostic({
+          replayAttempted: true,
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: replaySelected ? "same_account_only" : "no_replay_candidate",
+          replayedFromAccountNames,
+        }),
+        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        selected,
+        upstreamStatus: upstream.status,
+        responseHeaders: buffered.responseHeaders,
+        responseBodyText: buffered.bodyText,
+      };
+    }
+
+    replayedFromAccountNames.push(selected.account.name);
+    await persistProxyUpstreamAccountSelection(options.store, replaySelected.account);
+    selected = replaySelected;
+  }
+}
+
+async function fetchSyntheticChatGPTRawJsonPayloadWithReplay(options: {
+  request: IncomingMessage;
+  store: AccountStore;
+  selected: ProxyUpstreamAccount;
+  fetchImpl: typeof fetch;
+  pathname: string;
+  search: string;
+  buildRequestBody: (selected: ProxyUpstreamAccount) => Record<string, unknown>;
+}): Promise<ProxyBufferedReplayResult> {
+  let selected = options.selected;
+  const replayedFromAccountNames: string[] = [];
+  const attemptedAccountNames = new Set<string>();
+
+  while (true) {
+    attemptedAccountNames.add(selected.account.name);
+    const requestBody = options.buildRequestBody(selected);
+    const upstreamUrl = toChatGPTCodexUrl(options.pathname, options.search);
+    const upstream = await options.fetchImpl(
+      upstreamUrl,
+      {
+        method: options.request.method ?? "POST",
+        headers: buildChatGPTAuthHeaders(options.request, selected),
+        body: JSON.stringify(requestBody),
+      },
+    );
+    const buffered = await readBufferedJsonPayload(upstream);
+    const payload = buffered.payload;
+    if (!isRetryableQuotaFailure(upstream.status, payload) || replayedFromAccountNames.length >= 1) {
+      return {
+        payload,
+        replay: buildProxyReplayDiagnostic({
+          replayAttempted: replayedFromAccountNames.length > 0 || isRetryableQuotaFailure(upstream.status, payload),
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: isRetryableQuotaFailure(upstream.status, payload) && replayedFromAccountNames.length >= 1
+            ? "already_replayed"
+            : null,
+          replayedFromAccountNames,
+        }),
+        requestSpeed: resolveProxyRequestSpeed(requestBody),
+        selected,
+        upstreamStatus: upstream.status,
+        responseHeaders: buffered.responseHeaders,
+        responseBodyText: buffered.bodyText,
+      };
+    }
+
+    const replaySelected = await selectProxyReplayAccount(options.store, "chatgpt", attemptedAccountNames);
+    if (!replaySelected || replaySelected.account.name === selected.account.name) {
+      return {
+        payload,
+        replay: buildProxyReplayDiagnostic({
+          replayAttempted: true,
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: replaySelected ? "same_account_only" : "no_replay_candidate",
+          replayedFromAccountNames,
+        }),
         requestSpeed: resolveProxyRequestSpeed(requestBody),
         selected,
         upstreamStatus: upstream.status,
@@ -1939,10 +2177,14 @@ async function forwardOpenAIWithApiKey(options: {
         selectedAuthMode: selected.account.auth_mode,
         upstreamKind: "openai",
         requestSpeed: resolveProxyRequestSpeed(parsedBody),
-        diagnostic: {
-          replay_count: replayedFromAccountNames.length,
-          replayed_from_account_names: replayedFromAccountNames,
-        },
+        diagnostic: toProxyReplayDiagnostic({
+          replayAttempted: replayedFromAccountNames.length > 0 || isRetryableQuotaFailure(upstream.status, buffered.payload),
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: isRetryableQuotaFailure(upstream.status, buffered.payload) && replayedFromAccountNames.length >= 1
+            ? "already_replayed"
+            : null,
+          replayedFromAccountNames,
+        }),
         errorPayload: upstream.status === 200
           ? undefined
           : {
@@ -1954,8 +2196,14 @@ async function forwardOpenAIWithApiKey(options: {
                 responseHeaders: buffered.responseHeaders,
                 responseBodyText: buffered.bodyText,
               }),
-              replay_count: replayedFromAccountNames.length,
-              replayed_from_account_names: replayedFromAccountNames,
+              ...toProxyReplayDiagnostic({
+                replayAttempted: replayedFromAccountNames.length > 0 || isRetryableQuotaFailure(upstream.status, buffered.payload),
+                replayCount: replayedFromAccountNames.length,
+                replaySkipReason: isRetryableQuotaFailure(upstream.status, buffered.payload) && replayedFromAccountNames.length >= 1
+                  ? "already_replayed"
+                  : null,
+                replayedFromAccountNames,
+              }),
             },
       };
     }
@@ -1975,10 +2223,12 @@ async function forwardOpenAIWithApiKey(options: {
         selectedAuthMode: selected.account.auth_mode,
         upstreamKind: "openai",
         requestSpeed: resolveProxyRequestSpeed(parsedBody),
-        diagnostic: {
-          replay_count: replayedFromAccountNames.length,
-          replayed_from_account_names: replayedFromAccountNames,
-        },
+        diagnostic: toProxyReplayDiagnostic({
+          replayAttempted: true,
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: replaySelected ? "same_account_only" : "no_replay_candidate",
+          replayedFromAccountNames,
+        }),
       };
     }
 
@@ -2053,10 +2303,7 @@ async function forwardOpenAIViaChatGPT(options: {
       selectedAuthMode: replayed.selected.account.auth_mode,
       upstreamKind: "chatgpt",
       requestSpeed: replayed.requestSpeed,
-      diagnostic: {
-        replay_count: replayed.replayCount,
-        replayed_from_account_names: replayed.replayedFromAccountNames,
-      },
+      diagnostic: toProxyReplayDiagnostic(replayed.replay),
       errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
         ? undefined
         : {
@@ -2068,8 +2315,7 @@ async function forwardOpenAIViaChatGPT(options: {
               responseHeaders: replayed.responseHeaders,
               responseBodyText: replayed.responseBodyText,
             }),
-            replay_count: replayed.replayCount,
-            replayed_from_account_names: replayed.replayedFromAccountNames,
+            ...toProxyReplayDiagnostic(replayed.replay),
           },
     };
   }
@@ -2097,10 +2343,7 @@ async function forwardOpenAIViaChatGPT(options: {
       selectedAuthMode: replayed.selected.account.auth_mode,
       upstreamKind: "chatgpt",
       requestSpeed: replayed.requestSpeed,
-      diagnostic: {
-        replay_count: replayed.replayCount,
-        replayed_from_account_names: replayed.replayedFromAccountNames,
-      },
+      diagnostic: toProxyReplayDiagnostic(replayed.replay),
       errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
         ? undefined
         : {
@@ -2112,8 +2355,7 @@ async function forwardOpenAIViaChatGPT(options: {
               responseHeaders: replayed.responseHeaders,
               responseBodyText: replayed.responseBodyText,
             }),
-            replay_count: replayed.replayCount,
-            replayed_from_account_names: replayed.replayedFromAccountNames,
+            ...toProxyReplayDiagnostic(replayed.replay),
           },
     };
   }
@@ -2141,10 +2383,7 @@ async function forwardOpenAIViaChatGPT(options: {
       selectedAuthMode: replayed.selected.account.auth_mode,
       upstreamKind: "chatgpt",
       requestSpeed: replayed.requestSpeed,
-      diagnostic: {
-        replay_count: replayed.replayCount,
-        replayed_from_account_names: replayed.replayedFromAccountNames,
-      },
+      diagnostic: toProxyReplayDiagnostic(replayed.replay),
       errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
         ? undefined
         : {
@@ -2156,8 +2395,7 @@ async function forwardOpenAIViaChatGPT(options: {
               responseHeaders: replayed.responseHeaders,
               responseBodyText: replayed.responseBodyText,
             }),
-            replay_count: replayed.replayCount,
-            replayed_from_account_names: replayed.replayedFromAccountNames,
+            ...toProxyReplayDiagnostic(replayed.replay),
           },
     };
   }
@@ -2185,6 +2423,7 @@ async function forwardOpenAIViaChatGPT(options: {
     bodyText: options.bodyText,
     pathname: options.pathname,
     search: options.search,
+    store: options.store,
     fetchImpl: options.fetchImpl,
     headers: buildChatGPTAuthHeaders(options.request, options.selected),
     authKind: "synthetic-chatgpt",
@@ -2655,8 +2894,14 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       request_bytes: Buffer.byteLength(JSON.stringify({ input: activeTurn.fullInput })),
       response_bytes: payload ? Buffer.byteLength(JSON.stringify(payload)) : 0,
       synthetic_usage: false,
-      replay_count: activeTurn.replayCount,
-      replayed_from_account_names: activeTurn.replayedFromAccountNames,
+      ...toProxyReplayDiagnostic({
+        replayAttempted: activeTurn.replayAttempted,
+        replayCount: activeTurn.replayCount,
+        replayLockedByItemType: activeTurn.replayLockedByItemType,
+        replayLockedByType: activeTurn.replayLockedByType,
+        replaySkipReason: activeTurn.replaySkipReason,
+        replayedFromAccountNames: activeTurn.replayedFromAccountNames,
+      }),
     });
 
     context.activeTurn = null;
@@ -2711,12 +2956,22 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     terminalStatusCode: number,
   ): Promise<boolean> => {
     const activeTurn = context.activeTurn;
-    if (
-      !activeTurn
-      || activeTurn.replayLocked
-      || activeTurn.replayCount >= 1
-      || !isRetryableQuotaFailure(terminalStatusCode, payload)
-    ) {
+    if (!activeTurn) {
+      return false;
+    }
+
+    if (!isRetryableQuotaFailure(terminalStatusCode, payload)) {
+      return false;
+    }
+    activeTurn.replayAttempted = true;
+
+    if (activeTurn.replayLocked) {
+      activeTurn.replaySkipReason = "replay_locked";
+      return false;
+    }
+
+    if (activeTurn.replayCount >= 1) {
+      activeTurn.replaySkipReason = "already_replayed";
       return false;
     }
 
@@ -2725,7 +2980,12 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       "chatgpt",
       [...activeTurn.replayedFromAccountNames, activeTurn.accountName],
     );
-    if (!replaySelected || replaySelected.account.name === activeTurn.accountName) {
+    if (!replaySelected) {
+      activeTurn.replaySkipReason = "no_replay_candidate";
+      return false;
+    }
+    if (replaySelected.account.name === activeTurn.accountName) {
+      activeTurn.replaySkipReason = "same_account_only";
       return false;
     }
 
@@ -2745,13 +3005,17 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       activeTurn.fullInput = rewrittenRequest.fullInput;
       activeTurn.outputItems = [];
       activeTurn.replayLocked = false;
+      activeTurn.replayLockedByItemType = null;
+      activeTurn.replayLockedByType = null;
       activeTurn.replayCount += 1;
+      activeTurn.replaySkipReason = null;
       activeTurn.replayedFromAccountNames = [...activeTurn.replayedFromAccountNames, previousAccountName];
       activeTurn.requestSpeed = resolveProxyRequestSpeed(finalRequestBody);
       activeTurn.responseId = null;
       context.upstreamSocket?.send(JSON.stringify(finalRequestBody));
       return true;
     } catch (error) {
+      activeTurn.replaySkipReason = "replay_upstream_error";
       options.debugLog?.(`proxy websocket replay: ${(error as Error).message}`);
       return false;
     }
@@ -2808,8 +3072,11 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     }
 
     if (context.activeTurn && !context.activeTurn.replayLocked) {
-      if (doesProxyWebSocketEventLockReplay(payloadType, payload)) {
+      const replayLock = describeProxyWebSocketReplayLock(payloadType, payload);
+      if (replayLock.locked) {
         context.activeTurn.replayLocked = true;
+        context.activeTurn.replayLockedByItemType = replayLock.itemType;
+        context.activeTurn.replayLockedByType = replayLock.type;
       }
       flushBufferedTurnMessages(context.activeTurn, downstream);
     }
@@ -3011,8 +3278,12 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               bufferedMessages: [],
               fullInput: rewrittenRequest.fullInput,
               outputItems: [],
+              replayAttempted: false,
               replayCount: 0,
               replayLocked: false,
+              replayLockedByItemType: null,
+              replayLockedByType: null,
+              replaySkipReason: null,
               replayedFromAccountNames: [],
               requestBody: cloneJsonValue(requestBody),
               requestId,
