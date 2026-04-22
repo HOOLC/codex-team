@@ -505,10 +505,15 @@ async function selectProxyAccount(
     store.listQuotaSummaries(),
     readDaemonState(store.paths.codexTeamDir),
   ]);
+  const allAccounts = accounts;
   const eligibleAccounts = accounts.filter((account) => account.auto_switch_eligible !== false);
   const excludedNames = new Set(options.excludeAccountNames ?? []);
-  const accountByName = new Map(eligibleAccounts.map((account) => [account.name, account] as const));
-  const quotaByName = new Map(
+  const allAccountByName = new Map(allAccounts.map((account) => [account.name, account] as const));
+  const allQuotaByName = new Map(
+    quotaList.accounts.map((account) => [account.name, account] as const),
+  );
+  const eligibleAccountByName = new Map(eligibleAccounts.map((account) => [account.name, account] as const));
+  const eligibleQuotaByName = new Map(
     quotaList.accounts
       .filter((account) => account.auto_switch_eligible !== false)
       .map((account) => [account.name, account] as const),
@@ -530,14 +535,14 @@ async function selectProxyAccount(
     .map((account) => account.name);
   const manualAccountName = options.ignoreManualSelection
     ? null
-    : await resolveProxyManualUpstreamAccountName(store, eligibleAccounts);
-  if (manualAccountName && matchingFallbackNames.includes(manualAccountName)) {
-    const selectedAccount = accountByName.get(manualAccountName) ?? null;
-    if (!selectedAccount) {
+    : await resolveProxyManualUpstreamAccountName(store, allAccounts);
+  if (manualAccountName && !excludedNames.has(manualAccountName)) {
+    const selectedAccount = allAccountByName.get(manualAccountName) ?? null;
+    if (!selectedAccount || !typeMatches(selectedAccount)) {
       return null;
     }
 
-    const selectedQuota = quotaByName.get(manualAccountName) ?? null;
+    const selectedQuota = allQuotaByName.get(manualAccountName) ?? null;
     const selectedCandidate = selectedQuota
       ? rankAutoSwitchCandidates([selectedQuota]).find((candidate) => candidate.name === manualAccountName) ?? null
       : null;
@@ -550,26 +555,26 @@ async function selectProxyAccount(
   }
   if (!autoswitchEnabled) {
     const selectedName = matchingFallbackNames[0] ?? null;
-    const selectedAccount = selectedName ? accountByName.get(selectedName) ?? null : null;
+    const selectedAccount = selectedName ? eligibleAccountByName.get(selectedName) ?? null : null;
     if (!selectedAccount) {
       return null;
     }
 
-    const selectedQuota = selectedName ? quotaByName.get(selectedName) ?? null : null;
+    const selectedQuota = selectedName ? eligibleQuotaByName.get(selectedName) ?? null : null;
     const selectedCandidate = selectedQuota
       ? rankAutoSwitchCandidates([selectedQuota]).find((candidate) => candidate.name === selectedName) ?? null
       : null;
     return await toProxyUpstreamAccount(selectedAccount, selectedCandidate);
   }
 
-  const rankedCandidates = rankAutoSwitchCandidates([...quotaByName.values()])
+  const rankedCandidates = rankAutoSwitchCandidates([...eligibleQuotaByName.values()])
     .filter((candidate) => {
-      const account = accountByName.get(candidate.name);
+      const account = eligibleAccountByName.get(candidate.name);
       return account ? typeMatches(account) && !excludedNames.has(candidate.name) : false;
     });
   const rankedCandidateByName = new Map(rankedCandidates.map((candidate) => [candidate.name, candidate] as const));
   const selectedName = [...rankedCandidates.map((candidate) => candidate.name), ...matchingFallbackNames][0];
-  const selectedAccount = selectedName ? accountByName.get(selectedName) ?? null : null;
+  const selectedAccount = selectedName ? eligibleAccountByName.get(selectedName) ?? null : null;
   if (!selectedAccount) {
     return null;
   }

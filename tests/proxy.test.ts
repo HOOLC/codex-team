@@ -2181,7 +2181,7 @@ describe("codexm proxy", () => {
     }
   });
 
-  test("proxy follows the saved direct account even when autoswitch is on", async () => {
+  test("proxy follows the saved direct account even when autoswitch is on and the manual account is protected", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { writeSyntheticProxyRuntime } = await import("../src/proxy/config.js");
     const { startProxyServer } = await import("../src/proxy/server.js");
@@ -2199,6 +2199,7 @@ describe("codexm proxy", () => {
         (await store.getManagedAccount("beta")).metaPath,
         { status: "ok", plan_type: "pro", five_hour_used: 60, one_week_used: 65 },
       );
+      await store.setAutoSwitchEligibility("beta", false);
 
       await store.switchAccount("beta");
       const proxyRuntimeState = await writeSyntheticProxyRuntime({
