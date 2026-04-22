@@ -1,4 +1,5 @@
 export {
+  buildManagedAccountSurfaceRefreshExpression,
   buildManagedCurrentAccountExpression,
   buildManagedCurrentQuotaExpression,
   buildManagedSwitchExpression,

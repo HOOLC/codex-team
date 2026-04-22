@@ -1,7 +1,10 @@
 import { describe, expect, test } from "@rstest/core";
 
 import type { AccountQuotaSummary } from "../src/account-store/index.js";
+import { normalizeAccountScore } from "../src/cli/quota-display.js";
 import { rankAutoSwitchCandidates } from "../src/cli/quota.js";
+import { rankListCandidates, toDisplayAutoSwitchCandidate } from "../src/cli/quota-ranking.js";
+import { buildProxyQuotaAggregateFromAccounts } from "../src/proxy/quota.js";
 
 describe("auto switch ranking", () => {
   test("keeps candidates with only one quota window", () => {
@@ -216,6 +219,45 @@ describe("auto switch ranking", () => {
     ]);
   });
 
+  test("treats free as half-plus 5h capacity with a 1:1 free 5h to 1w ratio", () => {
+    const freeAccount: AccountQuotaSummary = {
+      name: "free",
+      account_id: "acct-free",
+      user_id: null,
+      identity: "acct-free",
+      plan_type: "free",
+      credits_balance: 0,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 20,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 50,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+    };
+
+    expect(rankAutoSwitchCandidates([freeAccount])).toMatchObject([
+      {
+        name: "free",
+        current_score: 3.75,
+        score_1h: 3.75,
+        remain_5h: 80,
+        remain_1w: 50,
+        remain_5h_in_1w_units: 6,
+        projected_5h_in_1w_units_1h: 6,
+        projected_1w_1h: 50,
+        five_hour_to_one_week_ratio: 1,
+      },
+    ]);
+  });
+
   test("prefers earlier reset when projected availability is higher", () => {
     const earlyResetAccount: AccountQuotaSummary = {
       name: "early-reset",
@@ -385,5 +427,83 @@ describe("auto switch ranking", () => {
         score_1h: 10,
       },
     ]);
+  });
+
+  test("keeps the synthetic proxy account at the top of list ordering", () => {
+    const proxyAccount: AccountQuotaSummary = {
+      name: "proxy",
+      account_id: "codexm-proxy-account",
+      user_id: "codexm-proxy",
+      identity: "proxy@codexm.local",
+      plan_type: "pro",
+      credits_balance: 0,
+      status: "ok",
+      fetched_at: "2026-04-22T00:00:00.000Z",
+      error_message: null,
+      unlimited: true,
+      five_hour: {
+        used_percent: 64,
+        window_seconds: 18_000,
+        reset_at: "2026-04-22T01:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 18,
+        window_seconds: 604_800,
+        reset_at: "2026-04-29T00:00:00.000Z",
+      },
+    };
+
+    const proliteAccount: AccountQuotaSummary = {
+      ...proxyAccount,
+      name: "prolite",
+      account_id: "acct-prolite",
+      user_id: null,
+      identity: "acct-prolite",
+      plan_type: "prolite",
+      five_hour: {
+        used_percent: 0,
+        window_seconds: 18_000,
+        reset_at: "2026-04-22T02:00:00.000Z",
+      },
+    };
+
+    expect(rankListCandidates([proliteAccount, proxyAccount]).map((candidate) => candidate.name)).toEqual([
+      "proxy",
+      "prolite",
+    ]);
+  });
+
+  test("uses the proxy aggregate profile instead of the synthetic plan for proxy display normalization", () => {
+    const sourceAccount: AccountQuotaSummary = {
+      name: "source-plus",
+      account_id: "acct-source-plus",
+      user_id: null,
+      identity: "acct-source-plus",
+      plan_type: "plus",
+      credits_balance: 0,
+      status: "ok",
+      fetched_at: "2026-04-08T00:00:00.000Z",
+      error_message: null,
+      unlimited: false,
+      five_hour: {
+        used_percent: 12,
+        window_seconds: 18_000,
+        reset_at: "2026-04-08T05:00:00.000Z",
+      },
+      one_week: {
+        used_percent: 34,
+        window_seconds: 604_800,
+        reset_at: "2026-04-15T00:00:00.000Z",
+      },
+      auto_switch_eligible: true,
+    };
+
+    const aggregate = buildProxyQuotaAggregateFromAccounts([sourceAccount]);
+    expect(aggregate).not.toBeNull();
+
+    const candidate = toDisplayAutoSwitchCandidate(aggregate!.summary, aggregate);
+    expect(candidate).not.toBeNull();
+    expect(candidate?.current_score).toBeCloseTo(13.2, 2);
+    expect(normalizeAccountScore(candidate?.current_score ?? null, aggregate!.summary, aggregate)).toBeCloseTo(88, 2);
   });
 });

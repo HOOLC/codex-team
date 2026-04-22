@@ -126,6 +126,8 @@ README 只保留用户可见行为；这里记录设计意图和实现边界。
 
 这两个动作都是 Desktop 运行态动作，不是一次性读取动作。
 
+另外，受管 Desktop refresh 不只会失效 quota 相关 query；当当前账号是 synthetic proxy auth 时，还会直接 seed Desktop usage/account 相关的 renderer query cache，包括 `["vscode", "account-info"]`、`["rate-limit-status"]` 和 `["accounts", "check"]`，这样 plan / usage 相关菜单不会继续卡在旧 error 或 `null` 状态。这个步骤不依赖页面 reload；`switch` 仍会在需要让 app-server 重新读取本地 auth/config 时走 app-server restart。
+
 ### 3.4 后续 `doctor`
 
 `doctor` 使用 **direct 优先** 的检查顺序：

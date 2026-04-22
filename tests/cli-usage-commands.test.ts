@@ -24,20 +24,36 @@ async function writeUsageSession(options: {
   await writeFile(filePath, `${options.lines.join("\n")}\n`);
 }
 
+function isoDaysAgo(daysAgo: number): string {
+  return new Date(Date.now() - daysAgo * 86_400_000).toISOString();
+}
+
+function relativeSessionPath(timestamp: string, fileName: string): string {
+  const date = new Date(timestamp);
+  return [
+    String(date.getUTCFullYear()).padStart(4, "0"),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0"),
+    fileName,
+  ].join("/");
+}
+
 describe("CLI Usage Commands", () => {
   test("usage --json prints window summaries and daily buckets", async () => {
     const homeDir = await createTempHome();
 
     try {
+      const todayTimestamp = isoDaysAgo(0);
+      const recentTimestamp = isoDaysAgo(2);
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
       const stderr = captureWritable();
 
       await writeUsageSession({
         homeDir,
-        relativePath: "2026/04/17/today-fast.jsonl",
+        relativePath: relativeSessionPath(todayTimestamp, "today-fast.jsonl"),
         lines: [
-          '{"payload":{"type":"session_meta","id":"today-fast","timestamp":"2026-04-17T08:00:00Z"}}',
+          `{"payload":{"type":"session_meta","id":"today-fast","timestamp":"${todayTimestamp}"}}`,
           '{"payload":{"type":"turn_context","model":"gpt-5.4"}}',
           '{"payload":{"type":"event_msg","kind":"token_count","total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":50}}}',
         ],
@@ -45,9 +61,9 @@ describe("CLI Usage Commands", () => {
       await writeUsageSession({
         homeDir,
         archived: true,
-        relativePath: "recent-slow.jsonl",
+        relativePath: relativeSessionPath(recentTimestamp, "recent-slow.jsonl"),
         lines: [
-          '{"payload":{"type":"session_meta","id":"recent-slow","timestamp":"2026-04-15T09:00:00Z"}}',
+          `{"payload":{"type":"session_meta","id":"recent-slow","timestamp":"${recentTimestamp}"}}`,
           '{"payload":{"type":"turn_context","model":"gpt-5-mini"}}',
           '{"wrapper":{"type":"event_msg"},"payload":{"type":"token_count","kind":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":40}}}}',
         ],
@@ -95,15 +111,16 @@ describe("CLI Usage Commands", () => {
     const homeDir = await createTempHome();
 
     try {
+      const todayTimestamp = isoDaysAgo(0);
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
       const stderr = captureWritable();
 
       await writeUsageSession({
         homeDir,
-        relativePath: "2026/04/17/today-fast.jsonl",
+        relativePath: relativeSessionPath(todayTimestamp, "today-fast.jsonl"),
         lines: [
-          '{"payload":{"type":"session_meta","id":"today-fast","timestamp":"2026-04-17T08:00:00Z"}}',
+          `{"payload":{"type":"session_meta","id":"today-fast","timestamp":"${todayTimestamp}"}}`,
           '{"payload":{"type":"turn_context","model":"gpt-5.4"}}',
           '{"payload":{"type":"event_msg","kind":"token_count","total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":50}}}',
         ],
@@ -132,6 +149,7 @@ describe("CLI Usage Commands", () => {
     const homeDir = await createTempHome();
 
     try {
+      const todayTimestamp = isoDaysAgo(0);
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
       const stderr = captureWritable();
@@ -144,9 +162,9 @@ describe("CLI Usage Commands", () => {
       });
       await writeUsageSession({
         homeDir,
-        relativePath: "2026/04/17/list-fast.jsonl",
+        relativePath: relativeSessionPath(todayTimestamp, "list-fast.jsonl"),
         lines: [
-          '{"payload":{"type":"session_meta","id":"list-fast","timestamp":"2026-04-17T08:00:00Z"}}',
+          `{"payload":{"type":"session_meta","id":"list-fast","timestamp":"${todayTimestamp}"}}`,
           '{"payload":{"type":"turn_context","model":"gpt-5.4"}}',
           '{"payload":{"type":"event_msg","kind":"token_count","total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":50}}}',
         ],

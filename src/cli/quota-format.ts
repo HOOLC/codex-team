@@ -1,5 +1,7 @@
+import { formatAccountListDisplayName, formatAccountListMarkers } from "../account-list-display.js";
 import { maskAccountId } from "../auth-snapshot.js";
 import type { AccountQuotaSummary } from "../account-store/index.js";
+import type { ProxyQuotaAggregate } from "../proxy/quota.js";
 import type { WatchHistoryEtaContext } from "../watch/history.js";
 import {
   colorizeBlockedRow,
@@ -11,14 +13,16 @@ import {
   formatRemainingPercent,
   formatResetAt,
   formatUsagePercent,
-  isWindowUnavailable,
+  isAccountFullyUnavailable,
+  normalizeAccountScore,
   normalizePlusScore,
   stripAnsi,
   toQuotaEtaSummary,
   visibleWidth,
 } from "./quota-display.js";
 import { buildListSummary } from "./quota-summary.js";
-import { rankListCandidates, selectCurrentNextResetWindow, toAutoSwitchCandidate } from "./quota-ranking.js";
+import { rankListCandidates, selectCurrentNextResetWindow, toDisplayAutoSwitchCandidate } from "./quota-ranking.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
 import type {
   AutoSwitchCandidate,
   CurrentListStatusLike,
@@ -69,14 +73,17 @@ function padAligned(
 function formatTable(
   rows: Array<Record<string, string>>,
   columns: TableColumn[],
+  widthsOverride?: number[],
 ): string {
   if (rows.length === 0) {
     return "";
   }
 
-  const widths = columns.map(({ key, label }) =>
-    Math.max(visibleWidth(label), ...rows.map((row) => visibleWidth(row[key]))),
-  );
+  const widths = widthsOverride
+    ? widthsOverride
+    : columns.map(({ key, label }) =>
+        Math.max(visibleWidth(label), ...rows.map((row) => visibleWidth(row[key]))),
+      );
 
   const renderRow = (row: Record<string, string>, kind: "header" | "body") => {
     const rendered = columns
@@ -152,9 +159,245 @@ function compactTableIdentity(value: string, width: number): string {
   return compactIdentity(value, width);
 }
 
+function truncateVisible(value: string, width: number): string {
+  if (width <= 0) {
+    return "";
+  }
+
+  if (visibleWidth(value) <= width) {
+    return value;
+  }
+
+  const plain = stripAnsi(value);
+  if (width <= 2) {
+    return plain.slice(0, width);
+  }
+
+  return `${plain.slice(0, width - 2)}..`;
+}
+
+interface QuotaDisplayRow {
+  rowStyle?: "red-bg";
+  markers: string;
+  displayName: string;
+  accountId: string;
+  planType: string;
+  eta: string;
+  score: string;
+  fiveHour: string;
+  nextReset: string;
+  fiveHourReset: string;
+  oneWeek: string;
+  oneWeekReset: string;
+  eta5hEq1w?: string;
+  eta1w?: string;
+  rate1wUnits?: string;
+  remaining5hEq1w?: string;
+  projected5hIn1wUnits1h?: string;
+  score1h?: string;
+  projected1w1h?: string;
+  fiveHourToOneWeekRatio?: string;
+}
+
+interface BudgetedQuotaTableWidths {
+  nameWidth: number;
+  accountIdWidth: number;
+  planWidth: number;
+  scoreWidth: number;
+  etaWidth: number;
+  fiveHourWidth: number;
+  oneWeekWidth: number;
+  nextResetWidth: number;
+}
+
+function getQuotaTableSeparatorWidth(columnCount: number): number {
+  return Math.max(0, columnCount - 1) * 2;
+}
+
+function resolveQuotaDisplayWidth(options: {
+  header: string;
+  values: string[];
+  minWidth?: number;
+}): { minWidth: number; desiredWidth: number } {
+  const minWidth = Math.max(options.minWidth ?? 0, visibleWidth(options.header));
+  const desiredWidth = Math.max(
+    minWidth,
+    ...options.values.map((value) => visibleWidth(value)),
+  );
+
+  return {
+    minWidth,
+    desiredWidth,
+  };
+}
+
+function computeBudgetedQuotaTableWidths(
+  rows: QuotaDisplayRow[],
+  terminalWidth: number,
+  showEtaColumn: boolean,
+): BudgetedQuotaTableWidths | null {
+  const nameWidths = resolveQuotaDisplayWidth({
+    header: `${formatAccountListMarkers({})}NAME`,
+    values: rows.map((row) => `${row.markers}${row.displayName}`),
+    minWidth: 10,
+  });
+  const accountIdWidths = resolveQuotaDisplayWidth({
+    header: "IDENTITY",
+    values: rows.map((row) => row.accountId),
+  });
+  const planWidths = resolveQuotaDisplayWidth({
+    header: "PLAN",
+    values: rows.map((row) => row.planType),
+  });
+  const scoreWidths = resolveQuotaDisplayWidth({
+    header: "SCORE",
+    values: rows.map((row) => row.score),
+    minWidth: 5,
+  });
+  const etaWidths = resolveQuotaDisplayWidth({
+    header: "ETA",
+    values: rows.map((row) => row.eta),
+    minWidth: 3,
+  });
+  const fiveHourWidths = resolveQuotaDisplayWidth({
+    header: "5H",
+    values: rows.map((row) => row.fiveHour),
+  });
+  const oneWeekWidths = resolveQuotaDisplayWidth({
+    header: "1W",
+    values: rows.map((row) => row.oneWeek),
+  });
+  const nextResetWidths = resolveQuotaDisplayWidth({
+    header: "NEXT RESET",
+    values: rows.map((row) => row.nextReset),
+  });
+
+  const columnCount = showEtaColumn ? 8 : 7;
+  const fixedMinWidth =
+    nameWidths.minWidth
+    + accountIdWidths.minWidth
+    + planWidths.minWidth
+    + scoreWidths.minWidth
+    + (showEtaColumn ? etaWidths.minWidth : 0)
+    + fiveHourWidths.minWidth
+    + oneWeekWidths.minWidth
+    + nextResetWidths.minWidth
+    + getQuotaTableSeparatorWidth(columnCount);
+
+  if (terminalWidth < fixedMinWidth) {
+    return null;
+  }
+
+  let nameWidth = nameWidths.minWidth;
+  let accountIdWidth = accountIdWidths.minWidth;
+  let planWidth = planWidths.minWidth;
+  let scoreWidth = scoreWidths.minWidth;
+  let etaWidth = showEtaColumn ? etaWidths.minWidth : 0;
+  let fiveHourWidth = fiveHourWidths.minWidth;
+  let oneWeekWidth = oneWeekWidths.minWidth;
+  let nextResetWidth = nextResetWidths.minWidth;
+  let remainingWidth = terminalWidth - fixedMinWidth;
+
+  const consumeGrowth = (
+    currentWidth: number,
+    desiredWidth: number,
+    minWidth: number,
+  ): number => {
+    const desiredGrowth = Math.max(0, desiredWidth - minWidth);
+    const appliedGrowth = Math.min(remainingWidth, desiredGrowth);
+    remainingWidth -= appliedGrowth;
+    return currentWidth + appliedGrowth;
+  };
+
+  nameWidth = consumeGrowth(nameWidth, nameWidths.desiredWidth, nameWidths.minWidth);
+  scoreWidth = consumeGrowth(scoreWidth, scoreWidths.desiredWidth, scoreWidths.minWidth);
+  fiveHourWidth = consumeGrowth(fiveHourWidth, fiveHourWidths.desiredWidth, fiveHourWidths.minWidth);
+  oneWeekWidth = consumeGrowth(oneWeekWidth, oneWeekWidths.desiredWidth, oneWeekWidths.minWidth);
+  nextResetWidth = consumeGrowth(nextResetWidth, nextResetWidths.desiredWidth, nextResetWidths.minWidth);
+  if (showEtaColumn) {
+    etaWidth = consumeGrowth(etaWidth, etaWidths.desiredWidth, etaWidths.minWidth);
+  }
+  planWidth = consumeGrowth(planWidth, planWidths.desiredWidth, planWidths.minWidth);
+  accountIdWidth = consumeGrowth(accountIdWidth, accountIdWidths.desiredWidth, accountIdWidths.minWidth);
+
+  if (remainingWidth > 0) {
+    accountIdWidth += remainingWidth;
+  }
+
+  return {
+    nameWidth,
+    accountIdWidth,
+    planWidth,
+    scoreWidth,
+    etaWidth,
+    fiveHourWidth,
+    oneWeekWidth,
+    nextResetWidth,
+  };
+}
+
+function renderCompactQuotaRows(
+  rows: QuotaDisplayRow[],
+  terminalWidth: number,
+  showEtaColumn: boolean,
+): string {
+  return rows.flatMap((row) => {
+    const scoreWidth = visibleWidth(row.score);
+    const etaBlockWidth = showEtaColumn ? 1 + visibleWidth(row.eta) : 0;
+    const planWidth = row.planType !== "" ? 1 + visibleWidth(row.planType) : 0;
+    const minimumNameWidth = 10;
+    const reservedCoreWidth =
+      visibleWidth(row.markers) + 1 + scoreWidth + etaBlockWidth + minimumNameWidth;
+    const includePlan = row.planType !== ""
+      && terminalWidth - reservedCoreWidth >= planWidth;
+    const firstLineNameWidth = Math.max(
+      8,
+      terminalWidth
+        - visibleWidth(row.markers)
+        - 1
+        - scoreWidth
+        - etaBlockWidth
+        - (includePlan ? planWidth : 0),
+    );
+    const firstLine = [
+      row.markers,
+      padVisibleEnd(truncateVisible(row.displayName, firstLineNameWidth), firstLineNameWidth),
+      includePlan ? ` ${truncateVisible(row.planType, visibleWidth(row.planType))}` : "",
+      " ",
+      padVisibleStart(row.score, scoreWidth),
+      showEtaColumn ? ` ${padVisibleStart(row.eta, visibleWidth(row.eta))}` : "",
+    ].join("");
+
+    const secondLineIndent = " ".repeat(visibleWidth(row.markers));
+    const secondLineWidth = Math.max(0, terminalWidth - visibleWidth(secondLineIndent));
+    const segments = [`5H ${row.fiveHour}`, `1W ${row.oneWeek}`];
+    if (
+      row.nextReset !== "-"
+      && visibleWidth([...segments, row.nextReset].join(" | ")) <= secondLineWidth
+    ) {
+      segments.push(row.nextReset);
+    }
+    const identityWidth = Math.min(
+      18,
+      Math.max(0, secondLineWidth - visibleWidth(segments.join(" | ")) - 3),
+    );
+    if (row.accountId !== "-" && identityWidth >= 8) {
+      segments.push(compactTableIdentity(row.accountId, identityWidth));
+    }
+
+    const secondLine = `${secondLineIndent}${truncateVisible(segments.join(" | "), secondLineWidth)}`;
+    const lines = [firstLine, secondLine];
+    return row.rowStyle === "red-bg" ? lines.map((line) => colorizeBlockedRow(line)) : lines;
+  }).join("\n");
+}
+
 function describeCurrentListStatus(status: CurrentListStatusLike): string {
   if (!status.exists) {
     return "Current auth: missing";
+  }
+
+  if (status.account_id === PROXY_ACCOUNT_ID) {
+    return "Current proxy account: proxy";
   }
 
   if (status.matched_accounts.length === 0) {
@@ -178,8 +421,8 @@ export function describeAutoSwitchSelection(
     dryRun
       ? `Best account: "${candidate.name}" (${maskAccountId(candidate.identity)}).`
       : `Auto-switched to "${candidate.name}" (${maskAccountId(candidate.identity)}).`,
-    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
-    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score, candidate.plan_type))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h, candidate.plan_type))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -201,8 +444,8 @@ export function describeAutoSwitchSelection(
 export function describeAutoSwitchNoop(candidate: AutoSwitchCandidate, warnings: string[]): string {
   const lines = [
     `Current account "${candidate.name}" (${maskAccountId(candidate.identity)}) is already the best available account.`,
-    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score))}`,
-    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h))}`,
+    `Score: ${formatRemainingPercent(normalizePlusScore(candidate.current_score, candidate.plan_type))}`,
+    `1H score: ${formatRemainingPercent(normalizePlusScore(candidate.score_1h, candidate.plan_type))}`,
     `5H remaining: ${formatRemainingPercent(candidate.remain_5h)}`,
     `5H remaining (1W units): ${formatRawScore(candidate.remain_5h_in_1w_units)}`,
     `1W remaining: ${formatRemainingPercent(candidate.remain_1w)}`,
@@ -224,13 +467,21 @@ function describeQuotaAccounts(
   warnings: string[],
   options: {
     verbose?: boolean;
+    terminalWidth?: number | null;
     etaByName?: Map<string, WatchHistoryEtaContext>;
     usageLine?: string | null;
+    daemonFeatureLine?: string | null;
+    proxyLastUpstreamLine?: string | null;
+    proxyLastUpstreamAccountName?: string | null;
+    proxyAggregate?: ProxyQuotaAggregate | null;
+    summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {
   if (accounts.length === 0) {
     const lines = [
       describeCurrentListStatus(currentStatus),
+      ...(options.daemonFeatureLine ? [options.daemonFeatureLine] : []),
+      ...(options.proxyLastUpstreamLine ? [options.proxyLastUpstreamLine] : []),
       ...(options.usageLine ? [options.usageLine] : []),
       "No saved accounts.",
     ];
@@ -242,10 +493,13 @@ function describeQuotaAccounts(
   }
 
   const currentAccounts = new Set(currentStatus.matched_accounts);
+  if (currentStatus.account_id === PROXY_ACCOUNT_ID) {
+    currentAccounts.add(PROXY_ACCOUNT_NAME);
+  }
   const rankedCandidates = rankListCandidates(accounts);
   const autoSwitchCandidates = new Map(
     accounts
-      .map(toAutoSwitchCandidate)
+      .map((account) => toDisplayAutoSwitchCandidate(account, options.proxyAggregate))
       .filter((candidate): candidate is AutoSwitchCandidate => candidate !== null)
       .map((candidate) => [candidate.name, candidate] as const),
   );
@@ -272,68 +526,75 @@ function describeQuotaAccounts(
     return (originalOrder.get(left.name) ?? 0) - (originalOrder.get(right.name) ?? 0);
   });
 
-  const rows = orderedAccounts.map((account) => {
+  const displayRows = orderedAccounts.map((account) => {
     const candidate = autoSwitchCandidates.get(account.name);
     const eta = toQuotaEtaSummary(options.etaByName?.get(account.name));
-    const currentScore = candidate ? normalizePlusScore(candidate.current_score) : null;
+    const currentScore = candidate ? normalizeAccountScore(candidate.current_score, account, options.proxyAggregate) : null;
     const nextResetAt = candidate
       ? formatResetAt(selectCurrentNextResetWindow(account, candidate))
       : "-";
-    const row: Record<string, string> = {
-      name: `${currentAccounts.has(account.name) ? "*" : " "} ${account.name}`,
-      account_id: compactTableIdentity(maskAccountId(account.identity), "IDENTITY".length),
-      plan_type: account.plan_type ?? "-",
+    const displayName = formatAccountListDisplayName({
+      name: account.name,
+      refreshStatus: account.status,
+      autoSwitchEligible: account.auto_switch_eligible,
+    });
+    const proxyUpstreamActive = options.proxyLastUpstreamAccountName === account.name;
+    const row: QuotaDisplayRow = {
+      markers: formatAccountListMarkers({
+        current: currentAccounts.has(account.name),
+        proxyUpstreamActive,
+      }),
+      displayName,
+      accountId: maskAccountId(account.identity),
+      planType: account.account_id === PROXY_ACCOUNT_ID ? "" : (account.plan_type ?? "-"),
       eta: formatEtaSummary(eta),
       score: colorizeScore(formatRemainingPercent(currentScore), currentScore),
-      five_hour: formatUsagePercent(account.five_hour),
-      next_reset: nextResetAt,
-      five_hour_reset: formatResetAt(account.five_hour),
-      one_week: formatUsagePercent(account.one_week),
-      one_week_reset: formatResetAt(account.one_week),
+      fiveHour: formatUsagePercent(account.five_hour),
+      nextReset: nextResetAt,
+      fiveHourReset: formatResetAt(account.five_hour),
+      oneWeek: formatUsagePercent(account.one_week),
+      oneWeekReset: formatResetAt(account.one_week),
     };
 
     if (options.verbose) {
-      row.eta_5h_eq_1w = eta ? formatEtaSummary({ ...eta, hours: eta.eta_5h_eq_1w_hours }) : "-";
-      row.eta_1w = eta ? formatEtaSummary({ ...eta, hours: eta.eta_1w_hours }) : "-";
-      row.rate_1w_units =
+      row.eta5hEq1w = eta ? formatEtaSummary({ ...eta, hours: eta.eta_5h_eq_1w_hours }) : "-";
+      row.eta1w = eta ? formatEtaSummary({ ...eta, hours: eta.eta_1w_hours }) : "-";
+      row.rate1wUnits =
         eta && eta.rate_1w_units_per_hour !== null ? String(eta.rate_1w_units_per_hour) : "-";
-      row.remaining_5h_eq_1w =
+      row.remaining5hEq1w =
         eta && eta.remaining_5h_eq_1w !== null ? String(eta.remaining_5h_eq_1w) : "-";
-      row.projected_5h_in_1w_units_1h = candidate
+      row.projected5hIn1wUnits1h = candidate
         ? formatRawScore(candidate.projected_5h_in_1w_units_1h)
         : "-";
-      const score1h = candidate ? normalizePlusScore(candidate.score_1h) : null;
-      row.score_1h = candidate
+      const score1h = candidate ? normalizeAccountScore(candidate.score_1h, account, options.proxyAggregate) : null;
+      row.score1h = candidate
         ? colorizeScore(formatRemainingPercent(score1h), score1h)
         : "-";
-      row.projected_1w_1h = candidate
+      row.projected1w1h = candidate
         ? colorizeScore(
             formatRemainingPercent(candidate.projected_1w_1h),
             candidate.projected_1w_1h,
           )
         : "-";
-      row.five_hour_to_one_week_ratio = candidate
+      row.fiveHourToOneWeekRatio = candidate
         ? String(candidate.five_hour_to_one_week_ratio)
         : "-";
     }
 
-    if (isWindowUnavailable(account.one_week)) {
-      for (const key of Object.keys(row)) {
-        row[key] = stripAnsi(row[key]);
-      }
-      row.__row_style = "red-bg";
+    if (isAccountFullyUnavailable(account)) {
+      row.rowStyle = "red-bg";
     }
 
     return row;
   });
 
-  const showEtaColumn = rows.some((row) => row.eta !== "-");
+  const showEtaColumn = displayRows.some((row) => row.eta !== "-");
   const showVerboseEtaColumns = options.verbose
-    ? rows.some((row) => row.eta_5h_eq_1w !== "-" || row.eta_1w !== "-")
+    ? displayRows.some((row) => row.eta5hEq1w !== "-" || row.eta1w !== "-")
     : false;
 
   const columns: TableColumn[] = [
-    { key: "name", label: "  NAME" },
+    { key: "name", label: `${formatAccountListMarkers({})}NAME` },
     { key: "account_id", label: "IDENTITY" },
     { key: "plan_type", label: "PLAN" },
     { key: "score", label: "SCORE", align: "right", headerAlign: "right" },
@@ -341,6 +602,48 @@ function describeQuotaAccounts(
     { key: "one_week", label: "1W", groupLabel: "USED", align: "right", headerAlign: "center" },
     { key: "next_reset", label: "NEXT RESET" },
   ];
+
+  const budgetedTableWidths =
+    options.terminalWidth && !options.verbose
+      ? computeBudgetedQuotaTableWidths(displayRows, options.terminalWidth, showEtaColumn)
+      : null;
+  const rows = displayRows.map((row) => ({
+    name: budgetedTableWidths
+      ? `${row.markers}${truncateVisible(row.displayName, Math.max(0, budgetedTableWidths.nameWidth - visibleWidth(row.markers)))}`
+      : `${row.markers}${row.displayName}`,
+    account_id: budgetedTableWidths
+      ? compactTableIdentity(row.accountId, budgetedTableWidths.accountIdWidth)
+      : compactTableIdentity(row.accountId, "IDENTITY".length),
+    plan_type: budgetedTableWidths
+      ? truncateVisible(row.planType, budgetedTableWidths.planWidth)
+      : row.planType,
+    eta: budgetedTableWidths
+      ? truncateVisible(row.eta, budgetedTableWidths.etaWidth)
+      : row.eta,
+    score: budgetedTableWidths
+      ? truncateVisible(row.score, budgetedTableWidths.scoreWidth)
+      : row.score,
+    five_hour: budgetedTableWidths
+      ? truncateVisible(row.fiveHour, budgetedTableWidths.fiveHourWidth)
+      : row.fiveHour,
+    next_reset: budgetedTableWidths
+      ? truncateVisible(row.nextReset, budgetedTableWidths.nextResetWidth)
+      : row.nextReset,
+    five_hour_reset: row.fiveHourReset,
+    one_week: budgetedTableWidths
+      ? truncateVisible(row.oneWeek, budgetedTableWidths.oneWeekWidth)
+      : row.oneWeek,
+    one_week_reset: row.oneWeekReset,
+    ...(row.eta5hEq1w !== undefined ? { eta_5h_eq_1w: row.eta5hEq1w } : {}),
+    ...(row.eta1w !== undefined ? { eta_1w: row.eta1w } : {}),
+    ...(row.rate1wUnits !== undefined ? { rate_1w_units: row.rate1wUnits } : {}),
+    ...(row.remaining5hEq1w !== undefined ? { remaining_5h_eq_1w: row.remaining5hEq1w } : {}),
+    ...(row.projected5hIn1wUnits1h !== undefined ? { projected_5h_in_1w_units_1h: row.projected5hIn1wUnits1h } : {}),
+    ...(row.score1h !== undefined ? { score_1h: row.score1h } : {}),
+    ...(row.projected1w1h !== undefined ? { projected_1w_1h: row.projected1w1h } : {}),
+    ...(row.fiveHourToOneWeekRatio !== undefined ? { five_hour_to_one_week_ratio: row.fiveHourToOneWeekRatio } : {}),
+    ...(row.rowStyle ? { __row_style: row.rowStyle } : {}),
+  }));
 
   if (showEtaColumn) {
     columns.splice(4, 0, {
@@ -374,16 +677,32 @@ function describeQuotaAccounts(
     );
   }
 
-  const table = formatTable(rows, columns);
-  const { summaryLine, poolLine } = buildListSummary(accounts);
+  const table = budgetedTableWidths && !options.verbose
+    ? formatTable(rows, columns, [
+        budgetedTableWidths.nameWidth,
+        budgetedTableWidths.accountIdWidth,
+        budgetedTableWidths.planWidth,
+        budgetedTableWidths.scoreWidth,
+        ...(showEtaColumn ? [budgetedTableWidths.etaWidth] : []),
+        budgetedTableWidths.fiveHourWidth,
+        budgetedTableWidths.oneWeekWidth,
+        budgetedTableWidths.nextResetWidth,
+      ])
+    : formatTable(rows, columns);
+  const compactRows = options.terminalWidth && !options.verbose && !budgetedTableWidths
+    ? renderCompactQuotaRows(displayRows, options.terminalWidth, showEtaColumn)
+    : null;
+  const { summaryLine, poolLine } = buildListSummary(options.summaryAccounts ?? accounts);
 
   const lines = [
     describeCurrentListStatus(currentStatus),
+    ...(options.daemonFeatureLine ? [options.daemonFeatureLine] : []),
     summaryLine,
     poolLine,
+    ...(options.proxyLastUpstreamLine ? [options.proxyLastUpstreamLine] : []),
     ...(options.usageLine ? [options.usageLine] : []),
     "Refreshed quotas:",
-    table,
+    compactRows ?? table,
   ];
   for (const warning of warnings) {
     lines.push(`Warning: ${warning}`);
@@ -401,8 +720,14 @@ export function describeQuotaRefresh(
   currentStatus: CurrentListStatusLike,
   options: {
     verbose?: boolean;
+    terminalWidth?: number | null;
     etaByName?: Map<string, WatchHistoryEtaContext>;
     usageLine?: string | null;
+    daemonFeatureLine?: string | null;
+    proxyLastUpstreamLine?: string | null;
+    proxyLastUpstreamAccountName?: string | null;
+    proxyAggregate?: ProxyQuotaAggregate | null;
+    summaryAccounts?: AccountQuotaSummary[];
   } = {},
 ): string {
   const lines: string[] = [];

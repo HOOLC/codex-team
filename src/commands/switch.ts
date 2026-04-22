@@ -2,9 +2,11 @@ import { type AccountStore } from "../account-store/index.js";
 import { type CliQuotaSummary, toCliQuotaSummary } from "../cli/quota.js";
 import { shouldSkipManagedDesktopRefresh } from "../desktop/managed-state.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
+import { appendEventLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
 import {
   describeBusySwitchLock,
   refreshManagedDesktopAfterSwitch,
+  switchAccountPreservingProxyRuntime,
   stripManagedDesktopWarning,
   tryAcquireSwitchLock,
 } from "../switching.js";
@@ -28,12 +30,22 @@ export interface PerformManualSwitchResult {
   result: Awaited<ReturnType<AccountStore["switchAccount"]>>;
   quota: CliQuotaSummary | null;
   desktopForceWarning: string | null;
+  proxyRetained: boolean;
 }
 
 export async function performManualSwitch(
   options: PerformManualSwitchOptions,
 ): Promise<PerformManualSwitchResult> {
   options.debugLog?.(`switch: mode=manual target=${options.name} force=${options.force}`);
+  await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.switch.started",
+    trigger: "cli",
+    fields: {
+      target_account_name: options.name,
+      force: options.force,
+    },
+  }));
   const switchCommand = `switch ${options.name}`;
   const lock = await tryAcquireSwitchLock(options.store, switchCommand);
   if (!lock.acquired) {
@@ -41,9 +53,17 @@ export async function performManualSwitch(
   }
 
   let desktopForceWarning: string | null = null;
+  let proxyRetained = false;
   const result = await (async () => {
     try {
-      const switched = await options.store.switchAccount(options.name);
+      const switchedResult = await switchAccountPreservingProxyRuntime({
+        store: options.store,
+        name: options.name,
+        restoreFailureMessage:
+          `Proxy was active, but codexm could not restore the proxy runtime after switching "${options.name}". Direct auth is active locally.`,
+      });
+      const switched = switchedResult.result;
+      proxyRetained = switchedResult.proxyRetained;
       switched.warnings = stripManagedDesktopWarning(switched.warnings);
       const skipDesktopRefresh = await shouldSkipManagedDesktopRefresh(
         options.store,
@@ -70,6 +90,19 @@ export async function performManualSwitch(
         }
       }
       return switched;
+    } catch (error) {
+      await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+        component: "switch",
+        event: "account.switch.failed",
+        trigger: "cli",
+        level: "error",
+        errorMessageShort: shortenErrorMessage((error as Error).message),
+        fields: {
+          target_account_name: options.name,
+          force: options.force,
+        },
+      }));
+      throw error;
     } finally {
       await lock.release();
     }
@@ -90,10 +123,21 @@ export async function performManualSwitch(
   options.debugLog?.(
     `switch: completed target=${result.account.name} warnings=${result.warnings.length} quota_refreshed=${quota !== null}`,
   );
+  await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.switch.completed",
+    trigger: "cli",
+    fields: {
+      target_account_name: result.account.name,
+      warning_count: result.warnings.length,
+      quota_refreshed: quota !== null,
+    },
+  }));
 
   return {
     result,
     quota,
     desktopForceWarning,
+    proxyRetained,
   };
 }

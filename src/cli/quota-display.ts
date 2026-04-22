@@ -4,6 +4,8 @@ import utc from "dayjs/plugin/utc.js";
 
 import type { AccountQuotaSummary } from "../account-store/index.js";
 import { normalizeDisplayedScore } from "../plan-quota-profile.js";
+import { PROXY_ACCOUNT_ID } from "../proxy/constants.js";
+import type { ProxyQuotaAggregate } from "../proxy/quota.js";
 import type { WatchHistoryEtaContext } from "../watch/history.js";
 import { computeAvailability } from "./quota-core.js";
 import { rankListCandidates } from "./quota-ranking.js";
@@ -45,7 +47,7 @@ export function visibleWidth(value: string): number {
 }
 
 export function colorizeBlockedRow(value: string): string {
-  return styleText(value, ANSI_BLACK, ANSI_BG_RED);
+  return `${ANSI_BLACK}${ANSI_BG_RED}${stripAnsi(value)}${ANSI_RESET}`;
 }
 
 export function colorizeScore(value: string, remainingPercent: number | null): string {
@@ -154,7 +156,10 @@ export function formatUsagePercent(
     return "-";
   }
 
-  const raw = `${window.used_percent}%`;
+  const decimals = Number.isInteger(window.used_percent)
+    ? window.display_precision ?? 0
+    : Math.max(window.display_precision ?? 0, 1);
+  const raw = `${window.used_percent.toFixed(decimals)}%`;
   return colorizeUsagePercent(raw, window.used_percent);
 }
 
@@ -166,8 +171,32 @@ export function formatRawScore(value: number | null): string {
   return value === null ? "-" : String(value);
 }
 
-export function normalizePlusScore(value: number | null): number | null {
-  return normalizeDisplayedScore(value, "plus", { clamp: false });
+export function normalizePlusScore(value: number | null, planType: string | null = "plus"): number | null {
+  return normalizeDisplayedScore(value, planType, { clamp: false });
+}
+
+export function normalizeAccountScore(
+  value: number | null,
+  account: Pick<AccountQuotaSummary, "account_id" | "plan_type">,
+  proxyAggregate: ProxyQuotaAggregate | null | undefined = null,
+): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  if (account.account_id === PROXY_ACCOUNT_ID && proxyAggregate) {
+    const oneWeekCapacityInPlusUnits = proxyAggregate.displayProfile.oneWeekCapacityInPlusUnits;
+    const fiveHourToOneWeekRawRatio = proxyAggregate.displayProfile.fiveHourToOneWeekRawRatio;
+    if (
+      oneWeekCapacityInPlusUnits !== null
+      && oneWeekCapacityInPlusUnits > 0
+      && fiveHourToOneWeekRawRatio !== null
+    ) {
+      return Number(((value / oneWeekCapacityInPlusUnits) * fiveHourToOneWeekRawRatio).toFixed(2));
+    }
+  }
+
+  return normalizePlusScore(value, account.plan_type);
 }
 
 export function roundToTwo(value: number): number {
@@ -323,4 +352,8 @@ export function isWindowUnavailable(
   window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
 ): boolean {
   return typeof window?.used_percent === "number" && window.used_percent >= 100;
+}
+
+export function isAccountFullyUnavailable(account: AccountQuotaSummary): boolean {
+  return isWindowUnavailable(account.five_hour) && isWindowUnavailable(account.one_week);
 }

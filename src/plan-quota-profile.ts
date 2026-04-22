@@ -1,4 +1,4 @@
-export type PlanQuotaTier = "plus" | "prolite" | "pro" | "team" | "unknown";
+export type PlanQuotaTier = "free" | "plus" | "prolite" | "pro" | "team" | "unknown";
 
 export interface PlanQuotaProfile {
   fiveHourToOneWeekRawRatio: number;
@@ -9,6 +9,10 @@ const DIRECT_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO = 20 / 3;
 const PRO_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO = 50 / 9;
 
 const PLAN_QUOTA_PROFILES: Record<PlanQuotaTier, PlanQuotaProfile> = {
+  free: {
+    fiveHourToOneWeekRawRatio: 1,
+    oneWeekCapacityInPlusUnits: 3 / 40,
+  },
   plus: {
     fiveHourToOneWeekRawRatio: DIRECT_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
     oneWeekCapacityInPlusUnits: 1,
@@ -37,6 +41,8 @@ function roundToTwo(value: number): number {
 
 export function resolvePlanQuotaTier(planType: string | null): PlanQuotaTier {
   switch (planType?.trim().toLowerCase()) {
+    case "free":
+      return "free";
     case "plus":
       return "plus";
     case "prolite":

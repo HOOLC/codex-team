@@ -188,6 +188,66 @@ describe("CLI Account Commands", () => {
     }
   });
 
+  test("rejects the reserved synthetic proxy name for managed account names", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const addStdout = captureWritable();
+      const addStderr = captureWritable();
+      let loginCalls = 0;
+
+      const addCode = await runCli(["add", "proxy"], {
+        store,
+        stdout: addStdout.stream,
+        stderr: addStderr.stream,
+        authLogin: {
+          login: async () => {
+            loginCalls += 1;
+            return createAuthPayload("acct-unreachable");
+          },
+        },
+      });
+
+      expect(addCode).toBe(1);
+      expect(loginCalls).toBe(0);
+      expect(addStdout.read()).toBe("");
+      expect(addStderr.read()).toContain('"proxy" is reserved for the synthetic proxy account');
+
+      await writeCurrentAuth(homeDir, "acct-save-reserved");
+      const saveStdout = captureWritable();
+      const saveStderr = captureWritable();
+      const saveCode = await runCli(["save", "proxy"], {
+        store,
+        stdout: saveStdout.stream,
+        stderr: saveStderr.stream,
+      });
+
+      expect(saveCode).toBe(1);
+      expect(saveStdout.read()).toBe("");
+      expect(saveStderr.read()).toContain('"proxy" is reserved for the synthetic proxy account');
+
+      await runCli(["save", "rename-source", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      const renameStdout = captureWritable();
+      const renameStderr = captureWritable();
+      const renameCode = await runCli(["rename", "rename-source", "proxy"], {
+        store,
+        stdout: renameStdout.stream,
+        stderr: renameStderr.stream,
+      });
+
+      expect(renameCode).toBe(1);
+      expect(renameStdout.read()).toBe("");
+      expect(renameStderr.read()).toContain('"proxy" is reserved for the synthetic proxy account');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("prints save usage that matches help output", async () => {
     const stdout = captureWritable();
     const stderr = captureWritable();

@@ -95,6 +95,9 @@ export async function resolveManagedDesktopState(
   appPath: string,
   existingApps: RunningCodexDesktop[],
   platform: CodexmPlatform,
+  options: {
+    desktopApiBaseUrl?: string | null;
+  } = {},
 ): Promise<ManagedCodexDesktopState | null> {
   const existingPids = new Set(existingApps.map((app) => app.pid));
 
@@ -113,19 +116,64 @@ export async function resolveManagedDesktopState(
       null;
 
     if (launchedApp) {
-      return {
+      const state: ManagedCodexDesktopState = {
         pid: launchedApp.pid,
         app_path: appPath,
         remote_debugging_port: DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
         managed_by_codexm: true,
         started_at: new Date().toISOString(),
       };
+      if (Object.prototype.hasOwnProperty.call(options, "desktopApiBaseUrl")) {
+        state.desktop_api_base_url = options.desktopApiBaseUrl ?? null;
+      }
+      return state;
     }
 
     await sleep(300);
   }
 
   return null;
+}
+
+export async function launchManagedDesktopSession(options: {
+  desktopLauncher: CodexDesktopLauncher;
+  appPath: string;
+  existingApps: RunningCodexDesktop[];
+  platform: CodexmPlatform;
+  desktopApiBaseUrl?: string | null;
+}): Promise<{
+  managedState: ManagedCodexDesktopState;
+  refreshedAccountSurface: boolean;
+}> {
+  await options.desktopLauncher.launch(options.appPath, {
+    apiBaseUrl: options.desktopApiBaseUrl,
+  });
+
+  const managedState = await resolveManagedDesktopState(
+    options.desktopLauncher,
+    options.appPath,
+    options.existingApps,
+    options.platform,
+    {
+      desktopApiBaseUrl: options.desktopApiBaseUrl,
+    },
+  );
+  if (!managedState) {
+    await options.desktopLauncher.clearManagedState().catch(() => undefined);
+    throw new Error(
+      "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+    );
+  }
+
+  await options.desktopLauncher.writeManagedState(managedState);
+  const refreshedAccountSurface = await options.desktopLauncher
+    .refreshManagedAccountSurface()
+    .catch(() => false);
+
+  return {
+    managedState,
+    refreshedAccountSurface,
+  };
 }
 
 export async function restoreLaunchBackup(

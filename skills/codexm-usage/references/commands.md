@@ -2,6 +2,7 @@
 
 - Open the interactive account dashboard in a TTY: `codexm`
 - Open the dashboard explicitly, optionally with an initial filter: `codexm tui [query]`
+- Dashboard keymap and prompt behavior: [dashboard.md](dashboard.md)
 - Check the current local auth and best-effort live usage: `codexm current`
 - Force a fresh current-account usage refresh: `codexm current --refresh`
 - Diagnose local auth, direct runtime, and managed Desktop consistency: `codexm doctor`
@@ -12,25 +13,34 @@
 - Save the current auth as a named account: `codexm save <name>`
 - Refresh the saved snapshot for the current managed account: `codexm update`
 - List saved accounts and refreshed quota state: `codexm list`
+- List saved accounts and also enqueue a daemon auth refresh: `codexm list --refresh`
 - Show auto-switch score details and normalized 1-hour breakdowns: `codexm list --verbose`
-- Switch local auth to a saved account: `codexm switch <name>`
+- Switch local auth to a saved account; when proxy is enabled, update the proxy's current upstream instead of disabling proxy: `codexm switch <name>`
 - Let `codexm` choose the best account from quota data: `codexm switch --auto`
 - Preview the `switch --auto` decision without changing auth: `codexm switch --auto --dry-run`
 - Start Codex Desktop with the current auth, switch first, or auto-pick the best account: `codexm launch [name]`, `codexm launch --auto`
-- Launch Desktop and ensure a detached watcher is running: `codexm launch --watch`, `codexm launch --auto --watch`
+- Start the shared baseline daemon without proxy or autoswitch: `codexm daemon start`
+- Restart, inspect, or stop the shared daemon: `codexm daemon restart`, `codexm daemon status`, `codexm daemon stop`
+- Enable or disable daemon-backed background auto-switching: `codexm autoswitch enable`, `codexm autoswitch disable`
+- Inspect autoswitch state: `codexm autoswitch status`
 - Watch managed Desktop MCP/quota signals and auto-switch on terminal quota exhaustion: `codexm watch`
 - Watch without automatic switching: `codexm watch --no-auto-switch`
-- Run the watcher in the background: `codexm watch --detach`, `codexm watch --detach --no-auto-switch`
-- Inspect or stop the background watcher: `codexm watch --status`, `codexm watch --stop`
 - Export the current auth or a managed account as a share bundle: `codexm export [name] [--output <file>]`
 - Preview a share bundle before importing: `codexm inspect <file>`
 - Import a share bundle as a managed account without switching current auth: `codexm import <file> --name <local-name>`
 - Run the codex CLI through the restart-and-resume wrapper: `codexm run -- --model o3`
+- Enable the local synthetic proxy account: `codexm proxy enable`
+- Inspect or stop the proxy daemon: `codexm proxy status`, `codexm proxy stop`
+- Restore the previous direct auth/config backup and clear local proxy mode without stopping the shared daemon listener: `codexm proxy disable`
+- Run codex through the proxy in an isolated runtime: `codexm run --proxy -- --model o3`
+- Override the shared proxy/daemon port for this shell: `CODEXM_PROXY_PORT=16655 codexm daemon start`
+- Override only one proxy-enable call explicitly: `codexm proxy enable --port 16655`
 - Remove or rename a saved account: `codexm remove <name> --yes`, `codexm rename <old> <new>`
 
 ## Common guidance
 
 - Use plain `codexm` in a TTY when the user wants the interactive dashboard immediately; use `codexm tui [query]` when they want an explicit dashboard entry or an initial filter.
+- Use [dashboard.md](dashboard.md) when the user is asking what the interactive dashboard hotkeys, prompts, confirmations, or proxy-row actions do.
 - Use `codexm current` when the user does not know what auth is active now or wants a quick current-usage summary.
 - Use `codexm current --refresh` when the user explicitly wants the latest usage data instead of best-effort live data.
 - Use `codexm doctor` when the user is debugging mismatches between local auth, direct runtime reads, and managed Desktop state.
@@ -40,8 +50,12 @@
 - Use `codexm add <name> --device-auth` on remote/headless machines where browser callback login is inconvenient.
 - Use `codexm save <name>` right after the user has already logged into the desired account with native Codex auth or Codex Desktop.
 - Use `codexm update` when the current local auth already matches a managed account and the user wants to refresh the saved snapshot.
-- Use `codexm launch [name]` when the user wants Codex Desktop to start with a specific account immediately, and add `--watch` when they also want background quota supervision.
-- Use `codexm watch` when the user wants ongoing monitoring with automatic switching; use `codexm watch --no-auto-switch` for observation only.
+- Use `codexm launch [name]` when the user wants Codex Desktop to start with a specific account immediately; `launch` also ensures the shared baseline daemon is running.
+- Use `codexm autoswitch enable` when the user wants daemon-backed background auto-switching for managed Desktop or proxy flows.
+- Use `codexm watch` when the user wants the foreground quota monitor with automatic switching; use `codexm watch --no-auto-switch` for observation only.
 - Use `codexm export`, `codexm inspect`, and `codexm import` when the user wants to move a login to another fully trusted machine without re-login; explicitly call out that share bundles are plain auth snapshots.
 - Use `codexm run` when the user wants the CLI process to survive account-triggered auth replacements and resume the active session after automatic restart.
+- Use `codexm proxy enable` when the user wants a stable local ChatGPT/OpenAI-compatible endpoint backed by the current saved account pool. The proxy quota excludes protected accounts but keeps exhausted eligible accounts in the aggregate so a fully drained pool still shows up as `0%`; the dashboard and `codexm list` always show that pool as the `proxy` synthetic account, and enabling proxy mode makes it the current local auth. While proxy mode is enabled, `codexm switch <name>` updates the proxy's current upstream, autoswitch only moves that upstream after quota-exhaustion signals, the configured real upstream row is marked with `@`, and `Proxy last upstream: ...` / `Last upstream: ...` still report the most recent real proxy hit when known.
+- Use `codexm run --proxy` for one-off isolated proxy runs that should not write local threads, sessions, auth, or config into the user's live `CODEX_HOME`. Current `codexm`-managed proxy flows route both Responses websocket turns and REST traffic through the local proxy; bare unmanaged launches are still outside that guarantee.
+- Use `CODEXM_PROXY_PORT` when the shared daemon or proxy must avoid the default `14555`; `--port` is still the highest-precedence override on `codexm proxy enable`.
 - Use `codexm completion <zsh|bash>` when the user wants shell completion setup; saved account names are completed dynamically.

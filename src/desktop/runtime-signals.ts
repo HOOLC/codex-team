@@ -11,6 +11,10 @@ import {
   normalizeRuntimeQuotaSnapshot,
   stringifySnippet,
 } from "./runtime-normalizers.js";
+import {
+  hasExhaustedRateLimitSignal,
+  hasQuotaExhaustionSignal,
+} from "../quota-exhaustion-signals.js";
 
 export interface ProbeConsolePayload {
   kind?: unknown;
@@ -59,57 +63,6 @@ export function formatBridgeDebugLine(payload: BridgeProbePayload): string {
       event: payload.event,
     },
   });
-}
-
-function hasStructuredQuotaError(value: unknown, depth = 0): boolean {
-  if (depth > 8) {
-    return false;
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((entry) => hasStructuredQuotaError(entry, depth + 1));
-  }
-
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  if (value.codexErrorInfo === "usageLimitExceeded") {
-    return true;
-  }
-
-  const exactErrorCodeCandidates = [
-    value.code,
-    value.errorCode,
-    value.error_code,
-    value.type,
-  ];
-  if (exactErrorCodeCandidates.some((entry) => entry === "insufficient_quota")) {
-    return true;
-  }
-
-  return Object.values(value).some((entry) => hasStructuredQuotaError(entry, depth + 1));
-}
-
-function hasExhaustedRateLimit(value: unknown, depth = 0): boolean {
-  if (depth > 8) {
-    return false;
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((entry) => hasExhaustedRateLimit(entry, depth + 1));
-  }
-
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  const usedPercent = value.usedPercent ?? value.used_percent;
-  if (typeof usedPercent === "number" && usedPercent >= 100) {
-    return true;
-  }
-
-  return Object.values(value).some((entry) => hasExhaustedRateLimit(entry, depth + 1));
 }
 
 function buildRpcQuotaSignal(options: {
@@ -164,7 +117,7 @@ export function extractRpcQuotaSignal(
       return null;
     }
     if (
-      method === "error" && hasStructuredQuotaError(event.params)
+      method === "error" && hasQuotaExhaustionSignal(event.params)
     ) {
       return buildRpcQuotaSignal({
         event,
@@ -198,13 +151,13 @@ export function extractRpcQuotaSignal(
       requestId: `rpc:${responseId}`,
       method,
       reason: "rpc_response",
-      shouldAutoSwitch: hasExhaustedRateLimit(message?.result),
+      shouldAutoSwitch: hasExhaustedRateLimitSignal(message?.result),
       quota: normalizeRuntimeQuotaSnapshot(message?.result),
     });
   }
 
   if (
-    hasStructuredQuotaError(message?.error)
+    hasQuotaExhaustionSignal(message?.error)
   ) {
     return buildRpcQuotaSignal({
       event,

@@ -11,7 +11,10 @@ export type LaunchProcessLike = (options: {
   appPath: string;
   binaryPath: string;
   args: readonly string[];
+  env?: Record<string, string>;
 }) => Promise<void>;
+
+type SpawnLike = typeof spawnCallback;
 
 export async function pathExistsViaStat(
   execFileImpl: ExecFileLike,
@@ -53,14 +56,49 @@ export async function readProcessParentAndCommand(
   }
 }
 
+export async function readProcessEnvironmentVariable(
+  execFileImpl: ExecFileLike,
+  pid: number,
+  name: string,
+): Promise<string | null | undefined> {
+  try {
+    const { stdout } = await execFileImpl("ps", ["eww", "-p", String(pid)]);
+    const line = stdout
+      .split("\n")
+      .map((entry) => entry.trim())
+      .find((entry) => entry !== "" && !entry.startsWith("PID "));
+    if (!line) {
+      return null;
+    }
+
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = line.match(new RegExp(`(?:^|\\s)${escapedName}=([^\\s]*)`, "u"));
+    if (!match) {
+      return null;
+    }
+
+    return match[1] === "" ? null : match[1];
+  } catch {
+    return undefined;
+  }
+}
+
 export async function launchManagedDesktopProcess(options: {
   appPath: string;
   binaryPath: string;
   args: readonly string[];
-}): Promise<void> {
+  env?: Record<string, string>;
+}, spawnImpl: SpawnLike = spawnCallback): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawnCallback(options.binaryPath, [...options.args], {
-      cwd: options.appPath,
+    // Launch through LaunchServices so Electron's own update/restart flow can
+    // quit and relaunch the app cleanly. Spawning the inner binary directly
+    // makes the Desktop behave like an unmanaged executable and can wedge the
+    // official "restart to update" path on macOS.
+    const envArgs = Object.entries(options.env ?? {}).flatMap(([key, value]) => [
+      "--env",
+      `${key}=${value}`,
+    ]);
+    const child = spawnImpl("open", [...envArgs, "-na", options.appPath, "--args", ...options.args], {
       detached: true,
       stdio: "ignore",
     });

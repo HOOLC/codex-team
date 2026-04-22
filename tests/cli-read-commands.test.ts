@@ -1,5 +1,7 @@
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, test } from "@rstest/core";
 import dayjs from "dayjs";
@@ -16,17 +18,21 @@ import {
   createTempHome,
   jsonResponse,
   textResponse,
+  writeProxyRequestLog,
   writeCurrentApiKeyAuth,
   writeCurrentAuth,
   writeCurrentConfig,
 } from "./test-helpers.js";
 import {
   captureWritable,
+  createDaemonProcessManagerStub,
   createDesktopLauncherStub,
 } from "./cli-fixtures.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+const execFileAsync = promisify(execFile);
 
 async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Promise<void> {
   await mkdir(join(homeDir, ".codex-team"), { recursive: true });
@@ -181,13 +187,20 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm --version");
     expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
     expect(output).toContain("codexm doctor [--json]");
-    expect(output).toContain("codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]");
+    expect(output).toContain("codexm list [name] [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]");
+    expect(output).toContain("codexm launch [name] [--auto] [--json]");
+    expect(output).toContain("codexm daemon <start|restart|status|stop> [--json]");
+    expect(output).toContain("codexm daemon restart [--json]");
+    expect(output).toContain("codexm autoswitch <enable|disable|status> [--json]");
     expect(output).toContain("codexm protect <name> [--json]");
     expect(output).toContain("codexm unprotect <name> [--json]");
     expect(output).toContain("codexm overlay <create|delete|gc> ...");
-    expect(output).toContain("codexm watch [--no-auto-switch] [--detach] [--status] [--stop]");
+    expect(output).toContain("codexm watch [--no-auto-switch]");
+    expect(output).toContain("codexm proxy <enable|disable|status|stop> [--json]");
+    expect(output).toContain("codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]");
+    expect(output).toContain("codexm proxy disable [--force] [--json]");
     expect(output).toContain("codexm tui [query]");
-    expect(output).toContain("codexm run [--account <name>] [-- ...codexArgs]");
+    expect(output).toContain("codexm run [--account <name>|--proxy] [-- ...codexArgs]");
     expect(output).toContain("codexm completion <zsh|bash>");
     expect(output).toContain("Global flags: --help, --version, --debug");
     expect(output).toContain("Command aliases: ls=list");
@@ -272,6 +285,9 @@ describe("CLI Read Commands", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        startIsolatedQuotaHistorySamplerImpl: () => ({
+          stop: async () => undefined,
+        }),
         runCodexCli: async (options) => {
           isolatedCodexHome = options.env?.CODEX_HOME ?? "";
           runnerOptions = {
@@ -346,6 +362,12 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("'--debug:enable debug logging'");
       expect(script).toContain("'-j:print JSON output'");
       expect(script).not.toContain("'--debug[enable debug logging]'");
+      expect(script).toContain("'start:start subcommand'");
+      expect(script).toContain("'restart:restart subcommand'");
+      expect(script).toContain("'status:status subcommand'");
+      expect(script).toContain("'stop:stop subcommand'");
+      expect(script).toContain("'zsh:zsh subcommand'");
+      expect(script).toContain("'bash:bash subcommand'");
       expect(script).toContain("codexm completion --accounts");
       expect(stderr.read()).toBe("");
     } finally {
@@ -377,9 +399,87 @@ describe("CLI Read Commands", () => {
       expect(script).toContain("-v");
       expect(script).toContain("run");
       expect(script).toContain("--with-api-key");
-      expect(script).toContain("--detach");
+      expect(script).toContain("autoswitch");
+      expect(script).not.toContain("--detach");
       expect(script).toContain("run");
+      expect(script).toContain('daemon) subcommands="start restart status stop" ;;');
+      expect(script).toContain('autoswitch) subcommands="enable disable status" ;;');
+      expect(script).toContain('proxy) subcommands="enable disable status stop" ;;');
+      expect(script).toContain('overlay) subcommands="create delete gc" ;;');
+      expect(script).toContain('completion) subcommands="zsh bash" ;;');
+      expect(script).toContain("list|ls|switch|launch|protect|unprotect|remove|rename)");
+      expect(script).not.toContain("launch)|");
       expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("bash completion resolves subcommands, accounts, and flags", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["completion", "bash"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toBe("");
+
+      const binDir = join(homeDir, "bin");
+      await mkdir(binDir, { recursive: true });
+      const fakeCodexmPath = join(binDir, "codexm");
+      await writeFile(
+        fakeCodexmPath,
+        [
+          "#!/usr/bin/env bash",
+          'if [[ "$1" == "completion" && "$2" == "--accounts" ]]; then',
+          "  printf '%s\\n' plus3 team.ops",
+          "  exit 0",
+          "fi",
+          "exit 1",
+          "",
+        ].join("\n"),
+      );
+      await chmod(fakeCodexmPath, 0o755);
+
+      const completionPath = join(homeDir, "codexm-completion.bash");
+      await writeFile(completionPath, stdout.read());
+
+      const probe = `
+source "${completionPath}"
+run_case() {
+  local label="$1"
+  shift
+  COMP_WORDS=("$@")
+  COMP_CWORD=$(($# - 1))
+  COMPREPLY=()
+  _codexm
+  printf '[%s]\\n' "$label"
+  printf '%s\\n' "\${COMPREPLY[@]}"
+}
+run_case daemon codexm daemon ""
+run_case switch-account codexm switch p
+run_case switch-flags codexm switch --
+run_case daemon-flags codexm daemon --
+`;
+      const { stdout: completionOutput } = await execFileAsync("bash", ["--noprofile", "--norc", "-c", probe], {
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        },
+      });
+
+      expect(completionOutput).toContain("[daemon]\nstart\nrestart\nstatus\nstop");
+      expect(completionOutput).toContain("[switch-account]\nplus3");
+      expect(completionOutput).toContain("[switch-flags]\n--help\n--version\n--debug\n--auto\n--dry-run\n--force\n--json");
+      expect(completionOutput).toContain("[daemon-flags]\n--help\n--version\n--debug\n--json\n--host\n--port");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -945,6 +1045,75 @@ describe("CLI Read Commands", () => {
     }
   });
 
+  test("current --refresh shows proxy aggregate usage for the synthetic proxy auth", async () => {
+    const homeDir = await createTempHome();
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url.endsWith("/backend-api/wham/usage")) {
+            return jsonResponse({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 12,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 400,
+                  reset_at: 1_773_868_641,
+                },
+                secondary_window: {
+                  used_percent: 47,
+                  limit_window_seconds: 604_800,
+                  reset_after_seconds: 4_000,
+                  reset_at: 1_773_890_040,
+                },
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "11",
+              },
+            });
+          }
+
+          return textResponse("not found", 404);
+        },
+      });
+      await writeCurrentAuth(homeDir, "acct-cli-current-refresh-proxy");
+      await runCli(["save", "proxy-source", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await store.refreshQuotaForAccount("proxy-source");
+      await writeFile(
+        store.paths.currentAuthPath,
+        `${JSON.stringify(createSyntheticProxyAuthSnapshot(new Date("2026-04-22T00:00:00.000Z")), null, 2)}\n`,
+      );
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["current", "--refresh"], {
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          readManagedCurrentQuota: async () => null,
+        }),
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Managed account: proxy");
+      expect(output).toContain(
+        "Usage: available | 5H 12% used | 1W 47% used | refreshed via proxy aggregate",
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("current --refresh --json includes refreshed quota data", async () => {
     const homeDir = await createTempHome();
 
@@ -1146,6 +1315,12 @@ wire_api = "responses"
         },
         successes: [
           {
+            name: "proxy",
+            is_current: false,
+            available: "available",
+            refresh_status: "ok",
+          },
+          {
             name: "quota-main",
             is_current: true,
             available: "available",
@@ -1175,6 +1350,96 @@ wire_api = "responses"
         error: 'Unknown command "lsit".',
         suggestion: "list",
       });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list --refresh returns quickly and enqueues a daemon auth refresh", async () => {
+    const homeDir = await createTempHome();
+    let ensureConfigArgs: Record<string, unknown> | null = null;
+
+    try {
+      await writeCurrentAuth(homeDir, "acct-list-refresh");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 12,
+                limit_window_seconds: 18_000,
+                reset_at: Math.floor(Date.parse("2026-04-18T05:00:00.000Z") / 1000),
+              },
+              secondary_window: {
+                used_percent: 34,
+                limit_window_seconds: 604_800,
+                reset_at: Math.floor(Date.parse("2026-04-25T00:00:00.000Z") / 1000),
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: true,
+              balance: "0",
+            },
+          }),
+      });
+      await store.saveCurrentAccount("refresh-main");
+
+      const exitCode = await runCli(["list", "--refresh"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: false,
+            state: null,
+          }),
+          ensureConfig: async (config) => {
+            ensureConfigArgs = config;
+            return {
+              action: "started",
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:00:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: false,
+                auto_switch: false,
+                proxy: false,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: false,
+              },
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      let requestFiles: string[] = [];
+      const requestsDir = join(homeDir, ".codex-team", "daemon-requests");
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        requestFiles = await readdir(requestsDir)
+          .then((entries) => entries.filter((entry) => entry.endsWith(".json") && !entry.startsWith(".")))
+          .catch(() => []);
+        if (requestFiles.length > 0) {
+          break;
+        }
+      }
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: false,
+      });
+      expect(requestFiles).toHaveLength(1);
+      const request = await readFile(join(requestsDir, requestFiles[0] ?? ""), "utf8");
+      expect(request).toContain('"type":"auth-refresh-now"');
+      expect(request).toContain('"source":"list-refresh"');
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1235,6 +1500,7 @@ wire_api = "responses"
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
       });
+      await store.setAutoSwitchEligibility("quota-main", false);
       await runCli(["list", "--json"], {
         store,
         stdout: captureWritable().stream,
@@ -1261,15 +1527,16 @@ wire_api = "responses"
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
-      expect(lines[1]).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x2");
-      expect(lines[2]).toBe("Available: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
+      expect(lines[1]).toBe("Daemon: off | Proxy: off | Autoswitch: off");
+      expect(lines[2]).toBe("Accounts: 2/2 usable | blocked: 1W 0, 5H 0 | plus x2");
+      expect(lines[3]).toBe("Available: bottleneck 0.24 | 5H->1W 0.24 | 1W 1 (plus 1W)");
       expect(output).not.toContain("CREDITS");
       expect(output).not.toContain("AVAILABLE");
       expect(output).toContain("ETA");
       expect(output).toContain("SCORE");
       expect(output).toContain("NEXT RESET");
-      expect(output).toContain("* quota-main");
-      expect(output).toContain("  quota-backup");
+      expect(output).toContain("*  quota-main [P]");
+      expect(output).toContain("   quota-backup");
       expect(output).toContain("2.1h");
       expect(output).toContain(
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
@@ -1390,10 +1657,13 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 5);
+      const dataRows = lines
+        .slice(tableStartIndex + 2)
+        .filter((line) => !line.includes("proxy"))
+        .slice(0, 3);
 
       expect(dataRows[0]).toContain("beta");
-      expect(dataRows[1]).toContain("* gamma");
+      expect(dataRows[1]).toContain("*  gamma");
       expect(dataRows[2]).toContain("alpha");
     } finally {
       await cleanupTempHome(homeDir);
@@ -1589,8 +1859,8 @@ wire_api = "responses"
       expect(listCode).toBe(0);
 
       const output = listStdout.read();
-      expect(output).toContain("\u001b[30m\u001b[41m* quota-weekly-blocked");
-      expect(output).not.toContain("\u001b[30m\u001b[41m  quota-five-hour-blocked");
+      expect(output).not.toContain("\u001b[30m\u001b[41m*  quota-weekly-blocked");
+      expect(output).not.toContain("\u001b[30m\u001b[41m   quota-five-hour-blocked");
       expect(output).toContain("\u001b[1m\u001b[93m85%\u001b[0m");
       expect(output).toContain("\u001b[1m\u001b[93m15%\u001b[0m");
       expect(output).toContain("\u001b[1m\u001b[93m92%\u001b[0m");
@@ -1609,7 +1879,7 @@ wire_api = "responses"
         tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
           ? tableStartIndex - 1
           : tableStartIndex;
-      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 9);
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 12);
       const weeklyBlockedRow = tableLines.find((line) => line.includes("quota-weekly-blocked"));
       const fiveHourBlockedRow = tableLines.find((line) => line.includes("quota-five-hour-blocked"));
       const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
@@ -1728,10 +1998,123 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+      const dataRows = lines
+        .slice(tableStartIndex + 2)
+        .filter((line) => !line.includes("proxy"))
+        .slice(0, 2);
 
-      expect(dataRows[0]).toContain("* weekly-bottleneck-sooner");
+      expect(dataRows[0]).toContain("*  weekly-bottleneck-sooner");
       expect(dataRows[1]).toContain("five-hour-bottleneck-later");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list text output keeps stale tags and decimal used columns aligned", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const saveStore = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          return jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: accountId === "acct-cli-decimal" ? 64.6 : 100,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 300,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: accountId === "acct-cli-decimal" ? 27.4 : 88,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-decimal");
+      await runCli(["save", "quota-decimal", "--json"], {
+        store: saveStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-integer");
+      await runCli(["save", "quota-integer", "--json"], {
+        store: saveStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await runCli(["list"], {
+        store: saveStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStore = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          throw new Error("network down");
+        },
+      });
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store: listStore,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const output = listStdout.read();
+      expect(output).toContain("quota-decimal [stale]");
+      expect(output).toContain("64.6%");
+      expect(output).toContain("27.4%");
+      expect(output).toContain('Warning: quota-decimal using cached quota from');
+      expect(output).toContain('Warning: quota-integer using cached quota from');
+
+      const plainOutput = output.replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
+      const headerTopIndex =
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+          ? tableStartIndex - 1
+          : tableStartIndex;
+      const tableLines = lines.slice(headerTopIndex, headerTopIndex + 7);
+      const decimalRow = tableLines.find((line) => line.includes("quota-decimal [stale]"));
+      const integerRow = tableLines.find((line) => line.includes("quota-integer [stale]"));
+
+      expect(decimalRow).toBeDefined();
+      expect(integerRow).toBeDefined();
+
+      const used5hColumn = tableLines[1]?.indexOf("5H") ?? -1;
+      const used1wColumn = tableLines[1]?.indexOf("1W") ?? -1;
+      expect(
+        new Set([
+          labelEnd(decimalRow ?? "", "64.6%", used5hColumn),
+          labelEnd(integerRow ?? "", "100%", used5hColumn),
+        ]).size,
+      ).toBe(1);
+      expect(
+        new Set([
+          labelEnd(decimalRow ?? "", "27.4%", used1wColumn),
+          labelEnd(integerRow ?? "", "88%", used1wColumn),
+        ]).size,
+      ).toBe(1);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1802,7 +2185,10 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const dataRows = lines.slice(tableStartIndex + 2, tableStartIndex + 4);
+      const dataRows = lines
+        .slice(tableStartIndex + 2)
+        .filter((line) => !line.includes("proxy"))
+        .slice(0, 2);
 
       expect(dataRows[0]).toContain("five-hour-blocked-sooner");
       expect(dataRows[1]).toContain("weekly-blocked-later");
@@ -1880,8 +2266,8 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
-      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 4);
-      const dataRows = tableLines.slice(2);
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 6);
+      const dataRows = tableLines.slice(2).filter((line) => !line.includes("proxy"));
       const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
       const bothBlockedRow = dataRows.find((line) => line.includes("both-blocked-later"));
 
@@ -1976,8 +2362,89 @@ wire_api = "responses"
       expect(output).toContain("1W RESET AT");
       expect(output).toContain("quota-plus");
       expect(output).toContain("quota-team");
-      expect(output).toContain("600%");
-      expect(output).toContain("1000%");
+      expect(output).toContain("60%");
+      expect(output).not.toContain("600%");
+      expect(output).not.toContain("1000%");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list fits quota table columns into the tty width budget", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedWatchHistory(homeDir, "very-long-primary-account-name");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const isPrimary = accountId === "acct-cli-budget-primary";
+          return jsonResponse({
+            plan_type: isPrimary ? "plus" : "prolite",
+            rate_limit: {
+              primary_window: {
+                used_percent: isPrimary ? 24 : 61,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: isPrimary ? 1_200 : 2_400,
+                reset_at: isPrimary ? 1_773_868_641 : 1_773_873_200,
+              },
+              secondary_window: {
+                used_percent: isPrimary ? 43 : 18,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-budget-primary");
+      await runCli(["save", "very-long-primary-account-name", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-budget-backup");
+      await runCli(["save", "backup-prolite-account", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      listStdout.stream.isTTY = true;
+      listStdout.stream.columns = 72;
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+      const output = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = output.trimEnd().split("\n");
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME") && line.includes("NEXT RESET"));
+      const tableLines = lines.slice(tableStartIndex, tableStartIndex + 5);
+      const primaryRow = tableLines.find((line) => line.includes("very-long"));
+
+      expect(tableStartIndex).toBeGreaterThanOrEqual(0);
+      expect(tableLines.every((line) => line.length <= 72)).toBe(true);
+      expect(primaryRow).toBeDefined();
+      expect(primaryRow).toContain("very-long");
+      expect(primaryRow).not.toContain("very-long-primary-account-name");
+      expect(tableLines[0]).toContain("NEXT RESET");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2146,10 +2613,110 @@ wire_api = "responses"
       const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = plainOutput.trimEnd().split("\n");
 
-      expect(lines[1]).toBe("Accounts: 1/3 usable | blocked: 1W 2, 5H 0 | plus x2, team x1");
-      expect(lines[2]).toBe("Available: bottleneck 0.12 | 5H->1W 0.12 | 1W 0.7 (plus 1W)");
+      expect(lines[1]).toBe("Daemon: off | Proxy: off | Autoswitch: off");
+      expect(lines[2]).toBe("Accounts: 1/3 usable | blocked: 1W 2, 5H 0 | plus x2, team x1");
+      expect(lines[3]).toBe("Available: bottleneck 0.12 | 5H->1W 0.12 | 1W 0.7 (plus 1W)");
       expect(plainOutput).toContain("blocked-team");
       expect(plainOutput).toContain("blocked-plus");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list summary orders account plans from highest to lowest tier", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const planByAccountId: Record<string, string> = {
+        "acct-cli-plan-pro": "pro",
+        "acct-cli-plan-prolite": "prolite",
+        "acct-cli-plan-plus": "plus",
+        "acct-cli-plan-team": "team",
+        "acct-cli-plan-free": "free",
+      };
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          return jsonResponse({
+            plan_type: accountId ? planByAccountId[accountId] : "unknown",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 1_200,
+                reset_at: 1_775_000_000,
+              },
+              secondary_window: {
+                used_percent: 20,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 86_400,
+                reset_at: 1_775_086_400,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-pro");
+      await runCli(["save", "quota-pro", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-prolite");
+      await runCli(["save", "quota-prolite", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-plus");
+      await runCli(["save", "quota-plus", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-team");
+      await runCli(["save", "quota-team", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-cli-plan-free");
+      await runCli(["save", "quota-free", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const listStdout = captureWritable();
+      const listCode = await runCli(["list"], {
+        store,
+        stdout: listStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(listCode).toBe(0);
+
+      const plainOutput = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const lines = plainOutput.trimEnd().split("\n");
+
+      expect(lines[2]).toBe(
+        "Accounts: 5/5 usable | blocked: 1W 0, 5H 0 | pro x1, prolite x1, plus x1, team x1, free x1",
+      );
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2263,6 +2830,119 @@ wire_api = "responses"
       expect(debugOutput).toContain("[debug] list: observed_5h_1w_ratio window=24h plan=plus");
       expect(debugOutput).not.toContain("dimension=bucket");
       expect(debugOutput).not.toContain("[debug] warning: list observed_5h_1w_ratio_mismatch window=24h plan=plus");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list only shows proxy last-upstream metadata when proxy routing is enabled", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const { writeProxyState } = await import("../src/proxy/state.js");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 18,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 900,
+                reset_at: 1_777_000_000,
+              },
+              secondary_window: {
+                used_percent: 42,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 90_000,
+                reset_at: 1_777_090_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "7",
+            },
+          }),
+      });
+      await writeCurrentAuth(homeDir, "acct-alpha");
+      await runCli(["save", "alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await writeProxyRequestLog(homeDir, [{
+        ts: "2026-04-21T10:15:00.000Z",
+        selected_account_name: "alpha",
+        selected_auth_mode: "chatgpt",
+      }]);
+
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 0,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "",
+        log_path: join(store.paths.codexTeamDir, "logs", "proxy.log"),
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: false,
+      });
+
+      const disabledStdout = captureWritable();
+      const disabledCode = await runCli(["list", "--json"], {
+        store,
+        stdout: disabledStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(disabledCode).toBe(0);
+      expect(JSON.parse(disabledStdout.read())).toMatchObject({
+        proxy: {
+          name: "proxy",
+        },
+        proxy_last_upstream: null,
+        successes: [
+          {
+            name: "proxy",
+            is_current: false,
+          },
+          {
+            name: "alpha",
+            is_current: true,
+          },
+        ],
+      });
+
+      await writeProxyState(store.paths.codexTeamDir, {
+        pid: 12345,
+        host: "127.0.0.1",
+        port: 14555,
+        started_at: "2026-04-21T10:00:00.000Z",
+        log_path: join(store.paths.codexTeamDir, "logs", "proxy.log"),
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+        enabled: true,
+      });
+
+      const enabledStdout = captureWritable();
+      const enabledCode = await runCli(["list", "--json"], {
+        store,
+        stdout: enabledStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(enabledCode).toBe(0);
+      expect(JSON.parse(enabledStdout.read())).toMatchObject({
+        proxy: {
+          name: "proxy",
+        },
+        proxy_last_upstream: {
+          account_name: "alpha",
+          auth_mode: "chatgpt",
+        },
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

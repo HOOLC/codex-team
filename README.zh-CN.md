@@ -11,6 +11,7 @@
 - 查看多个账号的 quota 使用情况
 - 导出和导入完全信任前提下的分享 bundle，而不需要重新登录
 - 在当前账号耗尽时自动切号并重启运行中的 Codex
+- 为 Codex 和 OpenAI-compatible 工具提供一个本地 proxy 账号
 
 ## 平台支持
 
@@ -38,7 +39,7 @@ npm install -g codex-team
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.20
+  --ref v0.0.21
 ```
 
 请把 `--ref` 替换成与你安装的 CLI 版本对应的 release tag。如果你的 coding agent 会缓存已安装 skill，安装后请重启或重新加载它。
@@ -64,20 +65,26 @@ codexm
 
 dashboard 里常用按键：
 
-- `Enter`：切号
+- `Enter`：切换选中的 direct 账号；如果光标在 `proxy` 行，则切换 proxy 开关
+- `/`：进入筛选
+- `a`：启用或关闭 daemon 驱动的 autoswitch
 - `f`：在当前账号上 reload，或强制切号
 - `p`：切换“是否允许自动切号选中该账号”的保护状态
 - `o`：在当前终端运行 `codex`，退出后回到 dashboard
 - `O`：用隔离的托管快照运行 `codex`，退出后回到 dashboard
 - `d`：打开或聚焦 Codex Desktop，但不离开 dashboard
 - `Shift+D`：用选中账号重新拉起 Codex Desktop；如果当前已有非 `codexm` 托管的 Desktop，会先确认再强制关闭重启
+- `q`：从主面板退出；`Esc` 用来后退或取消当前流程
+
+完整键位、输入框控制、确认框和 proxy 行语义见 [dashboard.md](./skills/codexm-usage/references/dashboard.md)。
 
 ### 3. 让它持续自动工作
 
 macOS + Codex Desktop：
 
 ```bash
-codexm launch --watch
+codexm launch
+codexm autoswitch enable
 ```
 
 Linux / WSL + Codex CLI：
@@ -92,7 +99,26 @@ codexm watch
 codexm run -- --model o3
 ```
 
-`codexm watch` 会持续监控 quota，并在耗尽时自动切号。`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
+`codexm launch` 会启动 Desktop 并确保共享 baseline daemon 已运行，`codexm autoswitch enable` 会开启 daemon 驱动的后台自动切号。`codexm watch` 仍然是前台 quota 监控命令；`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
+
+### 4. 使用本地 proxy 账号
+
+```bash
+codexm proxy enable
+codexm proxy status
+codexm run --proxy -- --model o3
+codexm proxy disable
+```
+
+`codexm proxy enable` 会在 `127.0.0.1` 启动本地 daemon，写入一个 synthetic ChatGPT auth（`proxy@codexm.local`），并把本地 auth/config 指向这个 proxy。live config 现在会保留内建 provider 身份，只改 transport URL，所以 proxy 和非 proxy 会继续共用同一份 live thread 历史。dashboard 和 `codexm list` 总会显示一个 `proxy` 行，它的 quota 来自真实池：统计未保护、允许 auto-switch 且仍保留 quota 快照的账号，包含已经耗尽的账号，这样整个池子都归零时也会继续显示 `0%`，不会直接消失；受保护账号不计入。Codex Desktop 里的 usage/account 读取现在也会保持在同一个 synthetic proxy 账号视图上，不再因为最近一次命中的真实 upstream 而漂移。它的 `5H`、`1W` 和 `ETA` 都基于这个池子的真实剩余额度聚合，消耗速率仍然沿用用户全局 watch 历史。启用 proxy 模式后，这个 synthetic 账号会成为默认 `CODEX_HOME` 的当前账号。proxy 选路现在会默认跟随保存的 direct/current upstream，而不是每条消息都重新排序：`codexm switch <name>` 会立刻成为 proxy 的当前上游；如果后续 daemon 因 quota 耗尽信号触发 autoswitch，proxy 才会再跟着切走。现在只要 daemon autoswitch 开启，proxy 在遇到可重试的 quota exhausted 失败且尚未向下游输出内容时，还会自动重放一次 `/v1/responses` websocket turn 或一条缓冲型 REST 请求（`stream: false` 的 `/v1/responses`、`/v1/chat/completions`、`/v1/completions`，以及对应的 API-key 非流式路径）；一旦已经开始向下游输出，就保留原始失败，不做半途续流。只要 proxy 已启用，`codexm list` 和 dashboard 里当前配置的真实 upstream 行都会带上 `@` 标记，即使还没有新的 proxy 请求发出。最近一次真实 proxy 命中仍会单独显示为 `Proxy last upstream: ...` 和 dashboard 详情区里的 `Last upstream: ...`。这个 daemon 同时提供 OpenAI-compatible `/v1` 接口，覆盖 Responses、Chat Completions、旧版 Completions、Models，以及有 API-key 上游时的 Embeddings。
+
+对 `codexm` 托管的 proxy 入口，`codexm proxy enable` 现在会改写 `chatgpt_base_url` 和 `openai_base_url`，但不再改 live provider 身份；`codexm run --proxy` 仍然会在隔离 overlay 里使用自定义 provider。这样 live proxy CLI/Desktop 能继续共用历史，而隔离 proxy run 仍然可以把实时 Responses websocket turn 和 REST 请求都强制导向本地 proxy。这个保证仍然只覆盖 `codexm` 托管入口；如果你绕过 `codexm` 直接裸跑 `codex` 或 Desktop，则不保证一定经过本地 proxy。
+
+`codexm daemon start`、`codexm daemon restart`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力。`codexm daemon stop` 现在只停止进程，但会保留最近一次 daemon feature 状态，所以后续再执行 `codexm daemon start` 或 `codexm daemon restart` 时，会恢复之前的 `autoswitch` 和 `proxy` 开关。对于 `codexm` 托管的 Desktop，会话内的账号刷新仍然走 `codexm switch <name>` 触发的 Codex app server restart；默认会等当前 thread 跑完，`--force` 才会跳过等待。proxy 路由切换是另一条链路：managed Desktop 的 `/backend-api/*` 请求会使用 `codexm launch` 启动 Desktop 时注入的 `CODEX_API_BASE_URL`，所以如果 Desktop 已经在跑，再执行 `codexm proxy enable/disable` 不会伪装成热更新成功，而是明确提示你重新执行一次 `codexm launch`，让新的 proxy 或 direct backend 路由在 Desktop 侧生效。这个提示在可探测时会优先读取当前 Desktop 进程启动时的代理环境变量，而不是只信任保存下来的 state。`codexm switch <name>` 不会再隐式关闭 proxy：它会更新保存的 direct 当前账号，而这个账号会在 proxy 保持启用时立刻成为当前上游，直到后续某次 autoswitch 因耗尽信号再把它切走。只有在你明确想恢复 direct auth/config 并清掉本地 proxy 接线时，才使用 `codexm proxy disable`；它不会关闭已经在监听的共享 proxy daemon，所以其他工具仍可继续走这个端口，除非你显式执行 `codexm proxy stop` 或 `codexm daemon stop`。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
+
+非 `200` 的 proxy 请求还会额外写入独立的 `proxy-errors-YYYY-MM-DD.jsonl`，里面保留 req/resp 诊断信息。结构化 JSONL 日志始终带 `codexm_version`，proxy request log 还会记录 `service_tier`（`default` / `priority`）；设置 `CODEXM_LOG_BUILD_META=1` 后，还会额外记录本地构建元信息，例如 `codexm_git_sha`，方便排查 daemon 和 proxy 实际跑的是哪份代码。
+
+当默认 `14555` 端口被占用时，可以设置 `CODEXM_PROXY_PORT=<port>` 统一覆盖共享 proxy/daemon 的监听端口。`codexm daemon start`、`codexm autoswitch enable`、`codexm launch`、`codexm proxy enable` 和 `codexm run --proxy` 都会读取这个环境变量；如果显式传了 `--port`，仍然以命令行参数为准。
 
 ## 输出示例
 
@@ -101,15 +127,16 @@ codexm run -- --model o3
 ```text
 $ codexm list
 Current managed account: plus-main
+Daemon: off | Proxy: off | Autoswitch: off
 Accounts: 2/3 usable | blocked: 1W 1, 5H 0 | plus x2, team x1
 Available: bottleneck 0.84 | 5H->1W 0.84 | 1W 1.65 (plus 1W)
 Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
-  NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
-  -----------  --------  ----  -----  -----   5H   1W   ----------
-* plus-main    ac1..123  plus    72%   2.1h   58%  41%  04-14 18:30
-  team-backup  ac9..987  team    64%   1.7h   61%  39%  04-14 19:10
-  plus-old     ac4..456  plus     0%      -   43% 100%  04-16 09:00
+   NAME         IDENTITY  PLAN  SCORE   ETA     USED      NEXT RESET
+   -----------  --------  ----  -----  -----   5H   1W   ----------
+*  plus-main    ac1..123  plus    72%   2.1h   58%  41%  04-14 18:30
+   team-backup  ac9..987  team    64%   1.7h   61%  39%  04-14 19:10
+   plus-old     ac4..456  plus     0%      -   43% 100%  04-16 09:00
 ```
 
 如果你想判断“接下来该切到哪个账号”，优先看这个命令。
@@ -135,38 +162,50 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm`: 在交互式终端里直接打开账号面板
 - `codexm current [--refresh]`: 查看当前账号；可选刷新 quota
 - `codexm doctor`: 诊断本地 auth、runtime 探测和托管 Desktop 一致性
-- `codexm list [--usage-window <today|7d|30d|all-time>] [--verbose]`: 查看所有保存账号，并附带一行本地 usage 摘要
-- `codexm list --json`: 输出机器可读 JSON
+- `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: 查看所有保存账号，并附带一行本地 usage 摘要
+- `codexm list --json`: 输出机器可读 JSON；包含 proxy 当前上游信息，以及有数据时最近一次上游命中信息
 - `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
-- `codexm tui [query]`: 显式打开账号面板，可选带初始筛选词
+- `codexm proxy status`: 查看本地 proxy daemon 和 synthetic auth 状态
+- `codexm daemon status`: 查看共享后台 daemon、已启用能力和日志路径
+- `codexm autoswitch status`: 查看 daemon 驱动的自动切号是否已启用
+- `codexm tui [query]`: 显式打开账号面板，可选带初始筛选词；在 proxy 行上按 Enter 会切换 proxy 开关
 - `codexm usage [--window <today|7d|30d|all-time>] [--daily] [--json]`: 从本地 session 日志汇总 token usage 和 estimated cost
 
 ### 切换与启动
 
-- `codexm switch <name>`: 切换到指定保存账号
+- `codexm switch <name>`: 切换到指定保存的 direct 账号；若 proxy 已启用，这会立刻成为 proxy 的当前上游，直到后续 autoswitch 事件再把它切走
 - `codexm switch --auto --dry-run`: 预览自动切号会选中的账号
-- `codexm launch [name] [--auto] [--watch]`: 在 macOS 上启动 Codex Desktop
+- `codexm launch [name] [--auto]`: 在 macOS 上启动 Codex Desktop，并确保共享 daemon 已启动
 
 ### Watch 与自动重启
 
 - `codexm watch`: 监听 quota 变化，并在耗尽时自动切号
-- `codexm watch --detach`: 后台运行 watcher
-- `codexm watch --status`: 查看后台 watcher 状态
-- `codexm watch --stop`: 停止后台 watcher
+- `codexm autoswitch enable`: 启用 daemon 驱动的自动切号；proxy 在用户可见输出开始前遇到耗尽时也会内部重放一次
+- `codexm autoswitch disable`: 关闭自动切号，并保留基础 daemon 常驻
+- `codexm daemon start`: 启动共享后台 daemon，但不额外启用附加能力
+- `codexm daemon stop`: 停止共享后台 daemon，并保留最近一次 daemon 功能开关状态
 - `codexm run [--account <name>] [-- ...codexArgs]`: 以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行
+- `codexm run --proxy [-- ...codexArgs]`: 用隔离 CODEX_HOME 通过本地 proxy 运行 codex
+- `codexm proxy enable`: 启用由本地 proxy 提供的全局 synthetic ChatGPT auth；在 proxy 耗尽且用户可见输出尚未开始时会自动重放一次
+- `codexm proxy disable`: 恢复上一次 direct auth/config 备份，同时不改动共享 proxy daemon 的监听状态
 - `codexm overlay create <name>`: 为其他工具创建隔离的 CODEX_HOME overlay
 <!-- GENERATED:CORE_COMMANDS:END -->
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有 detached `codexm watch`，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch，同时避免和其他存活的 watch 重复；退出时则把这条 watch 交接给 detached watcher。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。完整键位、输入框状态、确认框和 proxy 行行为统一整理在 [dashboard.md](./skills/codexm-usage/references/dashboard.md)。高频差异点是：synthetic `proxy` 行上按 `Enter` 会切换 proxy，当前 `proxy` 行上按 `f` 会重新应用 proxy 接线，`Esc` 负责回退或取消，`q` 只在主列表直接退出，而 `e` 只导出当前选中的托管 direct 账号。dashboard 列表里的 `Next reset` 现在和 `codexm list` 使用同一套格式，最后 1 小时内会显示带颜色的分钟倒计时，详情区会固定展示 `5H reset` 和 `1W reset`。如果刷新 quota 失败，`codexm list` 和 dashboard 会回退到该账号最近一次成功的 quota 快照，最多保留 7 天，并把该行标成 `[stale]`。synthetic `proxy` 行即使在 proxy 关闭时也会保留；proxy 已启用时，`@` 标记表示当前配置的真实 upstream，`Last upstream: ...` 只会在最近一次真实 proxy 命中已知时出现。`[autoswitch:on|off]` 状态位仍然只表示 daemon/watch 的开关，不表示 proxy 内部上游选路。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；这条前台 watch 会跟随当前 autoswitch 开关，并在退出时停止。
 
 ## 什么时候该用哪个命令？
 
 - 如果你想判断“接下来该用哪个账号”，优先看 `codexm list`
 - 如果你想看本地 token 量和 estimated cost，优先看 `codexm usage`
-- 如果你想自动切号，使用 `codexm watch`
+- 如果你想为托管 Desktop 或 proxy 开启后台自动切号，使用 `codexm autoswitch enable`
+- 如果你想只启动共享后台 daemon，而不启用 autoswitch 或 proxy，使用 `codexm daemon start`
+- 如果你想在前台监控 quota 并在耗尽时响应，使用 `codexm watch`
 - 如果你在 CLI 场景里希望运行中的 `codex` 跟随切号自动重启，使用 `codexm run`
+- 如果你希望 Codex 或其他工具只看到一个稳定的本地 API/auth，而真实上游账号由 `codexm` 内部轮换，使用 `codexm proxy enable`
+- 如果你想临时使用 proxy，但不希望把 session 或 auth/config 写进真实 `CODEX_HOME`，使用 `codexm run --proxy`
+- 如果共享 proxy/daemon 需要避开默认 `14555`，设置 `CODEXM_PROXY_PORT`；对 `codexm proxy enable` 来说，显式 `--port` 仍然优先
 - 脚本场景使用 `--json`，排查问题使用 `--debug`
 
 对于 ChatGPT 登录快照，如果本地 token 能区分同一 ChatGPT 账号或 workspace 下的不同用户，`codex-team` 也可以把它们保存成不同的托管条目。
@@ -184,7 +223,7 @@ mkdir -p ~/.local/share/bash-completion/completions
 codexm completion bash > ~/.local/share/bash-completion/completions/codexm
 ```
 
-生成的脚本会通过 `codexm completion --accounts` 动态补全已保存账号名。
+生成的脚本会补全命令、已知二级命令、当前输入以 `-` 开头时的 flag，并通过 `codexm completion --accounts` 动态补全已保存账号名。
 <!-- GENERATED:SHELL_COMPLETION:END -->
 
 ## 开发
@@ -195,6 +234,8 @@ pnpm typecheck
 pnpm test
 pnpm build
 ```
+
+实际运行验证可以在需要时调用线上 ChatGPT/OpenAI 服务，但必须使用临时 `HOME`、隔离 `CODEX_HOME` 或 codexm overlay，避免写入本地真实 threads、sessions、auth/config、socket，也不能干扰正在运行的 CLI/TUI/Desktop 实例。
 
 ## License
 

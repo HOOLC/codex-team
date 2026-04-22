@@ -5,19 +5,21 @@ import { afterEach, beforeEach, describe, expect, test } from "@rstest/core";
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
 import { setPlatformForTesting } from "../src/platform.js";
+import { PROXY_PORT_ENV_VAR } from "../src/proxy/constants.js";
 import {
   cleanupTempHome,
   createTempHome,
   jsonResponse,
   readCurrentAuth,
   textResponse,
+  withEnvVar,
   writeCurrentAuth,
 } from "./test-helpers.js";
 import {
   captureWritable,
+  createDaemonProcessManagerStub,
   createDesktopLauncherStub,
   createInteractiveStdin,
-  createWatchProcessManagerStub,
 } from "./cli-fixtures.js";
 
 describe("CLI Launch", () => {
@@ -46,6 +48,7 @@ describe("CLI Launch", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           listRunningApps: async () => {
             listCalls += 1;
@@ -87,6 +90,7 @@ describe("CLI Launch", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           listRunningApps: async () => {
             listCalls += 1;
@@ -119,6 +123,7 @@ describe("CLI Launch", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           isRunningInsideDesktopShell: async () => {
             insideDesktopChecks += 1;
@@ -156,6 +161,7 @@ describe("CLI Launch", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           listRunningApps: async () => {
             listCalls += 1;
@@ -192,6 +198,7 @@ describe("CLI Launch", () => {
     const exitCode = await runCli(["launch"], {
       stdout: stdout.stream,
       stderr: stderr.stream,
+      daemonProcessManager: createDaemonProcessManagerStub(),
       desktopLauncher: createDesktopLauncherStub({
         listRunningApps: async () => [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
         quitRunningApps: async () => undefined,
@@ -222,6 +229,7 @@ describe("CLI Launch", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           isRunningInsideDesktopShell: async () => true,
         }),
@@ -245,6 +253,7 @@ describe("CLI Launch", () => {
     const exitCode = await runCli(["launch"], {
       stdout: stdout.stream,
       stderr: stderr.stream,
+      daemonProcessManager: createDaemonProcessManagerStub(),
       desktopLauncher: createDesktopLauncherStub({
         findInstalledApp: async () => null,
       }),
@@ -272,6 +281,7 @@ describe("CLI Launch", () => {
         store,
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           findInstalledApp: async () => null,
         }),
@@ -294,6 +304,7 @@ describe("CLI Launch", () => {
       stdin,
       stdout: stdout.stream,
       stderr: stderr.stream,
+      daemonProcessManager: createDaemonProcessManagerStub(),
       desktopLauncher: createDesktopLauncherStub({
         listRunningApps: async () => [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
         quitRunningApps: async () => {
@@ -326,6 +337,7 @@ describe("CLI Launch", () => {
       stdin,
       stdout: stdout.stream,
       stderr: stderr.stream,
+      daemonProcessManager: createDaemonProcessManagerStub(),
       desktopLauncher: createDesktopLauncherStub({
         listRunningApps: async () => {
           listCalls += 1;
@@ -366,6 +378,7 @@ describe("CLI Launch", () => {
       stdin,
       stdout: stdout.stream,
       stderr: stderr.stream,
+      daemonProcessManager: createDaemonProcessManagerStub(),
       desktopLauncher: createDesktopLauncherStub({
         listRunningApps: async () => {
           listCalls += 1;
@@ -411,6 +424,7 @@ describe("CLI Launch", () => {
       stdin,
       stdout: stdout.stream,
       stderr: stderr.stream,
+      daemonProcessManager: createDaemonProcessManagerStub(),
       desktopLauncher: createDesktopLauncherStub({
         listRunningApps: async () => [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
         quitRunningApps: async (options) => {
@@ -439,6 +453,7 @@ describe("CLI Launch", () => {
     const exitCode = await runCli(["launch"], {
       stdout: stdout.stream,
       stderr: stderr.stream,
+      daemonProcessManager: createDaemonProcessManagerStub(),
       desktopLauncher: createDesktopLauncherStub({
         listRunningApps: async () => [],
         launch: async () => {
@@ -478,6 +493,7 @@ describe("CLI Launch", () => {
         store,
         stdout: captureWritable().stream,
         stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           listRunningApps: async () => [
             { pid: 999, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" },
@@ -585,6 +601,7 @@ describe("CLI Launch", () => {
         store,
         stdout: stdout.stream,
         stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub(),
         desktopLauncher: createDesktopLauncherStub({
           listRunningApps: async () => {
             listCalls += 1;
@@ -611,19 +628,41 @@ describe("CLI Launch", () => {
     }
   });
 
-  test("launch --watch starts a detached background watch with auto-switch enabled", async () => {
+  test("launch starts the baseline daemon by default", async () => {
     const homeDir = await createTempHome();
-    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let ensureConfigArgs: Record<string, unknown> | null = null;
     let listCalls = 0;
 
     try {
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
 
-      const exitCode = await runCli(["launch", "--watch"], {
+      const exitCode = await runCli(["launch"], {
         store,
         stdout: stdout.stream,
         stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          ensureConfig: async (config) => {
+            ensureConfigArgs = config;
+            return {
+              action: "started",
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:00:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: false,
+                auto_switch: false,
+                proxy: false,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: false,
+              },
+            };
+          },
+        }),
         desktopLauncher: createDesktopLauncherStub({
           listRunningApps: async () => {
             listCalls += 1;
@@ -632,31 +671,80 @@ describe("CLI Launch", () => {
               : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
           },
         }),
-        watchProcessManager: createWatchProcessManagerStub({
-          getStatus: async () => ({
-            running: false,
-            state: null,
-          }),
-          startDetached: async (options) => {
-            startedOptions = options;
-            return {
-              pid: 43210,
-              started_at: "2026-04-08T13:58:00.000Z",
-              log_path: "/tmp/watch.log",
-              auto_switch: true,
-              debug: false,
-            };
-          },
-        }),
       });
 
       expect(exitCode).toBe(0);
-      expect(startedOptions).toEqual({
-        autoSwitch: true,
-        debug: false,
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: false,
       });
-      expect(stdout.read()).toContain("Started background watch (pid 43210).");
+      expect(stdout.read()).toContain("Started background daemon (pid 54321).");
       expect(stdout.read()).toContain("Launched Codex Desktop with current auth.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launch respects CODEXM_PROXY_PORT when starting the shared daemon", async () => {
+    const homeDir = await createTempHome();
+    let ensureConfigArgs: Record<string, unknown> | null = null;
+    let listCalls = 0;
+
+    try {
+      const store = createAccountStore(homeDir);
+
+      await withEnvVar(PROXY_PORT_ENV_VAR, "16658", async () => {
+        const exitCode = await runCli(["launch"], {
+          store,
+          stdout: captureWritable().stream,
+          stderr: captureWritable().stream,
+          daemonProcessManager: createDaemonProcessManagerStub({
+            ensureConfig: async (config) => {
+              ensureConfigArgs = config;
+              return {
+                action: "started",
+                state: {
+                  pid: 54321,
+                  started_at: "2026-04-18T00:00:00.000Z",
+                  log_path: "/tmp/daemon.log",
+                  stayalive: true,
+                  watch: false,
+                  auto_switch: false,
+                  proxy: false,
+                  host: "127.0.0.1",
+                  port: 16658,
+                  base_url: "http://127.0.0.1:16658/backend-api",
+                  openai_base_url: "http://127.0.0.1:16658/v1",
+                  debug: false,
+                },
+              };
+            },
+          }),
+          desktopLauncher: createDesktopLauncherStub({
+            listRunningApps: async () => {
+              listCalls += 1;
+              return listCalls === 1
+                ? []
+                : [{ pid: 503, command: "/Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223" }];
+            },
+          }),
+        });
+
+        expect(exitCode).toBe(0);
+      });
+
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: false,
+        host: "127.0.0.1",
+        port: 16658,
+        base_url: "http://127.0.0.1:16658/backend-api",
+        openai_base_url: "http://127.0.0.1:16658/v1",
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

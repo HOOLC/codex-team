@@ -211,6 +211,43 @@ describe("watch history eta", () => {
     });
   });
 
+  test("uses explicit pooled remaining overrides for eta math", () => {
+    const history = [
+      makeRecord("2026-04-08T10:00:00.000Z", {
+        five_hour: makeWindow(60, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(45, "2026-04-15T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-08T11:00:00.000Z", {
+        five_hour: makeWindow(90, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(46, "2026-04-15T00:00:00.000Z"),
+      }),
+    ];
+
+    const result = computeWatchHistoryEta(
+      history,
+      makeTarget({
+        plan_type: "pro",
+        five_hour: makeWindow(16.2, "2026-04-08T12:00:00.000Z"),
+        one_week: makeWindow(18.5, "2026-04-15T00:00:00.000Z"),
+        remaining_5h: 83.8,
+        remaining_5h_eq_1w: 163.5,
+        remaining_1w: 760,
+      }),
+      new Date("2026-04-08T11:00:00.000Z"),
+    );
+
+    expect(result).toMatchObject({
+      status: "ok",
+      rate_1w_units_per_hour: 4.5,
+      remaining_5h: 83.8,
+      remaining_5h_eq_1w: 163.5,
+      remaining_1w: 760,
+      bottleneck_remaining: 163.5,
+      bottleneck_window: "5h_eq_1w",
+      etaHours: 36.33,
+    });
+  });
+
   test("reports insufficient_history when there is only one usable sample", () => {
     const result = computeWatchHistoryEta(
       [

@@ -9,6 +9,7 @@ import type {
   CodexDesktopLauncher,
   RuntimeQuotaSnapshot,
 } from "./desktop/launcher.js";
+import { isSyntheticProxyRuntimeActive, restoreSyntheticProxyRuntime } from "./proxy/runtime.js";
 import {
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
 } from "./desktop/launcher.js";
@@ -18,6 +19,7 @@ import {
   toCliQuotaSummaryFromRuntimeQuota,
   type AutoSwitchCandidate,
 } from "./cli/quota.js";
+import { appendEventLog, buildEventPayload, shortenErrorMessage } from "./logging.js";
 
 export interface AutoSwitchSelection {
   refreshResult: Awaited<ReturnType<AccountStore["refreshAllQuotas"]>>;
@@ -46,6 +48,11 @@ export interface SwitchLockOwner {
   started_at: string;
 }
 
+export interface ProxyPreservedSwitchResult {
+  result: Awaited<ReturnType<AccountStore["switchAccount"]>>;
+  proxyRetained: boolean;
+}
+
 type SwitchLockOwnerReadResult =
   | { status: "ok"; owner: SwitchLockOwner }
   | { status: "missing" | "invalid"; owner: null };
@@ -66,6 +73,28 @@ export function stripManagedDesktopWarning(warnings: string[]): string[] {
       warning !== NON_MANAGED_DESKTOP_WARNING_PREFIX &&
       warning !== NON_MANAGED_DESKTOP_FOLLOWUP_WARNING,
   );
+}
+
+export async function switchAccountPreservingProxyRuntime(options: {
+  store: AccountStore;
+  name: string;
+  restoreFailureMessage: string;
+}): Promise<ProxyPreservedSwitchResult> {
+  const proxyModeWasActive = await isSyntheticProxyRuntimeActive(options.store);
+  const result = await options.store.switchAccount(options.name);
+  let proxyRetained = false;
+
+  if (proxyModeWasActive) {
+    proxyRetained = await restoreSyntheticProxyRuntime(options.store);
+    if (!proxyRetained) {
+      result.warnings.push(options.restoreFailureMessage);
+    }
+  }
+
+  return {
+    result,
+    proxyRetained,
+  };
 }
 
 function startManagedDesktopWaitReporter(
@@ -121,6 +150,7 @@ export async function refreshManagedDesktopAfterSwitch(
   desktopLauncher: CodexDesktopLauncher,
   options: {
     force?: boolean;
+    desiredDesktopApiBaseUrl?: string | null;
     signal?: AbortSignal;
     statusStream?: NodeJS.WriteStream;
     onStatusMessage?: (message: string) => void;
@@ -129,6 +159,38 @@ export async function refreshManagedDesktopAfterSwitch(
     timeoutMs?: number;
   } = {},
 ): Promise<"applied" | "killed" | "none" | "other-running" | "failed"> {
+  const normalizeDesktopApiBaseUrl = (value: string | null | undefined): string | null => {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const trimmed = value.trim().replace(/\/+$/u, "");
+    return trimmed === "" ? null : trimmed;
+  };
+
+  try {
+    const managedState = await desktopLauncher.readManagedState();
+    if (managedState && Object.prototype.hasOwnProperty.call(options, "desiredDesktopApiBaseUrl")) {
+      const inspectedDesktopApiBaseUrl = await desktopLauncher.readManagedLaunchApiBaseUrl();
+      const currentDesktopApiBaseUrl = normalizeDesktopApiBaseUrl(
+        inspectedDesktopApiBaseUrl === undefined
+          ? managedState.desktop_api_base_url
+          : inspectedDesktopApiBaseUrl,
+      );
+      const desiredDesktopApiBaseUrl = normalizeDesktopApiBaseUrl(options.desiredDesktopApiBaseUrl);
+      if (currentDesktopApiBaseUrl !== desiredDesktopApiBaseUrl) {
+        warnings.push(
+          desiredDesktopApiBaseUrl
+            ? `The running codexm-managed Codex Desktop session still uses ${currentDesktopApiBaseUrl ?? "the default backend"} for Desktop fetches. Relaunch Codex Desktop via "codexm launch" to apply proxy routing at ${desiredDesktopApiBaseUrl}.`
+            : "The running codexm-managed Codex Desktop session still uses the proxy Desktop fetch base URL. Relaunch Codex Desktop via \"codexm launch\" to return Desktop fetches to the direct backend.",
+        );
+        return "failed";
+      }
+    }
+  } catch {
+    // Keep Desktop state inspection best-effort, same as process inspection below.
+  }
+
   let reporter: ReturnType<typeof startManagedDesktopWaitReporter> | null = null;
   if (options.force !== true && (options.statusStream || options.onStatusMessage)) {
     try {
@@ -305,6 +367,17 @@ export async function performAutoSwitch(
 
   options.debugLog?.(`switch: mode=auto dry_run=${options.dryRun} force=${options.force}`);
   const { refreshResult, selected, candidates, quota, warnings } = selection;
+  await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.autoswitch.selected",
+    trigger: "cli",
+    fields: {
+      target_account_name: selected.name,
+      candidate_count: candidates.length,
+      dry_run: options.dryRun,
+      force: options.force,
+    },
+  }));
   if (options.dryRun) {
     options.debugLog?.(
       `switch: auto-selected target=${selected.name} candidates=${candidates.length} warnings=${warnings.length} dry_run=true`,
@@ -325,6 +398,15 @@ export async function performAutoSwitch(
     selected.available === "available" &&
     currentStatus.matched_accounts.includes(selected.name)
   ) {
+    await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+      component: "switch",
+      event: "account.autoswitch.skipped",
+      trigger: "cli",
+      fields: {
+        account_name: selected.name,
+        reason: "already-best",
+      },
+    }));
     options.debugLog?.(
       `switch: auto-selected target=${selected.name} candidates=${candidates.length} skipped=already_current_best`,
     );
@@ -339,7 +421,28 @@ export async function performAutoSwitch(
     };
   }
 
-  const result = await store.switchAccount(selected.name);
+  let result: Awaited<ReturnType<AccountStore["switchAccount"]>>;
+  try {
+    ({ result } = await switchAccountPreservingProxyRuntime({
+      store,
+      name: selected.name,
+      restoreFailureMessage:
+        `Proxy was active, but codexm could not restore the proxy runtime after auto-switching to "${selected.name}". Direct auth is active locally.`,
+    }));
+  } catch (error) {
+    await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+      component: "switch",
+      event: "account.switch.failed",
+      trigger: "cli",
+      level: "error",
+      errorMessageShort: shortenErrorMessage((error as Error).message),
+      fields: {
+        target_account_name: selected.name,
+        mode: "auto",
+      },
+    }));
+    throw error;
+  }
   for (const warning of warnings) {
     result.warnings.push(warning);
   }
@@ -356,6 +459,16 @@ export async function performAutoSwitch(
   options.debugLog?.(
     `switch: completed mode=auto target=${result.account.name} candidates=${candidates.length} warnings=${result.warnings.length}`,
   );
+  await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
+    component: "switch",
+    event: "account.switch.completed",
+    trigger: "cli",
+    fields: {
+      target_account_name: result.account.name,
+      mode: "auto",
+      warning_count: result.warnings.length,
+    },
+  }));
 
   return {
     refreshResult,

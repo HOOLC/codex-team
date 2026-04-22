@@ -2,12 +2,13 @@ import { watch, type FSWatcher } from "node:fs";
 import { basename, dirname } from "node:path";
 
 import { type AccountStore } from "../account-store/index.js";
+import type { DaemonProcessManager } from "../daemon/process.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
+import { startIsolatedQuotaHistorySampler, type PreparedIsolatedCodexRun } from "../run/isolated-runtime.js";
 import {
-  prepareIsolatedCodexRun,
-  startIsolatedQuotaHistorySampler,
-  type PreparedIsolatedCodexRun,
-} from "../run/isolated-runtime.js";
+  runDirectCodexSession,
+  runIsolatedAccountCodexSession,
+} from "../run/codex-session.js";
 import {
   createWatchLeaseManager,
   type WatchLeaseManager,
@@ -18,6 +19,7 @@ import {
   type AccountDashboardExternalUpdate,
 } from "../tui/index.js";
 import { type RunnerOptions, type RunnerResult } from "../codex-cli-runner.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
 
 export type DebugLogger = (message: string) => void;
 
@@ -77,6 +79,9 @@ export async function resolveCurrentManagedAccountLabel(
 ): Promise<string | null> {
   try {
     const current = await store.getCurrentStatus();
+    if (current.account_id === PROXY_ACCOUNT_ID) {
+      return PROXY_ACCOUNT_NAME;
+    }
     return current.matched_accounts.length === 1 ? current.matched_accounts[0] : null;
   } catch {
     return null;
@@ -116,6 +121,7 @@ function describeForegroundAutoSwitchMessage(
 export async function startTuiExternalUpdateMonitors(options: {
   store: AccountStore;
   desktopLauncher: CodexDesktopLauncher;
+  daemonProcessManager: DaemonProcessManager;
   watchProcessManager: WatchProcessManager;
   watchLeaseManager?: WatchLeaseManager;
   updateFeed: AccountDashboardExternalUpdateFeed;
@@ -130,6 +136,7 @@ export async function startTuiExternalUpdateMonitors(options: {
   const {
     store,
     desktopLauncher,
+    daemonProcessManager,
     watchProcessManager,
     updateFeed,
     currentManagedAccountRef,
@@ -153,7 +160,6 @@ export async function startTuiExternalUpdateMonitors(options: {
   let foregroundWatchPromise: Promise<number> | null = null;
   let recentSwitchTarget: { value: string | null; recordedAt: number } | null = null;
   let ownsForegroundWatchLease = false;
-  let startedForegroundWatch = false;
 
   const shouldSuppressSwitchNotice = (targetAccount: string | null): boolean =>
     recentSwitchTarget !== null &&
@@ -265,6 +271,12 @@ export async function startTuiExternalUpdateMonitors(options: {
       };
     });
 
+  const getForegroundAutoSwitchEnabled = async () =>
+    await daemonProcessManager.getStatus().then((status) => status.state?.auto_switch === true).catch((error) => {
+      debugLog?.(`tui: failed to inspect daemon autoswitch status: ${(error as Error).message}`);
+      return false;
+    });
+
   const releaseForegroundWatchLease = async () => {
     if (!ownsForegroundWatchLease) {
       return;
@@ -290,7 +302,7 @@ export async function startTuiExternalUpdateMonitors(options: {
     await releaseForegroundWatchLease();
   };
 
-  const startForegroundWatch = async () => {
+  const startForegroundWatch = async (autoSwitchEnabled: boolean) => {
     if (foregroundWatchPromise) {
       return;
     }
@@ -319,7 +331,7 @@ export async function startTuiExternalUpdateMonitors(options: {
     }
 
     const lease = await watchLeaseManager.claimForeground({
-      autoSwitch: true,
+      autoSwitch: autoSwitchEnabled,
       debug: false,
       pid: process.pid,
     }).catch((error) => {
@@ -334,7 +346,6 @@ export async function startTuiExternalUpdateMonitors(options: {
     }
 
     ownsForegroundWatchLease = true;
-    startedForegroundWatch = true;
     foregroundWatchAbortController = new AbortController();
     const silentStream = createNullWriteStream();
 
@@ -346,7 +357,7 @@ export async function startTuiExternalUpdateMonitors(options: {
         stderr: silentStream,
       },
       interruptSignal: foregroundWatchAbortController.signal,
-      autoSwitch: true,
+      autoSwitch: autoSwitchEnabled,
       debug: false,
       debugLog: debugLog ?? (() => undefined),
       managedDesktopWaitStatusDelayMs,
@@ -400,6 +411,8 @@ export async function startTuiExternalUpdateMonitors(options: {
       return;
     }
 
+    const autoSwitchEnabled = await getForegroundAutoSwitchEnabled();
+
     if (foregroundWatchPromise) {
       const detachedWatchStatus = await getDetachedWatchStatus();
       if (detachedWatchStatus.running) {
@@ -417,11 +430,22 @@ export async function startTuiExternalUpdateMonitors(options: {
         )
       ) {
         await stopForegroundWatch();
+        return;
+      }
+
+      if (
+        activeLease.active
+        && activeLease.state
+        && activeLease.state.owner_kind === "tui-foreground"
+        && activeLease.state.pid === process.pid
+        && activeLease.state.auto_switch !== autoSwitchEnabled
+      ) {
+        await stopForegroundWatch();
       }
       return;
     }
 
-    await startForegroundWatch();
+    await startForegroundWatch(autoSwitchEnabled);
   };
 
   await reconcileForegroundWatch();
@@ -440,24 +464,7 @@ export async function startTuiExternalUpdateMonitors(options: {
         clearInterval(foregroundWatchPollTimer);
         foregroundWatchPollTimer = null;
       }
-
-      const detachedWatchStatusBeforeStop = await getDetachedWatchStatus();
-      const shouldHandoffForegroundWatch =
-        startedForegroundWatch && !detachedWatchStatusBeforeStop.running;
-
       await stopForegroundWatch();
-
-      if (shouldHandoffForegroundWatch) {
-        const activeLease = await getActiveWatchLease();
-        if (!activeLease.active) {
-          await watchProcessManager.startDetached({
-            autoSwitch: true,
-            debug: false,
-          }).catch((error) => {
-            debugLog?.(`tui: failed to hand off to detached watch: ${(error as Error).message}`);
-          });
-        }
-      }
     },
   };
 }
@@ -469,11 +476,10 @@ export async function runDashboardCodexSession(options: {
   stderr: NodeJS.WriteStream;
   signal?: AbortSignal;
 }): Promise<number> {
-  const currentStatus = await options.store.getCurrentStatus();
-  return (await options.runCodexCli({
+  return (await runDirectCodexSession({
+    store: options.store,
+    runCodexCli: options.runCodexCli,
     codexArgs: [],
-    accountId: currentStatus.account_id,
-    email: null,
     debugLog: options.debugLog,
     stderr: options.stderr,
     signal: options.signal,
@@ -494,40 +500,16 @@ export async function runDashboardIsolatedCodexSession(options: {
   }) => Promise<PreparedIsolatedCodexRun>;
   startIsolatedQuotaHistorySamplerImpl?: typeof startIsolatedQuotaHistorySampler;
 }): Promise<number> {
-  const prepareIsolatedRunImpl =
-    options.prepareIsolatedRunImpl ?? prepareIsolatedCodexRun;
-  const startIsolatedQuotaHistorySamplerImpl =
-    options.startIsolatedQuotaHistorySamplerImpl ?? startIsolatedQuotaHistorySampler;
-  const preparedRun = await prepareIsolatedRunImpl({
+  return (await runIsolatedAccountCodexSession({
     accountName: options.accountName,
-    baseEnv: process.env,
     store: options.store,
-  });
-  const sampler = startIsolatedQuotaHistorySamplerImpl({
-    account: preparedRun.account,
-    codexHomeEnv: preparedRun.env,
-    pollIntervalMs: DEFAULT_TUI_WATCH_QUOTA_MIN_READ_INTERVAL_MS,
-    scopeId: preparedRun.runId,
-    store: options.store,
+    runCodexCli: options.runCodexCli,
+    codexArgs: [],
     debugLog: options.debugLog,
-  });
-
-  try {
-    return (await options.runCodexCli({
-      codexArgs: [],
-      accountId: preparedRun.account.account_id,
-      email: preparedRun.account.email ?? null,
-      authFilePath: preparedRun.authFilePath,
-      sessionsDirPath: preparedRun.sessionsDirPath,
-      env: preparedRun.env,
-      disableAuthWatch: true,
-      registerProcess: false,
-      debugLog: options.debugLog,
-      stderr: options.stderr,
-      signal: options.signal,
-    })).exitCode;
-  } finally {
-    await sampler.stop();
-    await preparedRun.cleanup();
-  }
+    stderr: options.stderr,
+    signal: options.signal,
+    pollIntervalMs: DEFAULT_TUI_WATCH_QUOTA_MIN_READ_INTERVAL_MS,
+    prepareIsolatedRunImpl: options.prepareIsolatedRunImpl,
+    startIsolatedQuotaHistorySamplerImpl: options.startIsolatedQuotaHistorySamplerImpl,
+  })).exitCode;
 }

@@ -3,6 +3,7 @@ import type { WatchHistoryEtaContext } from "../watch/history.js";
 
 export interface CurrentListStatusLike {
   exists: boolean;
+  account_id?: string | null;
   matched_accounts: string[];
 }
 

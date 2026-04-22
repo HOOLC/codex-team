@@ -1,8 +1,13 @@
+import { formatAccountListDisplayName, formatAccountListMarkers } from "../account-list-display.js";
 import type { LocalUsageSummary } from "../local-usage/types.js";
 import {
   formatTuiUsageSummaryLine,
   formatTuiUsageTrendLine,
 } from "../local-usage/format.js";
+import {
+  StaleDaemonProcessError,
+  type StaleDaemonPortConflict,
+} from "../daemon/process.js";
 
 const ANSI = {
   altOn: "\u001B[?1049h",
@@ -31,6 +36,22 @@ const WIDE_LAYOUT_MIN_WIDTH = 104;
 const STACKED_LAYOUT_MIN_WIDTH = 72;
 const DEFAULT_AUTO_REFRESH_INTERVAL_MS = 75_000;
 const PANE_GAP = " | ";
+const WIDE_LIST_MIN_WIDTH = 72;
+const WIDE_LIST_MAX_WIDTH = 88;
+const WIDE_DETAIL_MIN_WIDTH = 28;
+const WIDE_DETAIL_PREFERRED_WIDTH = 40;
+const WIDE_NAME_MIN_WIDTH = 10;
+const WIDE_NAME_PREFERRED_WIDTH = 22;
+const WIDE_IDENTITY_MIN_WIDTH = 8;
+const WIDE_PLAN_MIN_WIDTH = 4;
+const WIDE_PLAN_MAX_WIDTH = 7;
+const WIDE_SCORE_MIN_WIDTH = 5;
+const WIDE_SCORE_MAX_WIDTH = 6;
+const WIDE_ETA_WIDTH = 6;
+const WIDE_USED_MIN_WIDTH = 4;
+const WIDE_USED_MAX_WIDTH = 6;
+const WIDE_RESET_MIN_WIDTH = 11;
+const WIDE_RESET_MAX_WIDTH = 18;
 const EXIT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 type SignalSource = {
   on(event: NodeJS.Signals, listener: () => void): unknown;
@@ -93,6 +114,8 @@ export interface AccountDashboardAccount {
   refreshStatusLabel: string;
   bottleneckLabel: string;
   reasonLabel: string;
+  proxyUpstreamActive?: boolean;
+  proxyLastUpstreamLabel?: string | null;
   oneWeekBlocked?: boolean;
   detailLines: string[];
 }
@@ -153,6 +176,9 @@ export interface RunAccountDashboardTuiOptions {
   ) => Promise<{
     statusMessage?: string;
     warningMessages?: string[];
+    currentName?: string | null;
+    proxyUpstreamName?: string | null;
+    proxyLastUpstreamLabel?: string | null;
   }>;
   openDesktop?: (
     name: string,
@@ -179,6 +205,14 @@ export interface RunAccountDashboardTuiOptions {
     name: string,
     eligible: boolean,
   ) => Promise<AccountDashboardActionResult>;
+  toggleAutoswitch?: () => Promise<AccountDashboardActionResult>;
+  triggerBackgroundRefresh?: (options: {
+    ensureDaemon: boolean;
+    source: string;
+  }) => Promise<void>;
+  cleanupStaleDaemonProcess?: (
+    conflict: StaleDaemonPortConflict,
+  ) => Promise<void>;
 }
 
 export interface AccountDashboardExitResult {
@@ -210,6 +244,18 @@ interface DashboardLayout {
   detailWidth: number;
   listRows: number;
   detailRows: number;
+}
+
+interface WideColumnWidths {
+  nameWidth: number;
+  identityWidth: number;
+  planWidth: number;
+  scoreWidth: number;
+  fiveHourWidth: number;
+  oneWeekWidth: number;
+  resetWidth: number;
+  minListWidth: number;
+  preferredListWidth: number;
 }
 
 interface FilteredAccounts {
@@ -252,6 +298,14 @@ type ConfirmState = {
 } | {
   kind: "desktop-relaunch";
   accountName: string;
+} | {
+  kind: "cleanup-stale-daemon";
+  accountName: string;
+  conflict: StaleDaemonPortConflict;
+  retry: {
+    force: boolean;
+    after: ExitAction | "desktop" | "desktop-force" | null;
+  };
 };
 
 function buildDefaultExportPath(source: AccountDashboardExportSource): string {
@@ -307,6 +361,193 @@ function compactIdentity(value: string, width: number): string {
   return `${value.slice(0, prefixWidth)}${marker}${value.slice(-suffixWidth)}`;
 }
 
+function displayAccountName(account: AccountDashboardAccount): string {
+  return formatAccountListDisplayName({
+    name: account.name,
+    refreshStatus: account.refreshStatusLabel,
+    autoSwitchEligible: account.autoSwitchEligible,
+  });
+}
+
+function compactDetailLine(line: string, width: number): string {
+  const prefixes = ["Identity: ", "Account: ", "User: "];
+  for (const prefix of prefixes) {
+    if (!line.startsWith(prefix)) {
+      continue;
+    }
+
+    const value = line.slice(prefix.length);
+    const availableWidth = Math.max(0, width - prefix.length);
+    return `${prefix}${compactIdentity(value, availableWidth)}`;
+  }
+
+  return truncate(line, width);
+}
+
+function resolveDynamicColumnWidth(options: {
+  header: string;
+  values: string[];
+  minWidth: number;
+  maxWidth: number;
+}): { minWidth: number; desiredWidth: number } {
+  const minWidth = Math.max(options.minWidth, visibleWidth(options.header));
+  const desiredWidth = Math.min(
+    options.maxWidth,
+    Math.max(
+      minWidth,
+      ...options.values.map((value) => Math.min(visibleWidth(value), options.maxWidth)),
+    ),
+  );
+
+  return {
+    minWidth,
+    desiredWidth,
+  };
+}
+
+function getWideFixedWidth(
+  showEtaColumn: boolean,
+  columns: Pick<WideColumnWidths, "planWidth" | "scoreWidth" | "fiveHourWidth" | "oneWeekWidth" | "resetWidth">,
+): number {
+  return (
+    4 +
+    1 +
+    1 +
+    columns.planWidth +
+    1 +
+    columns.scoreWidth +
+    (showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0) +
+    1 +
+    columns.fiveHourWidth +
+    1 +
+    columns.oneWeekWidth +
+    1 +
+    columns.resetWidth
+  );
+}
+
+function getWideColumnWidths(
+  width: number,
+  showEtaColumn: boolean,
+  accounts: AccountDashboardAccount[],
+): WideColumnWidths {
+  const planWidths = resolveDynamicColumnWidth({
+    header: "PLAN",
+    values: accounts.map((account) => account.planLabel),
+    minWidth: WIDE_PLAN_MIN_WIDTH,
+    maxWidth: WIDE_PLAN_MAX_WIDTH,
+  });
+  const scoreWidths = resolveDynamicColumnWidth({
+    header: "SCORE",
+    values: accounts.map((account) => account.scoreLabel),
+    minWidth: WIDE_SCORE_MIN_WIDTH,
+    maxWidth: WIDE_SCORE_MAX_WIDTH,
+  });
+  const fiveHourWidths = resolveDynamicColumnWidth({
+    header: "5H",
+    values: accounts.map((account) => account.fiveHourLabel),
+    minWidth: WIDE_USED_MIN_WIDTH,
+    maxWidth: WIDE_USED_MAX_WIDTH,
+  });
+  const oneWeekWidths = resolveDynamicColumnWidth({
+    header: "1W",
+    values: accounts.map((account) => account.oneWeekLabel),
+    minWidth: WIDE_USED_MIN_WIDTH,
+    maxWidth: WIDE_USED_MAX_WIDTH,
+  });
+  const resetWidths = resolveDynamicColumnWidth({
+    header: "NEXT RESET",
+    values: accounts.map((account) => account.nextResetLabel),
+    minWidth: WIDE_RESET_MIN_WIDTH,
+    maxWidth: WIDE_RESET_MAX_WIDTH,
+  });
+  const fixedMinWidths = {
+    planWidth: planWidths.minWidth,
+    scoreWidth: scoreWidths.minWidth,
+    fiveHourWidth: fiveHourWidths.minWidth,
+    oneWeekWidth: oneWeekWidths.minWidth,
+    resetWidth: resetWidths.minWidth,
+  };
+  const fixedWithoutNameIdentity = getWideFixedWidth(showEtaColumn, fixedMinWidths);
+  const desiredNameWidth = Math.min(
+    WIDE_NAME_PREFERRED_WIDTH,
+    Math.max(
+      WIDE_NAME_MIN_WIDTH,
+      ...accounts.map((account) => Math.min(visibleWidth(displayAccountName(account)), WIDE_NAME_PREFERRED_WIDTH)),
+    ),
+  );
+  const desiredIdentityWidth = Math.max(
+    WIDE_IDENTITY_MIN_WIDTH,
+    ...accounts.map((account) => visibleWidth(account.identityLabel)),
+  );
+  const flexibleWidth = Math.max(
+    WIDE_NAME_MIN_WIDTH + WIDE_IDENTITY_MIN_WIDTH,
+    width - fixedWithoutNameIdentity,
+  );
+  const desiredFixedGrowths = {
+    planWidth: Math.max(0, planWidths.desiredWidth - planWidths.minWidth),
+    scoreWidth: Math.max(0, scoreWidths.desiredWidth - scoreWidths.minWidth),
+    fiveHourWidth: Math.max(0, fiveHourWidths.desiredWidth - fiveHourWidths.minWidth),
+    oneWeekWidth: Math.max(0, oneWeekWidths.desiredWidth - oneWeekWidths.minWidth),
+    resetWidth: Math.max(0, resetWidths.desiredWidth - resetWidths.minWidth),
+  };
+  let nameWidth = WIDE_NAME_MIN_WIDTH;
+  let identityWidth = WIDE_IDENTITY_MIN_WIDTH;
+  let planWidth = planWidths.minWidth;
+  let scoreWidth = scoreWidths.minWidth;
+  let fiveHourWidth = fiveHourWidths.minWidth;
+  let oneWeekWidth = oneWeekWidths.minWidth;
+  let resetWidth = resetWidths.minWidth;
+  let remainingFlexibleWidth = flexibleWidth - nameWidth - identityWidth;
+
+  const consumeGrowth = (currentWidth: number, desiredGrowth: number): [number, number] => {
+    const appliedGrowth = Math.min(remainingFlexibleWidth, desiredGrowth);
+    remainingFlexibleWidth -= appliedGrowth;
+    return [currentWidth + appliedGrowth, desiredGrowth - appliedGrowth];
+  };
+
+  const nameGrowth = Math.max(0, desiredNameWidth - nameWidth);
+  const appliedNameGrowth = Math.min(remainingFlexibleWidth, nameGrowth);
+  nameWidth += appliedNameGrowth;
+  remainingFlexibleWidth -= appliedNameGrowth;
+
+  [scoreWidth] = consumeGrowth(scoreWidth, desiredFixedGrowths.scoreWidth);
+  [fiveHourWidth] = consumeGrowth(fiveHourWidth, desiredFixedGrowths.fiveHourWidth);
+  [oneWeekWidth] = consumeGrowth(oneWeekWidth, desiredFixedGrowths.oneWeekWidth);
+  [resetWidth] = consumeGrowth(resetWidth, desiredFixedGrowths.resetWidth);
+  [planWidth] = consumeGrowth(planWidth, desiredFixedGrowths.planWidth);
+
+  const identityGrowth = Math.max(0, desiredIdentityWidth - identityWidth);
+  const appliedIdentityGrowth = Math.min(remainingFlexibleWidth, identityGrowth);
+  identityWidth += appliedIdentityGrowth;
+  remainingFlexibleWidth -= appliedIdentityGrowth;
+
+  if (remainingFlexibleWidth > 0) {
+    const extraIdentityGrowth = remainingFlexibleWidth;
+    identityWidth += extraIdentityGrowth;
+    remainingFlexibleWidth -= extraIdentityGrowth;
+  }
+
+  return {
+    nameWidth,
+    identityWidth,
+    planWidth,
+    scoreWidth,
+    fiveHourWidth,
+    oneWeekWidth,
+    resetWidth,
+    minListWidth: getWideFixedWidth(showEtaColumn, fixedMinWidths) + WIDE_NAME_MIN_WIDTH + WIDE_IDENTITY_MIN_WIDTH,
+    preferredListWidth:
+      getWideFixedWidth(showEtaColumn, {
+        planWidth: planWidths.desiredWidth,
+        scoreWidth: scoreWidths.desiredWidth,
+        fiveHourWidth: fiveHourWidths.desiredWidth,
+        oneWeekWidth: oneWeekWidths.desiredWidth,
+        resetWidth: resetWidths.desiredWidth,
+      }) + desiredNameWidth + desiredIdentityWidth,
+  };
+}
+
 function padEndVisible(value: string, width: number): string {
   return `${value}${repeat(" ", Math.max(0, width - visibleWidth(value)))}`;
 }
@@ -345,7 +586,7 @@ function invert(value: string): string {
 }
 
 function blockRow(value: string): string {
-  return `${ANSI.black}${ANSI.bgRed}${value}${ANSI.reset}`;
+  return `${ANSI.black}${ANSI.bgRed}${stripAnsi(value)}${ANSI.reset}`;
 }
 
 function fitLines(lines: string[], height: number): string[] {
@@ -381,6 +622,8 @@ function getLayout(
   accountCount: number,
   headerLineCount: number,
   bannerLineCount = 0,
+  filteredAccounts: AccountDashboardAccount[] = [],
+  showEtaColumn = true,
 ): DashboardLayout {
   const frame = computePanelFrame(width, height);
   const innerWidth = Math.max(1, frame.width - 2);
@@ -389,19 +632,38 @@ function getLayout(
 
   if (innerWidth >= WIDE_LAYOUT_MIN_WIDTH && bodyHeight >= 10) {
     const availableWidth = Math.max(1, innerWidth - PANE_GAP.length);
-    const listWidth = Math.max(72, Math.min(Math.floor(availableWidth * 0.66), availableWidth - 24));
-    const detailWidth = Math.max(22, innerWidth - listWidth - PANE_GAP.length);
-    return {
-      frame,
-      innerWidth,
-      innerHeight,
-      mode: "wide",
-      bodyHeight,
-      listWidth,
-      detailWidth,
-      listRows: bodyHeight,
-      detailRows: bodyHeight,
-    };
+    const wideColumns = getWideColumnWidths(
+      WIDE_LIST_MAX_WIDTH,
+      showEtaColumn,
+      filteredAccounts,
+    );
+    const minListWidth = Math.max(WIDE_LIST_MIN_WIDTH, wideColumns.minListWidth);
+    if (availableWidth >= minListWidth + WIDE_DETAIL_MIN_WIDTH) {
+      const preferredDetailWidth = Math.min(
+        Math.max(WIDE_DETAIL_MIN_WIDTH, WIDE_DETAIL_PREFERRED_WIDTH),
+        Math.max(WIDE_DETAIL_MIN_WIDTH, availableWidth - minListWidth),
+      );
+      const preferredListWidth = Math.min(
+        WIDE_LIST_MAX_WIDTH,
+        Math.max(minListWidth, wideColumns.preferredListWidth),
+      );
+      const listWidth = Math.max(
+        minListWidth,
+        Math.min(preferredListWidth, availableWidth - preferredDetailWidth),
+      );
+      const detailWidth = Math.max(WIDE_DETAIL_MIN_WIDTH, innerWidth - listWidth - PANE_GAP.length);
+      return {
+        frame,
+        innerWidth,
+        innerHeight,
+        mode: "wide",
+        bodyHeight,
+        listWidth,
+        detailWidth,
+        listRows: bodyHeight,
+        detailRows: bodyHeight,
+      };
+    }
   }
 
   if (innerWidth >= STACKED_LAYOUT_MIN_WIDTH && bodyHeight >= 8) {
@@ -489,9 +751,18 @@ function normalizeStateForViewport(
   height: number,
   headerLineCount = 3,
   bannerLineCount = 0,
+  showEtaColumn = true,
 ): { state: AccountDashboardState; filtered: FilteredAccounts; layout: DashboardLayout } {
   const filteredAccounts = getFilteredAccounts(snapshot, state.query);
-  const layout = getLayout(width, height, filteredAccounts.length, headerLineCount, bannerLineCount);
+  const layout = getLayout(
+    width,
+    height,
+    filteredAccounts.length,
+    headerLineCount,
+    bannerLineCount,
+    filteredAccounts,
+    showEtaColumn,
+  );
   const visibleRows = layout.mode === "wide"
     ? Math.max(1, layout.listRows - 3)
     : Math.max(1, Math.floor(layout.listRows / 2));
@@ -527,7 +798,7 @@ function normalizeStateForViewport(
 
 function styleListLine(line: string, account: AccountDashboardAccount, selected: boolean): string {
   if (selected) {
-    return invert(line);
+    return invert(stripAnsi(line));
   }
 
   if (account.oneWeekBlocked) {
@@ -538,49 +809,65 @@ function styleListLine(line: string, account: AccountDashboardAccount, selected:
 }
 
 function renderWideListHeader(width: number, showEtaColumn: boolean): string[] {
-  const identityWidth = 8;
-  const etaBlockWidth = showEtaColumn ? 1 + 6 : 0;
-  const fixedWidth = 2 + 1 + 1 + 1 + identityWidth + 1 + 6 + 1 + 5 + etaBlockWidth + 1 + 4 + 1 + 4 + 1 + 11;
-  const nameWidth = Math.max(8, width - fixedWidth);
-  const groupPrefix = 2 + nameWidth + 1 + identityWidth + 1 + 6 + 1 + 5 + etaBlockWidth + 1;
-  const usedSpan = 4 + 1 + 4;
+  return renderWideListHeaderWithColumns(
+    getWideColumnWidths(width, showEtaColumn, []),
+    showEtaColumn,
+  );
+}
+
+function renderWideListHeaderWithColumns(
+  columns: Pick<WideColumnWidths, "nameWidth" | "identityWidth" | "planWidth" | "scoreWidth" | "fiveHourWidth" | "oneWeekWidth" | "resetWidth">,
+  showEtaColumn: boolean,
+): string[] {
+  const {
+    nameWidth,
+    identityWidth,
+    planWidth,
+    scoreWidth,
+    fiveHourWidth,
+    oneWeekWidth,
+    resetWidth,
+  } = columns;
+  const etaBlockWidth = showEtaColumn ? 1 + WIDE_ETA_WIDTH : 0;
+  const groupPrefix = 4 + nameWidth + 1 + identityWidth + 1 + planWidth + 1 + scoreWidth + etaBlockWidth + 1;
+  const usedSpan = fiveHourWidth + 1 + oneWeekWidth;
 
   return [
     `${repeat(" ", groupPrefix)}${padVisibleCenter("USED", usedSpan)}`,
     [
-      "  ",
+      "    ",
       padEndVisible("NAME", nameWidth),
       " ",
       padEndVisible("IDENTITY", identityWidth),
       " ",
-      padEndVisible("PLAN", 6),
+      padEndVisible("PLAN", planWidth),
       " ",
-      padStartVisible("SCORE", 5),
-      showEtaColumn ? ` ${padStartVisible("ETA", 6)}` : "",
+      padStartVisible("SCORE", scoreWidth),
+      showEtaColumn ? ` ${padStartVisible("ETA", WIDE_ETA_WIDTH)}` : "",
       " ",
-      padStartVisible("5H", 4),
+      padVisibleCenter("5H", fiveHourWidth),
       " ",
-      padStartVisible("1W", 4),
+      padVisibleCenter("1W", oneWeekWidth),
       " ",
-      padEndVisible("NEXT RESET", 11),
+      padEndVisible("NEXT RESET", resetWidth),
     ].join(""),
     [
-      repeat("-", 2),
+      repeat("-", 3),
       " ",
       repeat("-", nameWidth),
       " ",
       repeat("-", identityWidth),
       " ",
-      repeat("-", 6),
+      repeat("-", planWidth),
       " ",
-      repeat("-", 5),
-      showEtaColumn ? ` ${repeat("-", 6)}` : "",
+      repeat("-", scoreWidth),
+      showEtaColumn ? ` ${repeat("-", WIDE_ETA_WIDTH)}` : "",
       " ",
-      repeat("-", 4),
+      repeat("-", fiveHourWidth),
       " ",
-      repeat("-", 4),
+      repeat("-", oneWeekWidth),
       " ",
-      repeat("-", 11),
+      repeat("-", resetWidth),
     ].join(""),
   ];
 }
@@ -588,32 +875,40 @@ function renderWideListHeader(width: number, showEtaColumn: boolean): string[] {
 function renderWideListRow(
   account: AccountDashboardAccount,
   selected: boolean,
-  width: number,
+  columns: Pick<WideColumnWidths, "nameWidth" | "identityWidth" | "planWidth" | "scoreWidth" | "fiveHourWidth" | "oneWeekWidth" | "resetWidth">,
   showEtaColumn: boolean,
 ): string {
-  const identityWidth = 8;
-  const etaBlockWidth = showEtaColumn ? 1 + 6 : 0;
-  const fixedWidth = 2 + 1 + 1 + 1 + identityWidth + 1 + 6 + 1 + 5 + etaBlockWidth + 1 + 4 + 1 + 4 + 1 + 11;
-  const nameWidth = Math.max(8, width - fixedWidth);
-  const displayName = account.autoSwitchEligible ? account.name : `${account.name} [P]`;
+  const {
+    nameWidth,
+    identityWidth,
+    planWidth,
+    scoreWidth,
+    fiveHourWidth,
+    oneWeekWidth,
+    resetWidth,
+  } = columns;
+  const displayName = displayAccountName(account);
+  const markers = formatAccountListMarkers({
+    selected,
+    current: account.current,
+    proxyUpstreamActive: account.proxyUpstreamActive,
+  });
   const line = [
-    selected ? ">" : " ",
-    account.current ? "*" : " ",
-    " ",
+    markers,
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
     " ",
     padEndVisible(compactIdentity(account.identityLabel, identityWidth), identityWidth),
     " ",
-    padEndVisible(truncate(account.planLabel, 6), 6),
+    padEndVisible(truncate(account.planLabel, planWidth), planWidth),
     " ",
-    padStartVisible(account.scoreLabel, 5),
-    showEtaColumn ? ` ${padStartVisible(account.etaLabel, 6)}` : "",
+    padStartVisible(account.scoreLabel, scoreWidth),
+    showEtaColumn ? ` ${padStartVisible(account.etaLabel, WIDE_ETA_WIDTH)}` : "",
     " ",
-    padStartVisible(account.fiveHourLabel, 4),
+    padStartVisible(account.fiveHourLabel, fiveHourWidth),
     " ",
-    padStartVisible(account.oneWeekLabel, 4),
+    padStartVisible(account.oneWeekLabel, oneWeekWidth),
     " ",
-    padEndVisible(truncate(account.nextResetLabel, 11), 11),
+    padEndVisible(truncate(account.nextResetLabel, resetWidth), resetWidth),
   ].join("");
 
   return styleListLine(line, account, selected);
@@ -625,30 +920,51 @@ function renderCompactListRow(
   width: number,
   showEtaColumn: boolean,
 ): string[] {
-  const includePlan = width >= 64;
-  const includeIdentity = width >= 64;
-  const includeReset = width >= 58;
-  const firstFixedWidth = 2 + 1 + 1 + 1 + (includePlan ? 1 + 6 : 0) + 1 + 5 + (showEtaColumn ? 1 + 6 : 0);
-  const nameWidth = Math.max(8, width - firstFixedWidth);
-  const displayName = account.autoSwitchEligible ? account.name : `${account.name} [P]`;
+  const markersWidth = formatAccountListMarkers({ selected: false }).length;
+  const scoreWidth = visibleWidth(account.scoreLabel);
+  const etaWidth = showEtaColumn ? visibleWidth(account.etaLabel) : 0;
+  const planWidth = account.planLabel === ""
+    ? 0
+    : Math.min(WIDE_PLAN_MAX_WIDTH, visibleWidth(account.planLabel));
+  const minimumNameWidth = 10;
+  const reservedCoreWidth = markersWidth + 1 + scoreWidth + (showEtaColumn ? 1 + etaWidth : 0) + minimumNameWidth;
+  const includePlan = account.planLabel !== "" && width - reservedCoreWidth >= 1 + planWidth;
+  const nameWidth = Math.max(
+    8,
+    width - markersWidth - 1 - scoreWidth - (showEtaColumn ? 1 + etaWidth : 0) - (includePlan ? 1 + planWidth : 0),
+  );
+  const displayName = displayAccountName(account);
+  const markers = formatAccountListMarkers({
+    selected,
+    current: account.current,
+    proxyUpstreamActive: account.proxyUpstreamActive,
+  });
   const firstLine = [
-    selected ? ">" : " ",
-    account.current ? "*" : " ",
-    " ",
+    markers,
     padEndVisible(truncate(displayName, nameWidth), nameWidth),
-    includePlan ? ` ${padEndVisible(truncate(account.planLabel, 6), 6)}` : "",
+    includePlan ? ` ${padEndVisible(truncate(account.planLabel, planWidth), planWidth)}` : "",
     " ",
-    padStartVisible(account.scoreLabel, 5),
-    showEtaColumn ? ` ${padStartVisible(account.etaLabel, 6)}` : "",
+    padStartVisible(account.scoreLabel, scoreWidth),
+    showEtaColumn ? ` ${padStartVisible(account.etaLabel, etaWidth)}` : "",
   ].join("");
 
-  const secondSegments = [
-    includeIdentity ? compactIdentity(account.identityLabel, Math.max(8, Math.min(14, width / 4))) : null,
-    `5H ${account.fiveHourLabel}`,
-    `1W ${account.oneWeekLabel}`,
-    includeReset ? account.nextResetLabel : null,
-  ].filter((segment): segment is string => segment !== null);
-  const secondLine = `   ${truncate(secondSegments.join(" | "), Math.max(0, width - 3))}`;
+  const secondLineIndent = " ".repeat(markersWidth);
+  const secondLineWidth = Math.max(0, width - markersWidth);
+  const secondSegments = [`5H ${account.fiveHourLabel}`, `1W ${account.oneWeekLabel}`];
+  if (
+    account.nextResetLabel !== "-"
+    && visibleWidth([...secondSegments, account.nextResetLabel].join(" | ")) <= secondLineWidth
+  ) {
+    secondSegments.push(account.nextResetLabel);
+  }
+  const identityWidth = Math.min(
+    24,
+    Math.max(0, secondLineWidth - visibleWidth(secondSegments.join(" | ")) - 3),
+  );
+  if (account.identityLabel !== "" && identityWidth >= 8) {
+    secondSegments.push(compactIdentity(account.identityLabel, identityWidth));
+  }
+  const secondLine = `${secondLineIndent}${truncate(secondSegments.join(" | "), secondLineWidth)}`;
 
   return [
     styleListLine(firstLine, account, selected),
@@ -665,7 +981,8 @@ function renderListLines(
   showEtaColumn: boolean,
 ): string[] {
   if (layoutMode === "wide") {
-    const headerLines = renderWideListHeader(width, showEtaColumn);
+    const wideColumns = getWideColumnWidths(width, showEtaColumn, filteredAccounts);
+    const headerLines = renderWideListHeaderWithColumns(wideColumns, showEtaColumn);
     if (filteredAccounts.length === 0) {
       return fitLines(headerLines, height);
     }
@@ -677,7 +994,7 @@ function renderListLines(
       [
         ...headerLines,
         ...visible.map((account, index) => (
-          renderWideListRow(account, start + index === state.selected, width, showEtaColumn)
+          renderWideListRow(account, start + index === state.selected, wideColumns, showEtaColumn)
         )),
       ],
       height,
@@ -729,12 +1046,17 @@ function renderDetailLines(
   }
 
   const protectionTag = selectedAccount.autoSwitchEligible ? "" : " [protected]";
-  const title = selectedAccount.current
-    ? `${selectedAccount.name} [current]${protectionTag} [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`
-    : `${selectedAccount.name}${protectionTag} [${selectedAccount.planLabel}] [${selectedAccount.refreshStatusLabel}]`;
+  const titleParts = [
+    selectedAccount.current
+      ? `${selectedAccount.name} [current]${protectionTag}`
+      : `${selectedAccount.name}${protectionTag}`,
+    ...(selectedAccount.planLabel ? [`[${selectedAccount.planLabel}]`] : []),
+    `[${selectedAccount.refreshStatusLabel}]`,
+  ];
+  const title = titleParts.join(" ");
 
   return fitLines(
-    [emphasize(title), ...selectedAccount.detailLines].map((line) => truncate(line, width)),
+    [emphasize(title), ...selectedAccount.detailLines].map((line) => compactDetailLine(line, width)),
     height,
   );
 }
@@ -756,6 +1078,7 @@ function renderBodyLines(
     height + headerLineCount + 5 + bannerLineCount,
     headerLineCount,
     bannerLineCount,
+    showEtaColumn,
   );
   const { layout } = normalized;
 
@@ -854,6 +1177,10 @@ function formatStatusLine(options: {
     return buildCompactSelectionLine(options.selectedAccount);
   }
   if (options.snapshot.failures.length > 0) {
+    if (options.snapshot.accounts.length > 0) {
+      const count = options.snapshot.failures.length;
+      return `Refresh failures: ${count} account${count === 1 ? "" : "s"}. Showing available data.`;
+    }
     const failure = options.snapshot.failures[0];
     return `Failure: ${failure.name}: ${failure.error}`;
   }
@@ -880,11 +1207,19 @@ function renderFilterLine(
 
 function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
   const forceLabel = selectedAccount?.current ? "f reload" : "f force";
-  const hint = width < 92
-    ? `Enter | ${forceLabel} | p prot | o run | O iso | d desk | D rel | q quit`
-    : width < 132
-      ? `/ filter | Enter | ${forceLabel} | p prot | o run | O iso | d desk | D rel | e/E exp | i imp | x del | u undo | q quit`
-      : `j/k move | / filter | Enter | ${forceLabel} | p prot | o run | O iso | d desk | D relaunch | e/E exp | i imp | x del | u undo | r refresh | q quit`;
+  const wideForceLabel = selectedAccount?.current ? "f reload" : "f force-switch";
+  const proxySelected = selectedAccount?.authModeLabel === "proxy";
+  const hint = proxySelected
+    ? width < 92
+      ? `Enter | a auto | ${forceLabel} | o run | O iso | d desk | D rel | q quit`
+      : width < 144
+        ? `/ filter | Enter | a auto | ${forceLabel} | o run | O iso | d desk | D rel | i imp | q quit`
+        : `j/k move | / filter | Enter toggle proxy | a autoswitch | ${selectedAccount?.current ? "f reapply" : wideForceLabel} | o codex | O isolated | d desktop | D relaunch | i import | r refresh | q quit`
+    : width < 92
+      ? `Enter | a auto | ${forceLabel} | p prot | o run | O iso | d desk | D rel | q quit`
+      : width < 176
+        ? `/ filter | Enter | a auto | ${forceLabel} | p prot | o run | O iso | d desk | D rel | e exp | i imp | x del | u undo | q quit`
+        : `j/k move | / filter | Enter switch | a autoswitch | ${wideForceLabel} | p protect | o codex | O isolated | d desktop | D relaunch | e export | i import | x delete | u undo | r refresh | q quit`;
   return truncate(color(hint, "dim"), width);
 }
 
@@ -923,7 +1258,7 @@ export function renderAccountDashboardScreen(
         formatTuiUsageTrendLine(options.snapshot.usageSummary, previewInnerWidth, previewInnerHeight),
       ].filter((line): line is string => typeof line === "string" && line !== "")
     : [];
-  const headerLineCount = 3 + usageHeaderLines.length;
+  const headerLineCount = 4 + usageHeaderLines.length;
   const bannerLineCount = options.bannerMessage ? 1 : 0;
   const normalized = normalizeStateForViewport(
     options.snapshot,
@@ -932,6 +1267,7 @@ export function renderAccountDashboardScreen(
     options.height,
     headerLineCount,
     bannerLineCount,
+    options.snapshot.showEtaColumn ?? true,
   );
   const { layout } = normalized;
   const filteredCount = normalized.filtered.all.length;
@@ -941,6 +1277,7 @@ export function renderAccountDashboardScreen(
     : "";
   const lines = [
     truncate(options.snapshot.headerLine, layout.innerWidth),
+    truncate(options.snapshot.currentStatusLine, layout.innerWidth),
     truncate(options.snapshot.summaryLine, layout.innerWidth),
     truncate(options.snapshot.poolLine, layout.innerWidth),
     ...usageHeaderLines.map((line) => truncate(line, layout.innerWidth)),
@@ -1046,6 +1383,93 @@ function updateSnapshotCurrentIndicator(
     currentStatusLine: nextCurrentStatusLine,
     accounts: nextAccounts,
   };
+}
+
+function updateProxyDetailLines(
+  detailLines: string[],
+  proxyLastUpstreamLabel: string | null,
+): string[] {
+  const nextLastUpstreamLine = proxyLastUpstreamLabel ? `Last upstream: ${proxyLastUpstreamLabel}` : null;
+  const trimmedLines = detailLines.filter((line) => !line.startsWith("Last upstream: "));
+  if (!nextLastUpstreamLine) {
+    return trimmedLines;
+  }
+
+  const poolLineIndex = trimmedLines.findIndex((line) => line.startsWith("Pool: "));
+  if (poolLineIndex >= 0) {
+    return [
+      ...trimmedLines.slice(0, poolLineIndex + 1),
+      nextLastUpstreamLine,
+      ...trimmedLines.slice(poolLineIndex + 1),
+    ];
+  }
+
+  const firstBlankIndex = trimmedLines.findIndex((line) => line === "");
+  if (firstBlankIndex >= 0) {
+    return [
+      ...trimmedLines.slice(0, firstBlankIndex),
+      nextLastUpstreamLine,
+      ...trimmedLines.slice(firstBlankIndex),
+    ];
+  }
+
+  return [...trimmedLines, nextLastUpstreamLine];
+}
+
+function updateSnapshotProxyRouting(
+  snapshot: AccountDashboardSnapshot,
+  options: {
+    proxyUpstreamName?: string | null;
+    proxyLastUpstreamLabel?: string | null;
+  },
+): AccountDashboardSnapshot {
+  if (options.proxyUpstreamName === undefined && options.proxyLastUpstreamLabel === undefined) {
+    return snapshot;
+  }
+
+  let changed = false;
+  const nextAccounts = snapshot.accounts.map((account) => {
+    let nextAccount = account;
+
+    if (options.proxyUpstreamName !== undefined && account.authModeLabel !== "proxy") {
+      const nextProxyUpstreamActive = options.proxyUpstreamName !== null && account.name === options.proxyUpstreamName;
+      if (account.proxyUpstreamActive !== nextProxyUpstreamActive) {
+        nextAccount = {
+          ...nextAccount,
+          proxyUpstreamActive: nextProxyUpstreamActive,
+        };
+      }
+    }
+
+    if (options.proxyLastUpstreamLabel !== undefined && account.authModeLabel === "proxy") {
+      const nextDetailLines = updateProxyDetailLines(
+        nextAccount.detailLines,
+        options.proxyLastUpstreamLabel,
+      );
+      if (
+        account.proxyLastUpstreamLabel !== options.proxyLastUpstreamLabel
+        || nextDetailLines !== nextAccount.detailLines
+      ) {
+        nextAccount = {
+          ...nextAccount,
+          proxyLastUpstreamLabel: options.proxyLastUpstreamLabel,
+          detailLines: nextDetailLines,
+        };
+      }
+    }
+
+    if (nextAccount !== account) {
+      changed = true;
+    }
+    return nextAccount;
+  });
+
+  return changed
+    ? {
+        ...snapshot,
+        accounts: nextAccounts,
+      }
+    : snapshot;
 }
 
 function insertTextAtCursor(state: AccountDashboardState, value: string): AccountDashboardState {
@@ -1204,7 +1628,9 @@ export async function runAccountDashboardTui(
       : confirmState
         ? confirmState.kind === "delete"
           ? `confirm: Delete account "${confirmState.accountName}"? [y/N]`
-          : `confirm: Relaunch Desktop for "${confirmState.accountName}"? May force-close non-codexm app. [y/N]`
+          : confirmState.kind === "desktop-relaunch"
+            ? `confirm: Relaunch Desktop for "${confirmState.accountName}"? May force-close non-codexm app. [y/N]`
+            : `confirm: Stop stale codexm ${confirmState.conflict.kind} pid ${confirmState.conflict.pid} on ${confirmState.conflict.host}:${confirmState.conflict.port} and continue? [y/N]`
         : null;
     const hintOverride = promptState
       ? color("Enter confirm | Esc back | Ctrl-U clear | Ctrl-C quit", "dim")
@@ -1222,7 +1648,9 @@ export async function runAccountDashboardTui(
         : confirmState
           ? confirmState.kind === "delete"
             ? `Delete account "${confirmState.accountName}"? Press y to confirm.`
-            : `Relaunch Desktop for "${confirmState.accountName}"? Press y to confirm.`
+            : confirmState.kind === "desktop-relaunch"
+              ? `Relaunch Desktop for "${confirmState.accountName}"? Press y to confirm.`
+              : `Stop stale codexm ${confirmState.conflict.kind} process ${confirmState.conflict.pid} on ${confirmState.conflict.host}:${confirmState.conflict.port}? Press y to confirm.`
           : null;
 
     stdout.write(
@@ -1344,6 +1772,9 @@ export async function runAccountDashboardTui(
           }
         } finally {
           refreshing = false;
+          if (cleanedUp) {
+            refreshPromise = null;
+          }
           render();
         }
       }
@@ -1405,8 +1836,11 @@ export async function runAccountDashboardTui(
   const runSimpleAction = async (
     label: string,
     run: () => Promise<AccountDashboardActionResult>,
+    options?: {
+      busyLabel?: string;
+    },
   ) => {
-    busyMessage = label;
+    busyMessage = options?.busyLabel ?? label;
     render();
 
     try {
@@ -1551,8 +1985,10 @@ export async function runAccountDashboardTui(
 
     const reloadingCurrentAccount =
       selected.current && optionsForAction.force && optionsForAction.after === null;
+    const togglingProxy =
+      selected.authModeLabel === "proxy" && optionsForAction.after === null && !reloadingCurrentAccount;
 
-    if (selected.current && !reloadingCurrentAccount) {
+    if (selected.current && !reloadingCurrentAccount && !togglingProxy) {
       if (optionsForAction.after === "open-codex") {
         finish("open-codex", {
           preferredName: selected.name,
@@ -1589,6 +2025,10 @@ export async function runAccountDashboardTui(
       controller,
       label: reloadingCurrentAccount
         ? `reloading "${selected.name}"`
+        : togglingProxy
+          ? selected.current
+            ? "disabling proxy"
+            : "enabling proxy"
         : optionsForAction.after === "open-codex"
         ? `opening Codex TUI for "${selected.name}"`
         : optionsForAction.after === "open-isolated-codex"
@@ -1601,6 +2041,10 @@ export async function runAccountDashboardTui(
     };
     busyMessage = reloadingCurrentAccount
       ? `Reloading "${selected.name}"...`
+      : togglingProxy
+        ? selected.current
+          ? "Disabling proxy..."
+          : "Enabling proxy..."
       : optionsForAction.after === "open-codex"
       ? `Switching to "${selected.name}" and opening Codex TUI...`
       : optionsForAction.after === "open-isolated-codex"
@@ -1632,7 +2076,12 @@ export async function runAccountDashboardTui(
           reloadingCurrentAccount ? `Reloaded "${selected.name}".` : undefined,
         ),
       };
-      snapshot = updateSnapshotCurrentIndicator(snapshot, selected.name);
+      const currentName = result.currentName ?? selected.name;
+      snapshot = updateSnapshotCurrentIndicator(snapshot, currentName);
+      snapshot = updateSnapshotProxyRouting(snapshot, {
+        proxyUpstreamName: result.proxyUpstreamName,
+        proxyLastUpstreamLabel: result.proxyLastUpstreamLabel,
+      });
       state = resolvePreferredSelection(snapshot, state, selected.name);
 
       if (optionsForAction.after === "open-codex") {
@@ -1664,6 +2113,23 @@ export async function runAccountDashboardTui(
 
       requestRefresh(selected.name);
     } catch (error) {
+      if (
+        error instanceof StaleDaemonProcessError
+        && options.cleanupStaleDaemonProcess
+      ) {
+        confirmState = {
+          kind: "cleanup-stale-daemon",
+          accountName: selected.name,
+          conflict: error.conflict,
+          retry: optionsForAction,
+        };
+        state = {
+          ...state,
+          statusMessage: null,
+        };
+        return;
+      }
+
       state = {
         ...state,
         statusMessage: optionsForAction.after === "desktop" || optionsForAction.after === "desktop-force"
@@ -1808,8 +2274,12 @@ export async function runAccountDashboardTui(
           return;
         }
         promptState = null;
-        await runSimpleAction("Export", async () =>
-          await options.exportAccount!(source, value),
+        await runSimpleAction(
+          "Export",
+          async () => await options.exportAccount!(source, value),
+          {
+            busyLabel: "Exporting share bundle...",
+          },
         );
         return;
       }
@@ -1861,8 +2331,12 @@ export async function runAccountDashboardTui(
 
       const bundlePath = promptState.bundlePath;
       promptState = null;
-      await runSimpleAction("Import", async () =>
-        await options.importBundle!(bundlePath, localName),
+      await runSimpleAction(
+        "Import",
+        async () => await options.importBundle!(bundlePath, localName),
+        {
+          busyLabel: "Importing share bundle...",
+        },
       );
       detailOverride = null;
       return;
@@ -1936,13 +2410,52 @@ export async function runAccountDashboardTui(
       return;
     }
 
-    const accountName = confirmState.accountName;
-    const confirmKind = confirmState.kind;
+    const activeConfirm = confirmState;
+    const accountName = activeConfirm.accountName;
+    const confirmKind = activeConfirm.kind;
     confirmState = null;
     if (confirmKind === "delete") {
-      await runSimpleAction("Delete", async () =>
-        await options.deleteAccount!(accountName),
+      await runSimpleAction(
+        "Delete",
+        async () => await options.deleteAccount!(accountName),
+        {
+          busyLabel: `Deleting "${accountName}"...`,
+        },
       );
+      return;
+    }
+
+    if (confirmKind === "cleanup-stale-daemon") {
+      if (!options.cleanupStaleDaemonProcess) {
+        state = {
+          ...state,
+          statusMessage: "Stale daemon cleanup is unavailable in this session.",
+        };
+        render();
+        return;
+      }
+
+      busyMessage =
+        `Stopping stale codexm ${activeConfirm.conflict.kind} process ${activeConfirm.conflict.pid}...`;
+      render();
+
+      try {
+        await options.cleanupStaleDaemonProcess(activeConfirm.conflict);
+        state = {
+          ...state,
+          statusMessage:
+            `Stopped stale codexm ${activeConfirm.conflict.kind} process ${activeConfirm.conflict.pid}. Retrying...`,
+        };
+        render();
+        await runSwitchAction(activeConfirm.retry);
+      } catch (error) {
+        busyMessage = null;
+        state = {
+          ...state,
+          statusMessage: `Cleanup failed: ${(error as Error).message}`,
+        };
+        render();
+      }
       return;
     }
 
@@ -1960,25 +2473,64 @@ export async function runAccountDashboardTui(
     });
   };
 
-  const handleBrowseKeypress = async (event: InputEvent): Promise<void> => {
-    if (activeOperation) {
-      if ((event.ctrl && event.name === "c") || event.name === "escape") {
-        activeOperation.controller.abort();
-        state = {
-          ...state,
-          statusMessage: `Cancelling ${activeOperation.label}...`,
-        };
-        render();
-        return;
-      }
+  const handleActiveOperationKeypress = (event: InputEvent): boolean => {
+    if (!activeOperation) {
+      return false;
+    }
 
-      if (event.name === "q") {
-        state = {
-          ...state,
-          statusMessage: `Busy. Press Esc or Ctrl-C to cancel ${activeOperation.label}.`,
-        };
-        render();
-      }
+    if ((event.ctrl && event.name === "c") || event.name === "escape") {
+      activeOperation.controller.abort();
+      state = {
+        ...state,
+        statusMessage: `Cancelling ${activeOperation.label}...`,
+      };
+      render();
+      return true;
+    }
+
+    if (event.name === "up" || event.name === "k") {
+      moveSelection(-1);
+      render();
+      return true;
+    }
+    if (event.name === "down" || event.name === "j") {
+      moveSelection(1);
+      render();
+      return true;
+    }
+    if (event.name === "home" || event.value === "g") {
+      state = {
+        ...state,
+        selected: 0,
+        scrollTop: 0,
+      };
+      render();
+      return true;
+    }
+    if (event.name === "end" || event.value === "G") {
+      const filtered = getFilteredAccounts(snapshot, state.query);
+      state = {
+        ...state,
+        selected: Math.max(0, filtered.length - 1),
+      };
+      render();
+      return true;
+    }
+
+    if (event.name === "q") {
+      state = {
+        ...state,
+        statusMessage: `Busy. Press Esc or Ctrl-C to cancel ${activeOperation.label}.`,
+      };
+      render();
+      return true;
+    }
+
+    return true;
+  };
+
+  const handleBrowseKeypress = async (event: InputEvent): Promise<void> => {
+    if (handleActiveOperationKeypress(event)) {
       return;
     }
 
@@ -2029,7 +2581,30 @@ export async function runAccountDashboardTui(
       return;
     }
     if (event.value === "r") {
+      void options.triggerBackgroundRefresh?.({
+        ensureDaemon: true,
+        source: "tui-manual-refresh",
+      }).catch(() => undefined);
       requestRefresh();
+      return;
+    }
+    if (event.value === "a") {
+      if (!options.toggleAutoswitch) {
+        state = {
+          ...state,
+          statusMessage: "Autoswitch toggle is unavailable in this session.",
+        };
+        render();
+        return;
+      }
+
+      await runSimpleAction(
+        "Autoswitch",
+        async () => await options.toggleAutoswitch!(),
+        {
+          busyLabel: "Updating autoswitch mode...",
+        },
+      );
       return;
     }
     if (event.value === "e") {
@@ -2038,16 +2613,17 @@ export async function runAccountDashboardTui(
       if (!selected) {
         return;
       }
+      if (selected.authModeLabel === "proxy") {
+        state = {
+          ...state,
+          statusMessage: "Proxy export is unavailable.",
+        };
+        render();
+        return;
+      }
       beginExportPrompt({
         type: "managed",
         name: selected.name,
-      });
-      return;
-    }
-    if (event.value === "E") {
-      beginExportPrompt({
-        type: "current",
-        name: null,
       });
       return;
     }
@@ -2056,6 +2632,16 @@ export async function runAccountDashboardTui(
       return;
     }
     if (event.value === "x") {
+      const filtered = getFilteredAccounts(snapshot, state.query);
+      const selected = filtered[state.selected] ?? null;
+      if (selected?.authModeLabel === "proxy") {
+        state = {
+          ...state,
+          statusMessage: "Proxy delete is unavailable.",
+        };
+        render();
+        return;
+      }
       beginDeleteConfirm();
       return;
     }
@@ -2071,7 +2657,9 @@ export async function runAccountDashboardTui(
 
       const currentUndo = undoAction;
       undoAction = null;
-      await runSimpleAction("Undo", async () => await currentUndo.run());
+      await runSimpleAction("Undo", async () => await currentUndo.run(), {
+        busyLabel: "Undoing last action...",
+      });
       return;
     }
     if (event.value === "p") {
@@ -2089,12 +2677,26 @@ export async function runAccountDashboardTui(
       if (!selected) {
         return;
       }
+      if (selected.authModeLabel === "proxy") {
+        state = {
+          ...state,
+          statusMessage: "Proxy protection toggle is unavailable.",
+        };
+        render();
+        return;
+      }
 
-      await runSimpleAction("Protection", async () =>
-        await options.toggleAutoSwitchProtection!(
-          selected.name,
-          !selected.autoSwitchEligible,
-        ));
+      await runSimpleAction(
+        "Protection",
+        async () =>
+          await options.toggleAutoSwitchProtection!(
+            selected.name,
+            !selected.autoSwitchEligible,
+          ),
+        {
+          busyLabel: `Updating auto-switch protection for "${selected.name}"...`,
+        },
+      );
       return;
     }
     if (event.value === "f") {
@@ -2143,6 +2745,11 @@ export async function runAccountDashboardTui(
     inputBuffer = rest;
 
     for (const event of events) {
+      if (!promptState && !confirmState && !state.filterActive && activeOperation) {
+        handleActiveOperationKeypress(event);
+        continue;
+      }
+
       actionQueue = actionQueue
         .then(async () => {
           if (cleanedUp) {

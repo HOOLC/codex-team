@@ -104,6 +104,7 @@ describe("auth snapshot parsing", () => {
     expect(overwritten.account_id).toBe("acct-primary");
     expect(overwritten.user_id).toBe("user-primary");
     expect(overwritten.quota.status).toBe("stale");
+    expect(overwritten.last_good_quota).toBe(null);
   });
 
   test("parses legacy metadata without quota and defaults to stale", () => {
@@ -122,6 +123,51 @@ describe("auth snapshot parsing", () => {
     expect(parsed.quota.status).toBe("stale");
     expect(parsed.account_id).toBe("acct-primary");
     expect(parsed.user_id).toBe("user-primary");
+    expect(parsed.last_good_quota).toBe(null);
+  });
+
+  test("derives last_good_quota from legacy quota snapshots when the field is missing", () => {
+    const parsed = parseSnapshotMeta(
+      JSON.stringify({
+        name: "main",
+        auth_mode: "chatgpt",
+        account_id: "acct-primary",
+        user_id: "user-primary",
+        created_at: "2026-03-18T00:00:00.000Z",
+        updated_at: "2026-03-18T00:00:00.000Z",
+        last_switched_at: null,
+        quota: {
+          status: "error",
+          plan_type: "plus",
+          fetched_at: "2026-03-18T00:00:00.000Z",
+          error_message: "network failed",
+          five_hour: {
+            used_percent: 42,
+            window_seconds: 18_000,
+            reset_at: "2026-03-18T05:00:00.000Z",
+          },
+          one_week: {
+            used_percent: 30,
+            window_seconds: 604_800,
+            reset_at: "2026-03-25T00:00:00.000Z",
+          },
+        },
+      }),
+    );
+
+    expect(parsed.quota.status).toBe("error");
+    expect(parsed.last_good_quota).toMatchObject({
+      status: "ok",
+      plan_type: "plus",
+      fetched_at: "2026-03-18T00:00:00.000Z",
+      five_hour: {
+        used_percent: 42,
+      },
+      one_week: {
+        used_percent: 30,
+      },
+    });
+    expect(parsed.last_good_quota?.error_message).toBeUndefined();
   });
 
   test("rejects unsupported auth modes in account metadata", () => {

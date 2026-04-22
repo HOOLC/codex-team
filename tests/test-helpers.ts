@@ -9,7 +9,23 @@ export async function createTempHome(): Promise<string> {
 }
 
 export async function cleanupTempHome(homeDir: string): Promise<void> {
-  await rm(homeDir, { recursive: true, force: true });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(homeDir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (
+        attempt === 4 ||
+        (nodeError.code !== "ENOTEMPTY" &&
+          nodeError.code !== "EBUSY" &&
+          nodeError.code !== "EPERM")
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
 }
 
 function encodeJwt(payload: Record<string, unknown>): string {
@@ -125,6 +141,20 @@ export async function readCurrentAuth(homeDir: string): Promise<AuthSnapshot> {
   return parseAuthSnapshot(raw);
 }
 
+export async function writeProxyRequestLog(
+  homeDir: string,
+  entries: Array<Record<string, unknown>>,
+  dateKey = "2026-04-21",
+): Promise<void> {
+  const logsDir = join(homeDir, ".codex-team", "logs");
+  await mkdir(logsDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(logsDir, `proxy-requests-${dateKey}.jsonl`),
+    `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    { mode: 0o600 },
+  );
+}
+
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -146,4 +176,27 @@ export function installFetchMock(
   return () => {
     globalThis.fetch = originalFetch;
   };
+}
+
+export async function withEnvVar<T>(
+  name: string,
+  value: string | undefined,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const previous = process.env[name];
+  if (typeof value === "string") {
+    process.env[name] = value;
+  } else {
+    delete process.env[name];
+  }
+
+  try {
+    return await callback();
+  } finally {
+    if (typeof previous === "string") {
+      process.env[name] = previous;
+    } else {
+      delete process.env[name];
+    }
+  }
 }

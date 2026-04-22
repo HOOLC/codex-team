@@ -5,19 +5,21 @@ import { describe, expect, test } from "@rstest/core";
 
 import { runCli } from "../src/main.js";
 import { createAccountStore } from "../src/account-store/index.js";
+import { PROXY_PORT_ENV_VAR } from "../src/proxy/constants.js";
 import {
   cleanupTempHome,
   createTempHome,
   jsonResponse,
   readCurrentAuth,
   textResponse,
+  withEnvVar,
   writeCurrentAuth,
 } from "./test-helpers.js";
 import {
   captureWritable,
+  createDaemonProcessManagerStub,
   createDesktopLauncherStub,
   createInteractiveStdin,
-  createWatchProcessManagerStub,
 } from "./cli-fixtures.js";
 import { setPlatformForTesting } from "../src/platform.js";
 
@@ -52,7 +54,7 @@ describe("CLI", () => {
     }
   });
 
-  test("watch --detach refuses when no Desktop running (CLI mode unsupported)", async () => {
+  test("watch rejects the removed --detach flag", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -70,7 +72,8 @@ describe("CLI", () => {
       });
 
       expect(exitCode).toBe(1);
-      expect(stderr.read()).toContain("Detached CLI watch is not yet supported");
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('Unknown flag "--detach" for command "watch".');
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -152,7 +155,7 @@ describe("CLI", () => {
     }
   });
 
-  test("watch --status reports when no background watch is running", async () => {
+  test("watch rejects the removed --status flag", async () => {
     const homeDir = await createTempHome();
 
     try {
@@ -164,7 +167,50 @@ describe("CLI", () => {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
-        watchProcessManager: createWatchProcessManagerStub({
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('Unknown flag "--status" for command "watch".');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch rejects the removed --stop flag", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--stop"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('Unknown flag "--stop" for command "watch".');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("daemon --status reports when no shared daemon is running", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["daemon", "status"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
           getStatus: async () => ({
             running: false,
             state: null,
@@ -173,32 +219,38 @@ describe("CLI", () => {
       });
 
       expect(exitCode).toBe(0);
-      expect(stdout.read()).toContain("Watch: not running");
-      expect(stderr.read()).toBe("");
+      expect(stdout.read()).toContain("Daemon: not running");
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("watch --status reports running background watch details", async () => {
+  test("daemon --status reports enabled features and log path", async () => {
     const homeDir = await createTempHome();
 
     try {
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
 
-      const exitCode = await runCli(["watch", "--status"], {
+      const exitCode = await runCli(["daemon", "status"], {
         store,
         stdout: stdout.stream,
         stderr: captureWritable().stream,
-        watchProcessManager: createWatchProcessManagerStub({
+        daemonProcessManager: createDaemonProcessManagerStub({
           getStatus: async () => ({
             running: true,
             state: {
-              pid: 43210,
-              started_at: "2026-04-08T13:58:00.000Z",
-              log_path: "/tmp/watch.log",
+              pid: 54321,
+              started_at: "2026-04-18T00:00:00.000Z",
+              log_path: "/tmp/daemon.log",
+              stayalive: true,
+              watch: true,
               auto_switch: true,
+              proxy: true,
+              host: "127.0.0.1",
+              port: 14555,
+              base_url: "http://127.0.0.1:14555/backend-api",
+              openai_base_url: "http://127.0.0.1:14555/v1",
               debug: false,
             },
           }),
@@ -207,124 +259,351 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(0);
       const output = stdout.read();
-      expect(output).toContain("Watch: running (pid 43210)");
-      expect(output).toContain("Started at: 2026-04-08T13:58:00.000Z");
-      expect(output).toContain("Auto-switch: enabled");
-      expect(output).toContain("Log: /tmp/watch.log");
+      expect(output).toContain("Daemon: running (pid 54321)");
+      expect(output).toContain("Features: stayalive, autoswitch, proxy");
+      expect(output).toContain("Log: /tmp/daemon.log");
+      expect(output).toContain("ChatGPT base URL: http://127.0.0.1:14555/backend-api");
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("watch --detach starts a background auto-switch watcher by default", async () => {
+  test("daemon start launches the baseline stayalive daemon", async () => {
     const homeDir = await createTempHome();
-    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let ensureConfigArgs: Record<string, unknown> | null = null;
 
     try {
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
       const stderr = captureWritable();
 
-      const exitCode = await runCli(["watch", "--detach", "--debug"], {
+      const exitCode = await runCli(["daemon", "start", "--debug"], {
         store,
         stdout: stdout.stream,
         stderr: stderr.stream,
-        desktopLauncher: createDesktopLauncherStub({
-          isManagedDesktopRunning: async () => true,
-        }),
-        watchProcessManager: createWatchProcessManagerStub({
-          startDetached: async (options) => {
-            startedOptions = options;
+        daemonProcessManager: createDaemonProcessManagerStub({
+          ensureConfig: async (config) => {
+            ensureConfigArgs = config;
             return {
-              pid: 43210,
-              started_at: "2026-04-08T13:58:00.000Z",
-              log_path: "/tmp/watch.log",
-              auto_switch: true,
-              debug: true,
+              action: "started",
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:00:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: false,
+                auto_switch: false,
+                proxy: false,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: true,
+              },
             };
           },
         }),
       });
 
       expect(exitCode).toBe(0);
-      expect(startedOptions).toEqual({
-        autoSwitch: true,
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: false,
         debug: true,
       });
-      expect(stdout.read()).toContain("Started background watch (pid 43210).");
-      expect(stdout.read()).toContain("Log: /tmp/watch.log");
+      expect(stdout.read()).toContain("Started daemon (pid 54321).");
       expect(stderr.read()).toBe("");
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("watch --detach --no-auto-switch starts a background watcher without auto-switch", async () => {
+  test("daemon start respects CODEXM_PROXY_PORT when no port flag is provided", async () => {
     const homeDir = await createTempHome();
-    let startedOptions: { autoSwitch: boolean; debug: boolean } | null = null;
+    let ensureConfigArgs: Record<string, unknown> | null = null;
 
     try {
       const store = createAccountStore(homeDir);
 
-      const exitCode = await runCli(["watch", "--detach", "--no-auto-switch"], {
-        store,
-        stdout: captureWritable().stream,
-        stderr: captureWritable().stream,
-        desktopLauncher: createDesktopLauncherStub({
-          isManagedDesktopRunning: async () => true,
-        }),
-        watchProcessManager: createWatchProcessManagerStub({
-          startDetached: async (options) => {
-            startedOptions = options;
-            return {
-              pid: 43210,
-              started_at: "2026-04-08T13:58:00.000Z",
-              log_path: "/tmp/watch.log",
-              auto_switch: false,
-              debug: false,
-            };
-          },
-        }),
+      await withEnvVar(PROXY_PORT_ENV_VAR, "16657", async () => {
+        const exitCode = await runCli(["daemon", "start"], {
+          store,
+          stdout: captureWritable().stream,
+          stderr: captureWritable().stream,
+          daemonProcessManager: createDaemonProcessManagerStub({
+            ensureConfig: async (config) => {
+              ensureConfigArgs = config;
+              return {
+                action: "started",
+                state: {
+                  pid: 54321,
+                  started_at: "2026-04-18T00:00:00.000Z",
+                  log_path: "/tmp/daemon.log",
+                  stayalive: true,
+                  watch: false,
+                  auto_switch: false,
+                  proxy: false,
+                  host: "127.0.0.1",
+                  port: 16657,
+                  base_url: "http://127.0.0.1:16657/backend-api",
+                  openai_base_url: "http://127.0.0.1:16657/v1",
+                  debug: false,
+                },
+              };
+            },
+          }),
+        });
+
+        expect(exitCode).toBe(0);
       });
 
-      expect(exitCode).toBe(0);
-      expect(startedOptions).toEqual({
-        autoSwitch: false,
-        debug: false,
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: false,
+        host: "127.0.0.1",
+        port: 16657,
+        base_url: "http://127.0.0.1:16657/backend-api",
+        openai_base_url: "http://127.0.0.1:16657/v1",
       });
     } finally {
       await cleanupTempHome(homeDir);
     }
   });
 
-  test("watch --stop stops the background watcher", async () => {
+  test("daemon restart stops the current process and preserves prior proxy and watch state", async () => {
+    const homeDir = await createTempHome();
+    const callOrder: string[] = [];
+    let ensureConfigArgs: Record<string, unknown> | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+
+      const exitCode = await runCli(["daemon", "restart"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: true,
+            state: {
+              pid: 54321,
+              started_at: "2026-04-18T00:00:00.000Z",
+              log_path: "/tmp/daemon.log",
+              stayalive: true,
+              watch: true,
+              auto_switch: true,
+              proxy: true,
+              host: "127.0.0.1",
+              port: 14555,
+              base_url: "http://127.0.0.1:14555/backend-api",
+              openai_base_url: "http://127.0.0.1:14555/v1",
+              debug: false,
+            },
+          }),
+          stop: async () => {
+            callOrder.push("stop");
+            return {
+              running: false,
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:00:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: true,
+                auto_switch: true,
+                proxy: true,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: false,
+              },
+              stopped: true,
+            };
+          },
+          ensureConfig: async (config) => {
+            callOrder.push("ensure");
+            ensureConfigArgs = config;
+            return {
+              action: "started",
+              state: {
+                pid: 65432,
+                started_at: "2026-04-18T00:05:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: true,
+                auto_switch: true,
+                proxy: true,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: false,
+              },
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(callOrder).toEqual(["stop", "ensure"]);
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: true,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+      });
+      expect(stdout.read()).toContain("Started daemon (pid 65432).");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("autoswitch status reports disabled when the daemon is not running", async () => {
     const homeDir = await createTempHome();
 
     try {
       const store = createAccountStore(homeDir);
       const stdout = captureWritable();
 
-      const exitCode = await runCli(["watch", "--stop"], {
+      const exitCode = await runCli(["autoswitch", "status"], {
         store,
         stdout: stdout.stream,
         stderr: captureWritable().stream,
-        watchProcessManager: createWatchProcessManagerStub({
-          stop: async () => ({
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
             running: false,
-            stopped: true,
-            state: {
-              pid: 43210,
-              started_at: "2026-04-08T13:58:00.000Z",
-              log_path: "/tmp/watch.log",
-              auto_switch: true,
-              debug: false,
-            },
+            state: null,
           }),
         }),
       });
 
       expect(exitCode).toBe(0);
-      expect(stdout.read()).toContain("Stopped background watch (pid 43210).");
+      expect(stdout.read()).toContain("Autoswitch: disabled");
+      expect(stdout.read()).toContain("Daemon: stopped");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("autoswitch enable starts the shared daemon with autoswitch enabled", async () => {
+    const homeDir = await createTempHome();
+    let ensureConfigArgs: Record<string, unknown> | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["autoswitch", "enable", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          ensureConfig: async (config) => {
+            ensureConfigArgs = config;
+            return {
+              action: "started",
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:00:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: true,
+                auto_switch: true,
+                proxy: false,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: true,
+              },
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: true,
+        auto_switch: true,
+        proxy: false,
+      });
+      expect(stdout.read()).toContain("Enabled autoswitch.");
+      expect(stderr.read()).toBe("");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("autoswitch disable preserves the baseline daemon without watch mode", async () => {
+    const homeDir = await createTempHome();
+    let ensureConfigArgs: Record<string, unknown> | null = null;
+
+    try {
+      const store = createAccountStore(homeDir);
+
+      const exitCode = await runCli(["autoswitch", "disable"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+        daemonProcessManager: createDaemonProcessManagerStub({
+          getStatus: async () => ({
+            running: true,
+            state: {
+              pid: 54321,
+              started_at: "2026-04-18T00:00:00.000Z",
+              log_path: "/tmp/daemon.log",
+              stayalive: true,
+              watch: true,
+              auto_switch: true,
+              proxy: false,
+              host: "127.0.0.1",
+              port: 14555,
+              base_url: "http://127.0.0.1:14555/backend-api",
+              openai_base_url: "http://127.0.0.1:14555/v1",
+              debug: true,
+            },
+          }),
+          ensureConfig: async (config) => {
+            ensureConfigArgs = config;
+            return {
+              action: "restarted",
+              state: {
+                pid: 54321,
+                started_at: "2026-04-18T00:05:00.000Z",
+                log_path: "/tmp/daemon.log",
+                stayalive: true,
+                watch: false,
+                auto_switch: false,
+                proxy: false,
+                host: "127.0.0.1",
+                port: 14555,
+                base_url: "http://127.0.0.1:14555/backend-api",
+                openai_base_url: "http://127.0.0.1:14555/v1",
+                debug: true,
+              },
+            };
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(ensureConfigArgs).toMatchObject({
+        stayalive: true,
+        watch: false,
+        auto_switch: false,
+        proxy: false,
+      });
+      expect(ensureConfigArgs).not.toBeNull();
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1840,6 +2119,11 @@ describe("CLI", () => {
       expect(JSON.parse(stdout.read())).toMatchObject({
         successes: [
           {
+            name: "proxy",
+            available: "available",
+            is_current: false,
+          },
+          {
             name: "alpha",
             available: "available",
           },
@@ -2349,6 +2633,25 @@ describe("CLI", () => {
       expect(exitCode).toBe(1);
       expect(stderr.read()).toContain("Account name must match");
       expect(stderr.read()).not.toContain("Another codexm switch or launch operation is already in progress.");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("switch rejects the synthetic proxy account name with a proxy-specific hint", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stderr = captureWritable();
+      const exitCode = await runCli(["switch", "proxy"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr.read()).toContain('Use "codexm proxy enable" or the dashboard proxy row to enable proxy mode.');
     } finally {
       await cleanupTempHome(homeDir);
     }

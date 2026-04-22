@@ -255,49 +255,17 @@ export function buildManagedCurrentAccountExpression(): string {
 })()`;
 }
 
-export function buildManagedSwitchExpression(options?: {
-  force?: boolean;
-  timeoutMs?: number;
+function buildManagedRestartSection(options: {
+  requestPrefix: string;
+  readinessTimeoutMsExpression: string;
 }): string {
-  const force = options?.force === true;
-  const timeoutMs = options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS;
-
-  return `(async () => {
-  ${buildCodexDesktopGuardExpression()}
-  const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
-  const force = ${JSON.stringify(force)};
-  const timeoutMs = ${JSON.stringify(timeoutMs)};
-  const fallbackPollIntervalMs = 2000;
-  const rpcTimeoutMs = 5000;
-
-  const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-  const toError = (value, fallback) => {
-    if (value instanceof Error) {
-      return value;
-    }
-
-    const message =
-      typeof value === "string"
-        ? value
-        : isRecord(value) && typeof value.message === "string"
-          ? value.message
-          : fallback;
-    return new Error(message);
-  };
-
+  return `
   const postMessage = async (message) => {
     if (!window.electronBridge || typeof window.electronBridge.sendMessageFromView !== "function") {
       throw new Error("Codex Desktop bridge is unavailable.");
     }
 
     await window.electronBridge.sendMessageFromView(message);
-  };
-
-  const restart = async () => {
-    await postMessage({
-      type: "codex-app-server-restart",
-      hostId,
-    });
   };
 
   const pendingResponses = new Map();
@@ -336,7 +304,7 @@ export function buildManagedSwitchExpression(options?: {
   window.addEventListener("message", onMessage);
 
   const sendRpcRequest = async (method, params = {}) => {
-    const requestId = "codexm-switch-" + String(nextRequestId++);
+    const requestId = ${JSON.stringify(options.requestPrefix)} + String(nextRequestId++);
 
     return await new Promise((resolve, reject) => {
       const timeoutHandle = window.setTimeout(() => {
@@ -366,6 +334,121 @@ export function buildManagedSwitchExpression(options?: {
     });
   };
 
+  const sleep = async (ms) => {
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  };
+
+  const waitForAccountReadiness = async () => {
+    const deadline = Date.now() + (${options.readinessTimeoutMsExpression});
+
+    while (Date.now() < deadline) {
+      try {
+        await sendRpcRequest("account/read", { refreshToken: false });
+        return true;
+      } catch {
+        await sleep(250);
+      }
+    }
+
+    return false;
+  };
+
+  const restartAppServer = async () => {
+    await postMessage({
+      type: "codex-app-server-restart",
+      hostId,
+    });
+
+    return await waitForAccountReadiness();
+  };
+`;
+}
+
+export function buildManagedAccountSurfaceRefreshExpression(): string {
+  return `(async () => {
+  ${buildCodexDesktopGuardExpression()}
+  const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
+  const rpcTimeoutMs = 5000;
+  const readinessTimeoutMs = 10000;
+
+  const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  const toError = (value, fallback) => {
+    if (value instanceof Error) {
+      return value;
+    }
+
+    const message =
+      typeof value === "string"
+        ? value
+        : isRecord(value) && typeof value.message === "string"
+          ? value.message
+          : fallback;
+    return new Error(message);
+  };
+  ${buildManagedRestartSection({
+    requestPrefix: "codexm-account-surface-",
+    readinessTimeoutMsExpression: "readinessTimeoutMs",
+  })}
+
+  try {
+    if (!await restartAppServer()) {
+      return { refreshed: false, reason: "account_read_timeout" };
+    }
+
+    return { refreshed: true };
+  } finally {
+    for (const pending of pendingResponses.values()) {
+      window.clearTimeout(pending.timeoutHandle);
+    }
+    pendingResponses.clear();
+    window.removeEventListener("message", onMessage);
+  }
+})()`;
+}
+
+export function buildManagedSwitchExpression(options?: {
+  force?: boolean;
+  timeoutMs?: number;
+}): string {
+  const force = options?.force === true;
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS;
+
+  return `(async () => {
+  ${buildCodexDesktopGuardExpression()}
+  const hostId = ${JSON.stringify(CODEX_LOCAL_HOST_ID)};
+  const force = ${JSON.stringify(force)};
+  const timeoutMs = ${JSON.stringify(timeoutMs)};
+  const fallbackPollIntervalMs = 2000;
+  const rpcTimeoutMs = 5000;
+  const restartReadinessTimeoutMs = 10000;
+
+  const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  const toError = (value, fallback) => {
+    if (value instanceof Error) {
+      return value;
+    }
+
+    const message =
+      typeof value === "string"
+        ? value
+        : isRecord(value) && typeof value.message === "string"
+          ? value.message
+          : fallback;
+    return new Error(message);
+  };
+  ${buildManagedRestartSection({
+    requestPrefix: "codexm-switch-",
+    readinessTimeoutMsExpression: "restartReadinessTimeoutMs",
+  })}
+
+  const restart = async () => {
+    if (!await restartAppServer()) {
+      throw new Error("Timed out waiting for the Codex app server to become ready.");
+    }
+  };
+
   const listLoadedThreadIds = async () => {
     const threadIds = [];
     let cursor = null;
@@ -390,6 +473,18 @@ export function buildManagedSwitchExpression(options?: {
     }
   };
 
+  const isBlockingThreadStatus = (status) => {
+    if (!isRecord(status) || status.type !== "active") {
+      return false;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(status, "activeFlags")) {
+      return true;
+    }
+
+    return Array.isArray(status.activeFlags) ? status.activeFlags.length > 0 : true;
+  };
+
   const collectActiveThreadIds = async () => {
     const loadedThreadIds = await listLoadedThreadIds();
     const activeThreadIds = [];
@@ -400,7 +495,7 @@ export function buildManagedSwitchExpression(options?: {
         const thread = isRecord(result?.thread) ? result.thread : null;
         const status = isRecord(thread?.status) ? thread.status : null;
 
-        if (status?.type === "active") {
+        if (isBlockingThreadStatus(status)) {
           activeThreadIds.push(threadId);
         }
       } catch (error) {

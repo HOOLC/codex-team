@@ -33,6 +33,17 @@ import {
   filterWatchHistoryByScope,
   type WatchHistoryEtaContext,
 } from "../watch/history.js";
+import { buildProxyQuotaAggregate } from "../proxy/quota.js";
+import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
+import {
+  formatProxyUpstreamSelectionLabel,
+  readLatestProxyUpstreamSelection,
+} from "../proxy/request-log.js";
+import { resolveProxyManualUpstreamAccountName } from "../proxy/runtime.js";
+import { readProxyState } from "../proxy/state.js";
+import type { DaemonProcessManager } from "../daemon/process.js";
+import { describeDaemonFeatureLine } from "../daemon/display.js";
+import { triggerDaemonAuthRefresh } from "../daemon/trigger.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -277,6 +288,8 @@ function buildCurrentStatusView(
   const warnings = [...localStatus.warnings];
   let runtimeDiffersFromLocal = false;
   const runtimeAccount = runtimeAccountView?.snapshot ?? null;
+  const effectiveAccountId = localStatus.account_id;
+  const isProxyCurrent = effectiveAccountId === PROXY_ACCOUNT_ID;
 
   if (runtimeAccount && runtimeAccount.auth_mode !== localStatus.auth_mode) {
     runtimeDiffersFromLocal = true;
@@ -293,6 +306,10 @@ function buildCurrentStatusView(
       localStatus.exists ||
       (runtimeAccount !== null && runtimeAccount.auth_mode !== null),
     auth_mode: runtimeAccount?.auth_mode ?? localStatus.auth_mode,
+    account_id: effectiveAccountId,
+    matched_accounts: isProxyCurrent ? [PROXY_ACCOUNT_NAME] : localStatus.matched_accounts,
+    managed: isProxyCurrent ? true : localStatus.managed,
+    duplicate_match: isProxyCurrent ? false : localStatus.duplicate_match,
     warnings,
     source:
       runtimeAccountView?.source === "desktop"
@@ -548,24 +565,33 @@ export async function handleCurrentCommand(options: {
   let quota: CliQuotaSummary | null = null;
   let usageUnavailableReason: string | null = null;
   let usageSourceLabel: string | null = null;
+  const isProxyCurrent = result.account_id === PROXY_ACCOUNT_ID;
 
-  if (!options.refresh && result.exists && result.matched_accounts.length === 1) {
+  if (!options.refresh && result.exists && (result.matched_accounts.length === 1 || isProxyCurrent)) {
     const runtimeQuota = await tryReadCurrentRuntimeQuota(options.desktopLauncher, options.debugLog);
     if (runtimeQuota) {
       quota = runtimeQuota.quota;
       usageSourceLabel = runtimeQuota.source === "desktop" ? "live Desktop runtime" : "direct runtime";
+    } else if (isProxyCurrent) {
+      const proxyAggregate = await buildProxyQuotaAggregate({
+        store: options.store,
+        includeWhenDisabled: true,
+      });
+      quota = proxyAggregate ? toCliQuotaSummary(proxyAggregate.summary) : null;
+      if (quota) {
+        usageSourceLabel = "proxy aggregate";
+      }
     }
   }
 
   if (options.refresh) {
     if (!result.exists) {
       usageUnavailableReason = "unavailable (current auth is missing)";
-    } else if (result.matched_accounts.length === 0) {
+    } else if (!isProxyCurrent && result.matched_accounts.length === 0) {
       usageUnavailableReason = "unavailable (current auth is unmanaged)";
     } else if (result.matched_accounts.length > 1) {
       usageUnavailableReason = "unavailable (current auth matches multiple managed accounts)";
     } else {
-      const currentName = result.matched_accounts[0];
       const runtimeQuota = await tryReadCurrentRuntimeQuota(options.desktopLauncher, options.debugLog);
       if (runtimeQuota) {
         quota = runtimeQuota.quota;
@@ -573,7 +599,19 @@ export async function handleCurrentCommand(options: {
           runtimeQuota.source === "desktop"
             ? "refreshed via Desktop runtime"
             : "refreshed via direct runtime";
+      } else if (isProxyCurrent) {
+        const proxyAggregate = await buildProxyQuotaAggregate({
+          store: options.store,
+          includeWhenDisabled: true,
+        });
+        quota = proxyAggregate ? toCliQuotaSummary(proxyAggregate.summary) : null;
+        if (quota) {
+          usageSourceLabel = "refreshed via proxy aggregate";
+        } else {
+          usageUnavailableReason = "unavailable (proxy aggregate quota is unavailable)";
+        }
       } else {
+        const currentName = result.matched_accounts[0];
         const quotaResult = await options.store.refreshQuotaForAccount(currentName);
         const quotaList = await options.store.listQuotaSummaries();
         const matched =
@@ -645,10 +683,12 @@ export async function handleDoctorCommand(options: {
 
 export async function handleListCommand(options: {
   store: AccountStore;
+  daemonProcessManager: DaemonProcessManager;
   stdout: NodeJS.WriteStream;
   debugLog: DebugLogger;
   debug: boolean;
   json: boolean;
+  refresh: boolean;
   targetName?: string;
   usageWindow?: string;
   verbose: boolean;
@@ -665,22 +705,55 @@ export async function handleListCommand(options: {
     quotaClientMode: "list-fast",
     allowCachedQuotaFallback: true,
   });
-  const current = await options.store.getCurrentStatus();
-  const currentAccounts = new Set(current.matched_accounts);
+  const proxyAggregate = options.targetName
+    ? null
+    : await buildProxyQuotaAggregate({
+        store: options.store,
+        includeWhenDisabled: true,
+      });
+  const proxySummary = proxyAggregate?.summary ?? null;
+  const proxyState = await readProxyState(options.store.paths.codexTeamDir);
   const now = new Date();
+  const proxyCurrentUpstreamName = proxySummary && proxyState?.enabled === true
+    ? await resolveProxyManualUpstreamAccountName(options.store)
+    : null;
+  const proxyLastUpstream = proxySummary && proxyState?.enabled === true
+    ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
+    : null;
+  const proxyLastUpstreamLine = proxyLastUpstream
+    ? `Proxy last upstream: ${formatProxyUpstreamSelectionLabel(proxyLastUpstream, now) ?? proxyLastUpstream.accountName}`
+    : null;
+  const displayResult = proxySummary
+    ? {
+        ...result,
+        successes: [proxySummary, ...result.successes],
+      }
+    : result;
+  const current = await options.store.getCurrentStatus();
+  const daemonStatus = await options.daemonProcessManager.getStatus();
+  const currentAccounts = new Set(current.matched_accounts);
+  if (current.account_id === PROXY_ACCOUNT_ID) {
+    currentAccounts.add(PROXY_ACCOUNT_NAME);
+  }
   const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
   const watchHistory = filterWatchHistoryByScope(
     await watchHistoryStore.read(now),
     { kind: "global" },
   );
   const etaByName = new Map(
-    result.successes.map((account) => [
+    displayResult.successes.map((account) => [
       account.name,
-      computeWatchHistoryEta(watchHistory, toWatchEtaTarget(account), now),
+      computeWatchHistoryEta(
+        watchHistory,
+        account.name === PROXY_ACCOUNT_NAME && proxyAggregate
+          ? proxyAggregate.watchEtaTarget
+          : toWatchEtaTarget(account),
+        now,
+      ),
     ] as const),
   );
   options.debugLog(
-    `list: target=${options.targetName ?? "all"} usage_window=${usageWindow} successes=${result.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} watch_history_samples=${watchHistory.length}`,
+    `list: target=${options.targetName ?? "all"} usage_window=${usageWindow} successes=${displayResult.successes.length} failures=${result.failures.length} warnings=${result.warnings.length} current_matches=${current.matched_accounts.length} proxy=${proxySummary ? "yes" : "no"} watch_history_samples=${watchHistory.length}`,
   );
   const usageSummary = await new LocalUsageService({
     homeDir: options.store.paths.homeDir,
@@ -714,22 +787,64 @@ export async function handleListCommand(options: {
   }
   if (options.json) {
     writeJson(options.stdout, {
-      ...toCliQuotaRefreshResult(result),
+      ...toCliQuotaRefreshResult(displayResult),
       current,
+      daemon: {
+        running: daemonStatus.running,
+        state: daemonStatus.state,
+      },
+      proxy: proxySummary ? toCliQuotaSummary(proxySummary) : null,
+      proxy_current_upstream: proxyCurrentUpstreamName
+        ? {
+            account_name: proxyCurrentUpstreamName,
+          }
+        : null,
+      proxy_last_upstream: proxyLastUpstream
+        ? {
+            account_name: proxyLastUpstream.accountName,
+            auth_mode: proxyLastUpstream.authMode,
+            at: proxyLastUpstream.ts,
+            label: formatProxyUpstreamSelectionLabel(proxyLastUpstream, now),
+          }
+        : null,
       usage: usageBlock,
-      successes: result.successes.map((account) => ({
+      successes: displayResult.successes.map((account) => ({
         ...toCliQuotaSummary(account),
         is_current: currentAccounts.has(account.name),
         eta: toJsonEta(
           etaByName.get(account.name)
-            ?? computeWatchHistoryEta([], toWatchEtaTarget(account), now),
+            ?? computeWatchHistoryEta(
+              [],
+              account.name === PROXY_ACCOUNT_NAME && proxyAggregate
+                ? proxyAggregate.watchEtaTarget
+                : toWatchEtaTarget(account),
+              now,
+            ),
         ),
       })),
     });
   } else {
     options.stdout.write(
-      `${describeQuotaRefresh(result, current, { verbose: options.verbose, etaByName, usageLine })}\n`,
+      `${describeQuotaRefresh(displayResult, current, {
+        verbose: options.verbose,
+        terminalWidth: options.stdout.isTTY ? options.stdout.columns : null,
+        etaByName,
+        usageLine,
+        daemonFeatureLine: describeDaemonFeatureLine(daemonStatus),
+        proxyLastUpstreamLine,
+        proxyLastUpstreamAccountName: proxyCurrentUpstreamName ?? proxyLastUpstream?.accountName ?? null,
+        proxyAggregate,
+        summaryAccounts: result.successes,
+      })}\n`,
     );
   }
+  void triggerDaemonAuthRefresh({
+    store: options.store,
+    daemonProcessManager: options.daemonProcessManager,
+    ensureDaemon: options.refresh,
+    source: options.refresh ? "list-refresh" : "list",
+  }).catch((error) => {
+    options.debugLog(`list: failed to queue background auth refresh: ${(error as Error).message}`);
+  });
   return result.failures.length === 0 ? 0 : 1;
 }

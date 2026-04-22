@@ -1,5 +1,7 @@
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { SpawnOptions } from "node:child_process";
 
 import { describe, expect, test } from "@rstest/core";
 
@@ -7,6 +9,8 @@ import {
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
   createCodexDesktopLauncher,
 } from "../src/desktop/launcher.js";
+import { launchManagedDesktopProcess } from "../src/desktop/process.js";
+import { buildManagedSwitchExpression } from "../src/desktop/runtime-expressions.js";
 import { cleanupTempHome, createTempHome } from "./test-helpers.js";
 
 describe("codex-desktop-launch", () => {
@@ -54,6 +58,175 @@ describe("codex-desktop-launch", () => {
       expect(calls[0]?.args).toEqual([
         `--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`,
       ]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("launches managed Desktop through open so app updates can relaunch cleanly", async () => {
+    let spawnFile = "";
+    let spawnArgs: string[] = [];
+    let spawnOptions: { detached?: boolean; stdio?: string } | null = null;
+    let unrefCalled = false;
+
+    await launchManagedDesktopProcess(
+      {
+        appPath: "/Applications/Codex.app",
+        binaryPath: "/Applications/Codex.app/Contents/MacOS/Codex",
+        args: [`--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`],
+      },
+      ((file: string, args: readonly string[] = [], options: SpawnOptions = {}) => {
+        spawnFile = file;
+        spawnArgs = [...args];
+        spawnOptions = {
+          detached: options.detached,
+          stdio: typeof options.stdio === "string" ? options.stdio : undefined,
+        };
+
+        const child = new EventEmitter() as EventEmitter & { unref(): void };
+        child.unref = () => {
+          unrefCalled = true;
+        };
+        queueMicrotask(() => {
+          child.emit("spawn");
+        });
+        return child as never;
+      }) as never,
+    );
+
+    expect(spawnFile).toBe("open");
+    expect(spawnArgs).toEqual([
+      "-na",
+      "/Applications/Codex.app",
+      "--args",
+      `--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`,
+    ]);
+    expect(spawnOptions).toEqual({
+      detached: true,
+      stdio: "ignore",
+    });
+    expect(unrefCalled).toBe(true);
+  });
+
+  test("passes CODEX_API_BASE_URL to Desktop launch when proxy routing is requested", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const calls: Array<{
+      appPath: string;
+      binaryPath: string;
+      args: string[];
+      env?: Record<string, string>;
+    }> = [];
+    const launcher = createCodexDesktopLauncher({
+      statePath,
+      launchProcessImpl: async (options) => {
+        calls.push({
+          appPath: options.appPath,
+          binaryPath: options.binaryPath,
+          args: [...options.args],
+          env: options.env,
+        });
+      },
+    });
+
+    try {
+      await launcher.launch("/Applications/Codex.app", {
+        apiBaseUrl: "http://127.0.0.1:14555/backend-api",
+      });
+      expect(calls[0]?.appPath).toBe("/Applications/Codex.app");
+      expect(calls[0]?.binaryPath).toBe("/Applications/Codex.app/Contents/MacOS/Codex");
+      expect(calls[0]?.args).toEqual([
+        `--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`,
+      ]);
+      expect(calls[0]?.env).toEqual({
+        CODEX_API_BASE_URL: "http://127.0.0.1:14555/backend-api",
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("reads the managed Desktop launch-time CODEX_API_BASE_URL from the running process env", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const launcher = createCodexDesktopLauncher({
+      statePath,
+      execFileImpl: async (file, args = []) => {
+        if (file === "ps" && args[0] === "-Ao") {
+          return {
+            stdout: "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
+            stderr: "",
+          };
+        }
+
+        if (file === "ps" && args[0] === "eww") {
+          return {
+            stdout:
+              "  PID   TT  STAT      TIME COMMAND\n"
+              + "123 ?? S 0:00.10 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223 CODEX_API_BASE_URL=http://127.0.0.1:14555/backend-api\n",
+            stderr: "",
+          };
+        }
+
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    });
+
+    try {
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: 39223,
+        managed_by_codexm: true,
+        started_at: "2026-04-22T00:00:00.000Z",
+        desktop_api_base_url: null,
+      });
+
+      await expect(launcher.readManagedLaunchApiBaseUrl()).resolves.toBe(
+        "http://127.0.0.1:14555/backend-api",
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("treats an empty managed Desktop launch-time CODEX_API_BASE_URL as the direct backend", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const launcher = createCodexDesktopLauncher({
+      statePath,
+      execFileImpl: async (file, args = []) => {
+        if (file === "ps" && args[0] === "-Ao") {
+          return {
+            stdout: "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
+            stderr: "",
+          };
+        }
+
+        if (file === "ps" && args[0] === "eww") {
+          return {
+            stdout:
+              "  PID   TT  STAT      TIME COMMAND\n"
+              + "123 ?? S 0:00.10 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223 CODEX_API_BASE_URL=\n",
+            stderr: "",
+          };
+        }
+
+        throw new Error(`unexpected command: ${file} ${args.join(" ")}`);
+      },
+    });
+
+    try {
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: 39223,
+        managed_by_codexm: true,
+        started_at: "2026-04-22T00:00:00.000Z",
+        desktop_api_base_url: "http://127.0.0.1:14555/backend-api",
+      });
+
+      await expect(launcher.readManagedLaunchApiBaseUrl()).resolves.toBeNull();
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -371,6 +544,9 @@ describe("codex-desktop-launch", () => {
       expect(sentMessages).toHaveLength(1);
       expect(sentMessages[0]).toContain('"method":"Runtime.evaluate"');
       expect(sentMessages[0]).toContain("codex-app-server-restart");
+      expect(sentMessages[0]).toContain("restartAppServer");
+      expect(sentMessages[0]).toContain("waitForAccountReadiness");
+      expect(sentMessages[0]).not.toContain("account/updated");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -796,9 +972,102 @@ describe("codex-desktop-launch", () => {
       expect(sentMessages[0]).toContain('\\"mcp-request\\"');
       expect(sentMessages[0]).toContain("fallbackPollIntervalMs");
       expect(sentMessages[0]).toContain("codex-app-server-restart");
+      expect(sentMessages[0]).toContain("restartAppServer");
+      expect(sentMessages[0]).toContain("waitForAccountReadiness");
+      expect(sentMessages[0]).not.toContain("account/updated");
     } finally {
       await cleanupTempHome(homeDir);
     }
+  });
+
+  test("refreshes the managed Desktop account surface by restarting the app server", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const sentMessages: string[] = [];
+
+    try {
+      const launcher = createCodexDesktopLauncher({
+        statePath,
+        execFileImpl: async (file) => {
+          if (file === "ps") {
+            return {
+              stdout:
+                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
+              stderr: "",
+            };
+          }
+
+          throw new Error(`unexpected command: ${file}`);
+        },
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              type: "page",
+              url: "app://-/index.html?hostId=local",
+              webSocketDebuggerUrl: "ws://127.0.0.1:39223/devtools/page/1",
+            },
+          ],
+        }),
+        createWebSocketImpl: () => {
+          const socket = {
+            onopen: null as (() => void) | null,
+            onmessage: null as ((event: { data: unknown }) => void) | null,
+            onerror: null as ((event: unknown) => void) | null,
+            onclose: null as (() => void) | null,
+            send(data: string) {
+              sentMessages.push(data);
+              socket.onmessage?.({
+                data: JSON.stringify({
+                  id: 1,
+                  result: {
+                    result: {
+                      type: "object",
+                    },
+                  },
+                }),
+              });
+            },
+            close() {
+              return;
+            },
+          };
+
+          queueMicrotask(() => {
+            socket.onopen?.();
+          });
+
+          return socket;
+        },
+      });
+
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
+        managed_by_codexm: true,
+        started_at: "2026-04-07T00:00:00.000Z",
+      });
+
+      await expect(launcher.refreshManagedAccountSurface()).resolves.toBe(true);
+      expect(sentMessages).toHaveLength(1);
+      expect(sentMessages[0]).toContain('"method":"Runtime.evaluate"');
+      expect(sentMessages[0]).toContain("codex-app-server-restart");
+      expect(sentMessages[0]).toContain("restartAppServer");
+      expect(sentMessages[0]).toContain("waitForAccountReadiness");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("managed switch ignores active threads whose active flags are empty", () => {
+    const expression = buildManagedSwitchExpression({ force: false, timeoutMs: 120_000 });
+
+    expect(expression).toContain("const isBlockingThreadStatus = (status) => {");
+    expect(expression).toContain('!Object.prototype.hasOwnProperty.call(status, "activeFlags")');
+    expect(expression).toContain("Array.isArray(status.activeFlags) ? status.activeFlags.length > 0 : true");
+    expect(expression).toContain("if (isBlockingThreadStatus(status))");
   });
 
   test("passes an extended devtools timeout for managed switches", async () => {
@@ -1180,7 +1449,7 @@ describe("codex-desktop-launch", () => {
     }
   });
 
-  test("emits quota signals from bridge-level mcp notifications with usageLimitExceeded", async () => {
+  test("emits quota signals from bridge-level mcp notifications with usage_limit_exceeded", async () => {
     const homeDir = await createTempHome();
     const statePath = join(homeDir, ".codex-team", "desktop-state.json");
     const quotaSignals: Array<{ requestId: string; reason: string; bodySnippet: string | null }> =
@@ -1239,7 +1508,7 @@ describe("codex-desktop-launch", () => {
                             {
                               type: "string",
                               value:
-                                '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}}',
+                                '__codexm_watch__{"kind":"bridge","direction":"for_view","event":{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codex_error_info":"usage_limit_exceeded"}}}}',
                             },
                           ],
                         },
@@ -1289,7 +1558,7 @@ describe("codex-desktop-launch", () => {
           requestId: "rpc:notification:error",
           reason: "rpc_notification",
           bodySnippet:
-            '{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}',
+            '{"type":"mcp-notification","hostId":"local","method":"error","params":{"message":"request failed","error":{"codex_error_info":"usage_limit_exceeded"}}}',
         },
       ]);
     } finally {

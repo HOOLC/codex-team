@@ -16,6 +16,7 @@ interface CliCommandSpec {
   flags: string[];
   helpUsages: string[];
   usageErrors: Record<string, string>;
+  completionSubcommands?: string[];
   completionTargets?: string[];
 }
 

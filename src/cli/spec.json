@@ -9,7 +9,6 @@
     { "flag": "--accounts", "description": "print saved account names for shell completion", "global": false },
     { "flag": "--account", "description": "run codex with a saved account snapshot in an isolated runtime", "global": false, "takesValue": true },
     { "flag": "--auto", "description": "switch to the best available account", "global": false, "aliases": ["-a"] },
-    { "flag": "--detach", "description": "run watch in the background", "global": false },
     { "flag": "--device-auth", "description": "add account with device-code login", "global": false },
     { "flag": "--dry-run", "description": "show the selected account without switching", "global": false, "aliases": ["-n"] },
     { "flag": "--force", "description": "skip confirmation and force the action", "global": false, "aliases": ["-f"] },
@@ -19,12 +18,12 @@
     { "flag": "--no-auto-switch", "description": "watch without switching accounts automatically", "global": false },
     { "flag": "--owner-pid", "description": "set the owning process id for a created overlay", "global": false, "takesValue": true },
     { "flag": "--output", "description": "write output to the given file", "global": false, "takesValue": true },
+    { "flag": "--host", "description": "set the local proxy host", "global": false, "takesValue": true },
+    { "flag": "--port", "description": "set the local proxy port", "global": false, "takesValue": true },
+    { "flag": "--proxy", "description": "run codex with an isolated synthetic proxy auth", "global": false },
     { "flag": "--refresh", "description": "refresh quota data before printing", "global": false },
-    { "flag": "--status", "description": "show background watch status", "global": false },
-    { "flag": "--stop", "description": "stop the background watch", "global": false },
     { "flag": "--usage-window", "description": "select the embedded usage summary window", "global": false, "takesValue": true },
     { "flag": "--verbose", "description": "show expanded score inputs and diagnostics", "global": false, "aliases": ["-v"] },
-    { "flag": "--watch", "description": "start a detached watch after launch", "global": false },
     { "flag": "--window", "description": "select the usage summary window", "global": false, "takesValue": true },
     { "flag": "--with-api-key", "description": "add account by reading an API key from stdin", "global": false },
     { "flag": "--yes", "description": "skip removal confirmation", "global": false, "aliases": ["-y"] }
@@ -35,7 +34,10 @@
     "codexm current shows live usage when a managed Codex Desktop session is available.",
     "codexm current --refresh prefers managed Desktop MCP quota, then falls back to the usage API.",
     "codexm doctor checks local auth, direct app-server probes, and managed Desktop consistency.",
-    "codexm list refreshes quota data, shows the current managed account, and marks current rows with \"*\"; use --verbose to expand score inputs.",
+    "codexm list refreshes quota data, shows the current managed account, marks current rows with \"*\", and marks the configured proxy upstream row with \"@\" while proxy mode is enabled; if refresh fails it can reuse the account-scoped last good quota snapshot for up to 7 days and tag the row as stale; use --refresh to ensure a background auth refresh and --verbose to expand score inputs.",
+    "codexm launch starts Codex Desktop on macOS and ensures the shared background daemon is running.",
+    "codexm autoswitch enable turns on daemon-backed auto-switching; disable leaves the baseline daemon running.",
+    "codexm proxy enable installs a synthetic ChatGPT auth pointed at the local proxy while preserving the live provider identity; while proxy stays enabled, codexm switch updates the proxy's current upstream, later autoswitch events can move it after quota exhaustion signals, and proxy websocket turns plus buffered REST requests can replay once on quota exhaustion before user-visible or side-effectful output starts.",
     "codexm export writes a share bundle for the current auth or a managed account; codexm import saves a shared bundle without switching current auth.",
     "codexm tui opens an interactive account dashboard for filtering, switching, reloading the current account, sharing bundles, deleting accounts, undoing the latest import/export/delete, and opening codex or Desktop from the selected account.",
     "Run codexm launch from an external terminal if you need to restart Codex Desktop.",
@@ -61,10 +63,10 @@
     {
       "name": "list",
       "aliases": ["ls"],
-      "flags": ["--json", "--usage-window", "--verbose"],
-      "helpUsages": ["codexm list [name] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"],
+      "flags": ["--json", "--refresh", "--usage-window", "--verbose"],
+      "helpUsages": ["codexm list [name] [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"],
       "usageErrors": {
-        "default": "codexm list [name] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"
+        "default": "codexm list [name] [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]"
       }
     },
     {
@@ -105,18 +107,62 @@
     },
     {
       "name": "launch",
-      "flags": ["--auto", "--watch", "--no-auto-switch", "--json"],
-      "helpUsages": ["codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]"],
+      "flags": ["--auto", "--json"],
+      "helpUsages": ["codexm launch [name] [--auto] [--json]"],
       "usageErrors": {
-        "default": "codexm launch [name] [--auto] [--watch] [--no-auto-switch] [--json]"
+        "default": "codexm launch [name] [--auto] [--json]"
       }
     },
     {
       "name": "watch",
-      "flags": ["--no-auto-switch", "--detach", "--status", "--stop"],
-      "helpUsages": ["codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"],
+      "flags": ["--no-auto-switch"],
+      "helpUsages": ["codexm watch [--no-auto-switch]"],
       "usageErrors": {
-        "default": "codexm watch [--no-auto-switch] [--detach] [--status] [--stop]"
+        "default": "codexm watch [--no-auto-switch]"
+      }
+    },
+    {
+      "name": "daemon",
+      "flags": ["--json", "--host", "--port"],
+      "completionSubcommands": ["start", "restart", "status", "stop"],
+      "helpUsages": [
+        "codexm daemon <start|restart|status|stop> [--json]",
+        "codexm daemon start [--json]",
+        "codexm daemon restart [--json]",
+        "codexm daemon status [--json]",
+        "codexm daemon stop [--json]"
+      ],
+      "usageErrors": {
+        "default": "codexm daemon <start|restart|status|stop> [--json]"
+      }
+    },
+    {
+      "name": "autoswitch",
+      "flags": ["--json"],
+      "completionSubcommands": ["enable", "disable", "status"],
+      "helpUsages": [
+        "codexm autoswitch <enable|disable|status> [--json]",
+        "codexm autoswitch enable [--json]",
+        "codexm autoswitch disable [--json]",
+        "codexm autoswitch status [--json]"
+      ],
+      "usageErrors": {
+        "default": "codexm autoswitch <enable|disable|status> [--json]"
+      }
+    },
+    {
+      "name": "proxy",
+      "flags": ["--dry-run", "--force", "--json", "--host", "--port"],
+      "completionSubcommands": ["enable", "disable", "status", "stop"],
+      "helpUsages": [
+        "codexm proxy <enable|disable|status|stop> [--json]",
+        "codexm proxy enable [--host <host>] [--port <port>] [--dry-run] [--force] [--json]",
+        "codexm proxy status [--json]",
+        "codexm proxy stop [--json]",
+        "codexm proxy disable [--force] [--json]"
+      ],
+      "usageErrors": {
+        "default": "codexm proxy <enable|disable|status|stop> [--json]"
       }
     },
     {
@@ -138,6 +184,7 @@
     {
       "name": "overlay",
       "flags": ["--json", "--owner-pid"],
+      "completionSubcommands": ["create", "delete", "gc"],
       "helpUsages": [
         "codexm overlay <create|delete|gc> ...",
         "codexm overlay create <name> [--owner-pid <pid>] [--json]",
@@ -192,10 +239,10 @@
     },
     {
       "name": "run",
-      "flags": ["--account"],
-      "helpUsages": ["codexm run [--account <name>] [-- ...codexArgs]"],
+      "flags": ["--account", "--proxy"],
+      "helpUsages": ["codexm run [--account <name>|--proxy] [-- ...codexArgs]"],
       "usageErrors": {
-        "default": "codexm run [--account <name>] [-- ...codexArgs]"
+        "default": "codexm run [--account <name>|--proxy] [-- ...codexArgs]"
       }
     },
     {
@@ -217,6 +264,7 @@
     {
       "name": "completion",
       "flags": ["--accounts"],
+      "completionSubcommands": ["zsh", "bash"],
       "helpUsages": ["codexm completion <zsh|bash>"],
       "usageErrors": {
         "default": "codexm completion <zsh|bash>",
@@ -335,7 +383,7 @@
             }
           },
           {
-            "usage": "codexm list [--usage-window <today|7d|30d|all-time>] [--verbose]",
+            "usage": "codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]",
             "description": {
               "en": "show saved accounts plus an embedded local usage summary",
               "zh-CN": "查看所有保存账号，并附带一行本地 usage 摘要"
@@ -344,8 +392,8 @@
           {
             "usage": "codexm list --json",
             "description": {
-              "en": "machine-readable output",
-              "zh-CN": "输出机器可读 JSON"
+              "en": "machine-readable output, including proxy current-upstream metadata and last-upstream metadata when available",
+              "zh-CN": "输出机器可读 JSON；包含 proxy 当前上游信息，以及有数据时最近一次上游命中信息"
             }
           },
           {
@@ -356,10 +404,31 @@
             }
           },
           {
+            "usage": "codexm proxy status",
+            "description": {
+              "en": "inspect the local proxy daemon and synthetic auth mode",
+              "zh-CN": "查看本地 proxy daemon 和 synthetic auth 状态"
+            }
+          },
+          {
+            "usage": "codexm daemon status",
+            "description": {
+              "en": "inspect the shared background daemon, enabled features, and log path",
+              "zh-CN": "查看共享后台 daemon、已启用能力和日志路径"
+            }
+          },
+          {
+            "usage": "codexm autoswitch status",
+            "description": {
+              "en": "inspect whether daemon-backed auto-switching is enabled",
+              "zh-CN": "查看 daemon 驱动的自动切号是否已启用"
+            }
+          },
+          {
             "usage": "codexm tui [query]",
             "description": {
-              "en": "explicitly open the account dashboard, optionally with an initial filter",
-              "zh-CN": "显式打开账号面板，可选带初始筛选词"
+              "en": "explicitly open the account dashboard, optionally with an initial filter; Enter on the proxy row toggles proxy on or off",
+              "zh-CN": "显式打开账号面板，可选带初始筛选词；在 proxy 行上按 Enter 会切换 proxy 开关"
             }
           },
           {
@@ -381,8 +450,8 @@
           {
             "usage": "codexm switch <name>",
             "description": {
-              "en": "switch to a saved account",
-              "zh-CN": "切换到指定保存账号"
+              "en": "switch to a saved direct account; with proxy enabled, this immediately becomes the proxy's current upstream until a later autoswitch event changes it",
+              "zh-CN": "切换到指定保存的 direct 账号；若 proxy 已启用，这会立刻成为 proxy 的当前上游，直到后续 autoswitch 事件再把它切走"
             }
           },
           {
@@ -393,10 +462,10 @@
             }
           },
           {
-            "usage": "codexm launch [name] [--auto] [--watch]",
+            "usage": "codexm launch [name] [--auto]",
             "description": {
-              "en": "launch Codex Desktop on macOS",
-              "zh-CN": "在 macOS 上启动 Codex Desktop"
+              "en": "launch Codex Desktop on macOS and ensure the shared daemon is running",
+              "zh-CN": "在 macOS 上启动 Codex Desktop，并确保共享 daemon 已启动"
             }
           }
         ]
@@ -416,24 +485,31 @@
             }
           },
           {
-            "usage": "codexm watch --detach",
+            "usage": "codexm autoswitch enable",
             "description": {
-              "en": "run the watcher in the background",
-              "zh-CN": "后台运行 watcher"
+              "en": "enable daemon-backed auto-switching, including proxy replay before user-visible output starts on quota exhaustion",
+              "zh-CN": "启用 daemon 驱动的自动切号；proxy 在用户可见输出开始前遇到耗尽时也会内部重放一次"
             }
           },
           {
-            "usage": "codexm watch --status",
+            "usage": "codexm autoswitch disable",
             "description": {
-              "en": "inspect detached watcher state",
-              "zh-CN": "查看后台 watcher 状态"
+              "en": "disable auto-switching while keeping the baseline daemon alive",
+              "zh-CN": "关闭自动切号，并保留基础 daemon 常驻"
             }
           },
           {
-            "usage": "codexm watch --stop",
+            "usage": "codexm daemon start",
             "description": {
-              "en": "stop the detached watcher",
-              "zh-CN": "停止后台 watcher"
+              "en": "start the shared background daemon without enabling extra features",
+              "zh-CN": "启动共享后台 daemon，但不额外启用附加能力"
+            }
+          },
+          {
+            "usage": "codexm daemon stop",
+            "description": {
+              "en": "stop the shared background daemon while preserving the last daemon feature state",
+              "zh-CN": "停止共享后台 daemon，并保留最近一次 daemon 功能开关状态"
             }
           },
           {
@@ -441,6 +517,27 @@
             "description": {
               "en": "run codex with global auth follow-restart or an isolated managed account snapshot",
               "zh-CN": "以全局 auth 跟随重启模式运行 codex，或用托管账号快照做一次性隔离运行"
+            }
+          },
+          {
+            "usage": "codexm run --proxy [-- ...codexArgs]",
+            "description": {
+              "en": "run codex in an isolated CODEX_HOME through the local proxy",
+              "zh-CN": "用隔离 CODEX_HOME 通过本地 proxy 运行 codex"
+            }
+          },
+          {
+            "usage": "codexm proxy enable",
+            "description": {
+              "en": "enable global synthetic ChatGPT auth backed by the local proxy, with one replay before user-visible output starts on proxy quota exhaustion",
+              "zh-CN": "启用由本地 proxy 提供的全局 synthetic ChatGPT auth；在 proxy 耗尽且用户可见输出尚未开始时会自动重放一次"
+            }
+          },
+          {
+            "usage": "codexm proxy disable",
+            "description": {
+              "en": "restore the previous direct auth/config backup while leaving the shared proxy daemon state untouched",
+              "zh-CN": "恢复上一次 direct auth/config 备份，同时不改动共享 proxy daemon 的监听状态"
             }
           },
           {
@@ -467,8 +564,8 @@
         "codexm completion bash > ~/.local/share/bash-completion/completions/codexm"
       ],
       "outro": {
-        "en": "The generated scripts dynamically complete saved account names by calling `codexm completion --accounts`.",
-        "zh-CN": "生成的脚本会通过 `codexm completion --accounts` 动态补全已保存账号名。"
+        "en": "The generated scripts complete commands, known subcommands, flags when the current word starts with `-`, and saved account names by calling `codexm completion --accounts`.",
+        "zh-CN": "生成的脚本会补全命令、已知二级命令、当前输入以 `-` 开头时的 flag，并通过 `codexm completion --accounts` 动态补全已保存账号名。"
       }
     }
   }

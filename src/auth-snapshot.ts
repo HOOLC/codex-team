@@ -19,6 +19,7 @@ export type QuotaStatus = "ok" | "stale" | "error" | "unsupported";
 export interface QuotaWindowSnapshot {
   used_percent: number;
   window_seconds: number;
+  display_precision?: number;
   reset_after_seconds?: number;
   reset_at?: string;
 }
@@ -43,7 +44,12 @@ export interface SnapshotMeta {
   created_at: string;
   updated_at: string;
   last_switched_at: string | null;
+  last_auth_refresh_at?: string | null;
+  last_auth_refresh_status?: "ok" | "error" | "skipped" | null;
+  last_auth_refresh_error?: string | null;
+  auth_refresh_fail_count?: number;
   quota: QuotaSnapshot;
+  last_good_quota?: QuotaSnapshot | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -178,6 +184,17 @@ export function getSnapshotEmail(snapshot: AuthSnapshot): string | undefined {
   return undefined;
 }
 
+export function getSnapshotTokenExpiresAt(snapshot: AuthSnapshot): string | null {
+  const payloads = extractSnapshotJwtPayloads(snapshot);
+  const expiryMs = payloads
+    .map((payload) => payload.exp)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
+    .map((value) => value * 1_000)
+    .sort((left, right) => left - right)[0] ?? null;
+
+  return expiryMs === null ? null : new Date(expiryMs).toISOString();
+}
+
 function fingerprintApiKey(apiKey: string): string {
   return createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
 }
@@ -254,6 +271,27 @@ function parseQuotaSnapshot(raw: unknown): QuotaSnapshot {
   };
 }
 
+function quotaHasWindowSnapshot(quota: QuotaSnapshot): boolean {
+  return typeof quota.five_hour?.used_percent === "number"
+    || typeof quota.one_week?.used_percent === "number";
+}
+
+function normalizeLastGoodQuota(quota: QuotaSnapshot): QuotaSnapshot | null {
+  if (!quotaHasWindowSnapshot(quota)) {
+    return null;
+  }
+
+  return {
+    status: "ok",
+    plan_type: quota.plan_type,
+    credits_balance: quota.credits_balance,
+    fetched_at: quota.fetched_at,
+    unlimited: quota.unlimited,
+    five_hour: quota.five_hour,
+    one_week: quota.one_week,
+  };
+}
+
 function parseQuotaWindowSnapshot(
   raw: unknown,
   fieldName: string,
@@ -269,6 +307,7 @@ function parseQuotaWindowSnapshot(
   return {
     used_percent: asNonEmptyNumber(raw.used_percent, `${fieldName}.used_percent`),
     window_seconds: asNonEmptyNumber(raw.window_seconds, `${fieldName}.window_seconds`),
+    display_precision: asOptionalNumber(raw.display_precision, `${fieldName}.display_precision`),
     reset_after_seconds: asOptionalNumber(raw.reset_after_seconds, `${fieldName}.reset_after_seconds`),
     reset_at: asOptionalString(raw.reset_at, `${fieldName}.reset_at`),
   };
@@ -365,7 +404,12 @@ export function createSnapshotMeta(
     created_at: existingCreatedAt ?? timestamp,
     updated_at: timestamp,
     last_switched_at: null,
+    last_auth_refresh_at: null,
+    last_auth_refresh_status: null,
+    last_auth_refresh_error: null,
+    auth_refresh_fail_count: 0,
     quota: defaultQuotaSnapshot(),
+    last_good_quota: null,
   };
 }
 
@@ -388,6 +432,30 @@ export function parseSnapshotMeta(raw: string): SnapshotMeta {
   if (lastSwitchedAt !== null && typeof lastSwitchedAt !== "string") {
     throw new Error('Field "last_switched_at" must be a string or null.');
   }
+  const lastAuthRefreshAt = parsed.last_auth_refresh_at;
+  if (lastAuthRefreshAt !== undefined && lastAuthRefreshAt !== null && typeof lastAuthRefreshAt !== "string") {
+    throw new Error('Field "last_auth_refresh_at" must be a string, null, or undefined.');
+  }
+  const lastAuthRefreshStatus = parsed.last_auth_refresh_status;
+  if (
+    lastAuthRefreshStatus !== undefined
+    && lastAuthRefreshStatus !== null
+    && lastAuthRefreshStatus !== "ok"
+    && lastAuthRefreshStatus !== "error"
+    && lastAuthRefreshStatus !== "skipped"
+  ) {
+    throw new Error('Field "last_auth_refresh_status" must be "ok", "error", "skipped", null, or undefined.');
+  }
+  const lastAuthRefreshError = parsed.last_auth_refresh_error;
+  if (lastAuthRefreshError !== undefined && lastAuthRefreshError !== null && typeof lastAuthRefreshError !== "string") {
+    throw new Error('Field "last_auth_refresh_error" must be a string, null, or undefined.');
+  }
+  const parsedQuota = parseQuotaSnapshot(parsed.quota);
+  const lastGoodQuota = parsed.last_good_quota === undefined
+    ? normalizeLastGoodQuota(parsedQuota)
+    : parsed.last_good_quota === null
+      ? null
+      : parseQuotaSnapshot(parsed.last_good_quota);
 
   return {
     name: asNonEmptyString(parsed.name, "name"),
@@ -401,7 +469,12 @@ export function parseSnapshotMeta(raw: string): SnapshotMeta {
     created_at: asNonEmptyString(parsed.created_at, "created_at"),
     updated_at: asNonEmptyString(parsed.updated_at, "updated_at"),
     last_switched_at: lastSwitchedAt,
-    quota: parseQuotaSnapshot(parsed.quota),
+    last_auth_refresh_at: lastAuthRefreshAt === undefined ? null : lastAuthRefreshAt,
+    last_auth_refresh_status: lastAuthRefreshStatus === undefined ? null : lastAuthRefreshStatus,
+    last_auth_refresh_error: lastAuthRefreshError === undefined ? null : lastAuthRefreshError,
+    auth_refresh_fail_count: asOptionalNumber(parsed.auth_refresh_fail_count, "auth_refresh_fail_count") ?? 0,
+    quota: parsedQuota,
+    last_good_quota: lastGoodQuota,
   };
 }
 

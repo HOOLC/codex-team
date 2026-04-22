@@ -1,4 +1,6 @@
 import type { AccountQuotaSummary } from "../account-store/index.js";
+import { resolvePlanQuotaTier, type PlanQuotaTier } from "../plan-quota-profile.js";
+import { PROXY_ACCOUNT_ID } from "../proxy/constants.js";
 import { computeAvailability } from "./quota-core.js";
 import { toAutoSwitchCandidate } from "./quota-ranking.js";
 
@@ -20,10 +22,30 @@ function formatPoolValue(value: number | null): string {
   return String(roundToTwo(value / 100));
 }
 
+const PLAN_SUMMARY_ORDER: Record<PlanQuotaTier, number> = {
+  pro: 0,
+  prolite: 1,
+  plus: 2,
+  team: 3,
+  free: 4,
+  unknown: 5,
+};
+
+function comparePlanSummaryEntries(left: [string, number], right: [string, number]): number {
+  const leftRank = PLAN_SUMMARY_ORDER[resolvePlanQuotaTier(left[0])];
+  const rightRank = PLAN_SUMMARY_ORDER[resolvePlanQuotaTier(right[0])];
+  if (leftRank !== rightRank) {
+    return leftRank - rightRank;
+  }
+
+  return left[0].localeCompare(right[0]);
+}
+
 export function buildListSummary(accounts: AccountQuotaSummary[]): {
   summaryLine: string;
   poolLine: string;
 } {
+  const realAccounts = accounts.filter((account) => account.account_id !== PROXY_ACCOUNT_ID);
   const planCounts = new Map<string, number>();
   let usableCount = 0;
   let oneWeekBlockedCount = 0;
@@ -33,7 +55,7 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
   let hasPoolFiveHour = false;
   let hasPoolOneWeek = false;
 
-  for (const account of accounts) {
+  for (const account of realAccounts) {
     const plan = account.plan_type ?? "unknown";
     planCounts.set(plan, (planCounts.get(plan) ?? 0) + 1);
 
@@ -66,13 +88,13 @@ export function buildListSummary(accounts: AccountQuotaSummary[]): {
   }
 
   const plansSegment = [...planCounts.entries()]
-    .sort((left, right) => left[0].localeCompare(right[0]))
+    .sort(comparePlanSummaryEntries)
     .map(([plan, count]) => `${plan} x${count}`)
     .join(", ");
 
   const blockedSegment = `blocked: 1W ${oneWeekBlockedCount}, 5H ${fiveHourBlockedCount}`;
 
-  const summaryLine = `Accounts: ${usableCount}/${accounts.length} usable | ${blockedSegment}${
+  const summaryLine = `Accounts: ${usableCount}/${realAccounts.length} usable | ${blockedSegment}${
     plansSegment ? ` | ${plansSegment}` : ""
   }`;
 

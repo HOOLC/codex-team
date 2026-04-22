@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import {
   copyFile,
+  readFile,
   rename,
   rm,
   stat,
@@ -11,6 +12,7 @@ import {
   QuotaSnapshot,
   getSnapshotAccountId,
   getSnapshotIdentity,
+  getSnapshotTokenExpiresAt,
   getSnapshotUserId,
   parseAuthSnapshot,
   parseSnapshotMeta,
@@ -46,8 +48,13 @@ import type {
 import {
   extractChatGPTAuth,
   fetchQuotaSnapshot,
+  refreshChatGPTAuthTokens,
   type QuotaClientMode,
 } from "../quota-client.js";
+import { appendEventLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
+import { stripProxyRuntimeConfig } from "../proxy/config.js";
+import { resolveProxyDataDir } from "../proxy/state.js";
+import { isSyntheticProxyAuthSnapshot } from "../proxy/synthetic-auth.js";
 export type {
   AccountQuotaSummary,
   CurrentAccountStatus,
@@ -60,7 +67,7 @@ export type {
   UpdateAccountResult,
 } from "./types.js";
 
-const LIST_CACHED_QUOTA_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const LIST_CACHED_QUOTA_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 
 interface RefreshQuotaOptions {
   quotaClientMode?: QuotaClientMode;
@@ -70,6 +77,34 @@ interface RefreshQuotaOptions {
 
 function isFiniteTimestamp(value: string | undefined): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function hasQuotaWindowSnapshot(
+  window: QuotaSnapshot["five_hour"] | QuotaSnapshot["one_week"],
+): boolean {
+  return typeof window?.used_percent === "number" && typeof window.window_seconds === "number";
+}
+
+function quotaHasWindowSnapshot(quota: QuotaSnapshot | null | undefined): quota is QuotaSnapshot {
+  return quota !== null
+    && quota !== undefined
+    && (hasQuotaWindowSnapshot(quota.five_hour) || hasQuotaWindowSnapshot(quota.one_week));
+}
+
+function toLastGoodQuotaSnapshot(quota: QuotaSnapshot): QuotaSnapshot | null {
+  if (!quotaHasWindowSnapshot(quota)) {
+    return null;
+  }
+
+  return {
+    status: "ok",
+    plan_type: quota.plan_type,
+    credits_balance: quota.credits_balance,
+    fetched_at: quota.fetched_at,
+    unlimited: quota.unlimited,
+    five_hour: quota.five_hour,
+    one_week: quota.one_week,
+  };
 }
 
 export class AccountStore {
@@ -126,13 +161,16 @@ export class AccountStore {
     now: Date,
     maxAgeMs: number,
   ): { quota: QuotaSnapshot; warning: string } | null {
-    const cachedQuota = account.quota;
+    const cachedQuota = account.last_good_quota ?? account.quota;
     const cachedFetchedAt = cachedQuota.fetched_at;
-    if (cachedQuota.status === "error" || !isFiniteTimestamp(cachedFetchedAt)) {
+    if (
+      !isFiniteTimestamp(cachedFetchedAt) ||
+      !quotaHasWindowSnapshot(cachedQuota)
+    ) {
       return null;
     }
     const cachedFetchedAtMs = Date.parse(cachedFetchedAt);
-    if (now.getTime() - cachedFetchedAtMs > maxAgeMs) {
+    if (Number.isFinite(maxAgeMs) && now.getTime() - cachedFetchedAtMs > maxAgeMs) {
       return null;
     }
 
@@ -249,6 +287,7 @@ export class AccountStore {
     );
     meta.last_switched_at = existingMeta?.last_switched_at ?? null;
     meta.quota = existingMeta?.quota ?? meta.quota;
+    meta.last_good_quota = existingMeta?.last_good_quota ?? meta.last_good_quota;
     await atomicWriteFile(
       metaPath,
       stringifyJson(meta),
@@ -316,6 +355,7 @@ export class AccountStore {
     );
     meta.last_switched_at = existingMeta?.last_switched_at ?? null;
     meta.quota = existingMeta?.quota ?? meta.quota;
+    meta.last_good_quota = existingMeta?.last_good_quota ?? meta.last_good_quota;
     await atomicWriteFile(metaPath, stringifyJson(meta));
 
     return await this.repository.readManagedAccount(name);
@@ -390,10 +430,18 @@ export class AccountStore {
     const account = await this.repository.readManagedAccount(name);
     const warnings: string[] = [];
     let backupPath: string | null = null;
+    let syntheticProxyWasActive = false;
 
     await ensureDirectory(this.paths.codexDir, DIRECTORY_MODE);
 
     if (await pathExists(this.paths.currentAuthPath)) {
+      try {
+        syntheticProxyWasActive = isSyntheticProxyAuthSnapshot(
+          await readAuthSnapshotFile(this.paths.currentAuthPath),
+        );
+      } catch {
+        syntheticProxyWasActive = false;
+      }
       backupPath = join(this.paths.backupsDir, "last-active-auth.json");
       await copyFile(this.paths.currentAuthPath, backupPath);
       await chmodIfPossible(backupPath, FILE_MODE);
@@ -419,9 +467,23 @@ export class AccountStore {
       );
     } else if (await pathExists(this.paths.currentConfigPath)) {
       const currentRawConfig = await readJsonFile(this.paths.currentConfigPath);
+      let configSource = currentRawConfig;
+      if (syntheticProxyWasActive) {
+        const directConfigBackupPath = join(
+          resolveProxyDataDir(this.paths.codexTeamDir),
+          "last-direct-config.toml",
+        );
+        if (await pathExists(directConfigBackupPath)) {
+          configSource = await readFile(directConfigBackupPath, "utf8");
+        }
+      }
+      const sanitizedConfig =
+        syntheticProxyWasActive && configSource === currentRawConfig
+          ? stripProxyRuntimeConfig(sanitizeConfigForAccountAuth(configSource)).join("\n")
+          : sanitizeConfigForAccountAuth(configSource);
       await atomicWriteFile(
         this.paths.currentConfigPath,
-        sanitizeConfigForAccountAuth(currentRawConfig),
+        sanitizedConfig === "" ? "\n" : `${sanitizedConfig.replace(/\n+$/u, "")}\n`,
       );
     }
     const writtenSnapshot = await readAuthSnapshotFile(this.paths.currentAuthPath);
@@ -477,7 +539,6 @@ export class AccountStore {
 
     try {
       const result = await fetchQuotaSnapshot(snapshot, {
-        homeDir: this.paths.homeDir,
         fetchImpl: this.fetchImpl,
         now,
         mode: options.quotaClientMode,
@@ -493,6 +554,10 @@ export class AccountStore {
       meta.user_id = getSnapshotUserId(result.authSnapshot);
       meta.updated_at = now.toISOString();
       meta.quota = result.quota;
+      const nextLastGoodQuota = toLastGoodQuotaSnapshot(result.quota);
+      if (nextLastGoodQuota) {
+        meta.last_good_quota = nextLastGoodQuota;
+      }
       await this.repository.writeAccountMeta(name, meta);
 
       return {
@@ -510,8 +575,24 @@ export class AccountStore {
           options.cachedQuotaMaxAgeMs ?? LIST_CACHED_QUOTA_MAX_AGE_MS,
         );
         if (fallback) {
+          const fallbackSource = account.last_good_quota ?? toLastGoodQuotaSnapshot(account.quota);
+          meta.updated_at = now.toISOString();
+          meta.quota = fallback.quota;
+          meta.last_good_quota = fallbackSource;
+          await this.repository.writeAccountMeta(name, meta);
+          await appendEventLog(this.paths.codexTeamDir, buildEventPayload({
+            component: "quota",
+            event: "quota.refresh.used_stale_snapshot",
+            trigger: "cli",
+            level: "warn",
+            fields: {
+              account_name: account.name,
+              cached_fetched_at: fallbackSource?.fetched_at ?? fallback.quota.fetched_at ?? null,
+              error: shortenErrorMessage(refreshError.message),
+            },
+          }));
           return {
-            account,
+            account: await this.repository.readManagedAccount(name),
             quota: fallback.quota,
             warning: fallback.warning,
           };
@@ -534,8 +615,75 @@ export class AccountStore {
         fetched_at: now.toISOString(),
         error_message: refreshError.message,
       };
+      meta.last_good_quota = account.last_good_quota ?? toLastGoodQuotaSnapshot(account.quota);
       await this.repository.writeAccountMeta(name, meta);
       throw new Error(`Failed to refresh quota for "${name}": ${refreshError.message}`);
+    }
+  }
+
+  async refreshAuthForAccount(
+    name: string,
+    options: {
+      now?: Date;
+    } = {},
+  ): Promise<{
+    account: ManagedAccount;
+    authSnapshot: AuthSnapshot;
+    expires_at: string | null;
+  }> {
+    ensureAccountName(name);
+    await this.repository.ensureLayout();
+
+    const account = await this.repository.readManagedAccount(name);
+    const meta = parseSnapshotMeta(await readJsonFile(account.metaPath));
+    const snapshot = await readAuthSnapshotFile(account.authPath);
+    const now = options.now ?? new Date();
+
+    if (snapshot.auth_mode !== "chatgpt") {
+      meta.last_auth_refresh_at = now.toISOString();
+      meta.last_auth_refresh_status = "skipped";
+      meta.last_auth_refresh_error = "auth refresh is only supported for chatgpt auth.";
+      meta.auth_refresh_fail_count = 0;
+      meta.updated_at = now.toISOString();
+      await this.repository.writeAccountMeta(name, meta);
+      return {
+        account: await this.repository.readManagedAccount(name),
+        authSnapshot: snapshot,
+        expires_at: getSnapshotTokenExpiresAt(snapshot),
+      };
+    }
+
+    try {
+      const refreshedSnapshot = await refreshChatGPTAuthTokens(snapshot, {
+        fetchImpl: this.fetchImpl,
+        now,
+      });
+      await this.repository.writeAccountAuthSnapshot(name, refreshedSnapshot);
+      await this.repository.syncCurrentAuthIfMatching(refreshedSnapshot);
+
+      meta.auth_mode = refreshedSnapshot.auth_mode;
+      meta.account_id = getSnapshotAccountId(refreshedSnapshot);
+      meta.user_id = getSnapshotUserId(refreshedSnapshot);
+      meta.updated_at = now.toISOString();
+      meta.last_auth_refresh_at = now.toISOString();
+      meta.last_auth_refresh_status = "ok";
+      meta.last_auth_refresh_error = null;
+      meta.auth_refresh_fail_count = 0;
+      await this.repository.writeAccountMeta(name, meta);
+
+      return {
+        account: await this.repository.readManagedAccount(name),
+        authSnapshot: refreshedSnapshot,
+        expires_at: getSnapshotTokenExpiresAt(refreshedSnapshot),
+      };
+    } catch (error) {
+      meta.updated_at = now.toISOString();
+      meta.last_auth_refresh_at = now.toISOString();
+      meta.last_auth_refresh_status = "error";
+      meta.last_auth_refresh_error = (error as Error).message;
+      meta.auth_refresh_fail_count = (meta.auth_refresh_fail_count ?? 0) + 1;
+      await this.repository.writeAccountMeta(name, meta);
+      throw error;
     }
   }
 

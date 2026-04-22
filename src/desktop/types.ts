@@ -16,6 +16,7 @@ export interface ManagedCodexDesktopState {
   remote_debugging_port: number;
   managed_by_codexm: true;
   started_at: string;
+  desktop_api_base_url?: string | null;
 }
 
 export interface ManagedQuotaSignal {
@@ -80,12 +81,15 @@ export interface CodexDesktopLauncher {
   listRunningApps(): Promise<RunningCodexDesktop[]>;
   isRunningInsideDesktopShell(): Promise<boolean>;
   quitRunningApps(options?: { force?: boolean }): Promise<void>;
-  launch(appPath: string): Promise<void>;
+  launch(appPath: string, options?: {
+    apiBaseUrl?: string | null;
+  }): Promise<void>;
   activateApp(appPath: string): Promise<void>;
   readManagedState(): Promise<ManagedCodexDesktopState | null>;
   writeManagedState(state: ManagedCodexDesktopState): Promise<void>;
   clearManagedState(): Promise<void>;
   isManagedDesktopRunning(): Promise<boolean>;
+  readManagedLaunchApiBaseUrl(): Promise<string | null | undefined>;
   readDirectRuntimeAccount(): Promise<RuntimeAccountSnapshot | null>;
   readDirectRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null>;
   readCurrentRuntimeAccountResult(): Promise<RuntimeReadResult<RuntimeAccountSnapshot> | null>;
@@ -94,6 +98,7 @@ export interface CodexDesktopLauncher {
   readCurrentRuntimeQuota(): Promise<RuntimeQuotaSnapshot | null>;
   readManagedCurrentAccount(): Promise<RuntimeAccountSnapshot | null>;
   readManagedCurrentQuota(): Promise<RuntimeQuotaSnapshot | null>;
+  refreshManagedAccountSurface(): Promise<boolean>;
   applyManagedSwitch(options?: {
     force?: boolean;
     timeoutMs?: number;

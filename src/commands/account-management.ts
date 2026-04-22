@@ -4,6 +4,7 @@ import { maskAccountId } from "../auth-snapshot.js";
 import { toCliQuotaSummary } from "../cli/quota.js";
 import { writeJson } from "../cli/output.js";
 import { getUsage } from "../cli/spec.js";
+import { ensureNotReservedProxyAccountName } from "../proxy/constants.js";
 
 interface CommandStreams {
   stdin: NodeJS.ReadStream;
@@ -96,6 +97,7 @@ export async function handleAddCommand(options: {
     throw new Error(`Usage: ${getUsage("add")}`);
   }
   ensureAccountName(name);
+  ensureNotReservedProxyAccountName(name, "name a managed account");
 
   const snapshot = withApiKey
     ? {
@@ -149,6 +151,7 @@ export async function handleSaveCommand(options: {
     throw new Error(`Usage: ${getUsage("save")}`);
   }
   ensureAccountName(name);
+  ensureNotReservedProxyAccountName(name, "name a managed account");
 
   const account = await store.saveCurrentAccount(name, force);
   debugLog?.(
@@ -273,6 +276,7 @@ export async function handleRenameCommand(options: {
   }
   ensureAccountName(oldName);
   ensureAccountName(newName);
+  ensureNotReservedProxyAccountName(newName, "rename an account to that name");
 
   const account = await store.renameAccount(oldName, newName);
   debugLog?.(
