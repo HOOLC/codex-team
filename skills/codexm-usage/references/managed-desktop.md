@@ -19,10 +19,12 @@
 - By default, `codexm switch` waits for the current managed Desktop thread to finish before restarting the Codex app server.
 - `codexm switch --force` skips that wait and applies the change immediately.
 - Restarting the managed Codex app server interrupts the current managed Desktop thread.
+- The managed Desktop refresh path is intentionally narrow: it refreshes auth/account state by restarting the Codex app server, and does not hot-swap Desktop main-process fetch base URLs.
 
 ## proxy account
 
 - `codexm proxy enable` writes a synthetic ChatGPT auth plus proxy-backed `chatgpt_base_url` and `openai_base_url` into the default `CODEX_HOME`, while keeping the live provider identity unchanged so proxy and non-proxy sessions keep shared history. Managed Desktop or CLI entrypoints launched through `codexm` route both live Responses websocket turns and REST traffic through the local proxy. While proxy remains enabled, `codexm switch <name>` updates the proxy's current upstream instead of disabling proxy; autoswitch only moves that upstream after quota-exhaustion signals. The dashboard and `codexm list` always keep the synthetic `proxy` row visible; while proxy mode is enabled, `@` marks the configured current upstream, and `Last upstream: ...` continues to describe the most recent real proxy hit when known. Bare Desktop or CLI launches outside `codexm` are not forced into that path.
+- For managed Desktop, proxy routing is selected at `codexm launch` time by injecting `CODEX_API_BASE_URL` into the Desktop process. Changing proxy on or off later requires relaunching Desktop through `codexm launch`; `switch` and app-server restart only refresh the account surface.
 - `CODEXM_PROXY_PORT=<port>` changes the shared daemon/proxy bind port for `launch`, `daemon start`, `autoswitch enable`, `proxy enable`, and `run --proxy`; use `--port` on `proxy enable` when only that invocation should differ.
 - `codexm proxy disable` restores the previous direct auth/config backup and stops the proxy daemon.
 - For one-off CLI runs that must not affect local Desktop or thread/session data, prefer `codexm run --proxy` because it creates an isolated `CODEX_HOME`.

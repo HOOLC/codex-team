@@ -25,7 +25,6 @@ import {
 } from "./process.js";
 import {
   CODEX_APP_NAME,
-  CODEX_APP_SERVER_RESTART_EXPRESSION,
   CODEX_BINARY_SUFFIX,
   DEFAULT_CODEX_DESKTOP_STATE_PATH,
   DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
@@ -42,6 +41,7 @@ import {
 } from "./shared.js";
 import { ensureStateDirectory, parseManagedState } from "./state.js";
 import {
+  buildManagedAccountSurfaceRefreshExpression,
   buildManagedCurrentAccountExpression,
   buildManagedCurrentQuotaExpression,
   buildManagedSwitchExpression,
@@ -247,13 +247,20 @@ export function createCodexDesktopLauncher(options: {
     throw new Error("Timed out waiting for Codex Desktop to quit.");
   }
 
-  async function launch(appPath: string): Promise<void> {
+  async function launch(appPath: string, options?: {
+    apiBaseUrl?: string | null;
+  }): Promise<void> {
     const binaryPath = `${appPath}${CODEX_BINARY_SUFFIX}`;
 
     await launchProcessImpl({
       appPath,
       binaryPath,
       args: [`--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`],
+      env: options && Object.prototype.hasOwnProperty.call(options, "apiBaseUrl")
+        ? {
+            CODEX_API_BASE_URL: options.apiBaseUrl ?? "",
+          }
+        : undefined,
     });
   }
 
@@ -443,6 +450,27 @@ export function createCodexDesktopLauncher(options: {
     return await readDesktopRuntimeQuota();
   }
 
+  async function refreshManagedAccountSurface(): Promise<boolean> {
+    const state = await readManagedState();
+    if (!state) {
+      return false;
+    }
+
+    const runningApps = await listRunningApps();
+    if (!isManagedDesktopProcess(runningApps, state)) {
+      return false;
+    }
+
+    const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
+    await evaluateDevtoolsExpression(
+      createWebSocketImpl,
+      webSocketDebuggerUrl,
+      buildManagedAccountSurfaceRefreshExpression(),
+      DEVTOOLS_REQUEST_TIMEOUT_MS + 10_000,
+    );
+    return true;
+  }
+
   async function applyManagedSwitch(options?: {
     force?: boolean;
     timeoutMs?: number;
@@ -461,21 +489,19 @@ export function createCodexDesktopLauncher(options: {
     const webSocketDebuggerUrl = await resolveLocalDevtoolsTarget(fetchImpl, state);
 
     const devtoolsTimeoutMs =
-      options?.force === true
-        ? DEVTOOLS_REQUEST_TIMEOUT_MS
-        : Math.max(
-            DEVTOOLS_REQUEST_TIMEOUT_MS,
-            (options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS) +
-              DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS,
-          );
+      Math.max(
+        DEVTOOLS_REQUEST_TIMEOUT_MS + 10_000,
+        options?.force === true
+          ? DEVTOOLS_REQUEST_TIMEOUT_MS
+          : (options?.timeoutMs ?? DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS) +
+            DEVTOOLS_SWITCH_TIMEOUT_BUFFER_MS,
+      );
 
     await waitForPromiseOrAbort(
       evaluateDevtoolsExpression(
         createWebSocketImpl,
         webSocketDebuggerUrl,
-        options?.force === true
-          ? CODEX_APP_SERVER_RESTART_EXPRESSION
-          : buildManagedSwitchExpression(options),
+        buildManagedSwitchExpression(options),
         devtoolsTimeoutMs,
       ),
       options?.signal,
@@ -833,6 +859,7 @@ export function createCodexDesktopLauncher(options: {
     readCurrentRuntimeQuota,
     readManagedCurrentAccount,
     readManagedCurrentQuota,
+    refreshManagedAccountSurface,
     applyManagedSwitch,
     watchManagedQuotaSignals,
   };

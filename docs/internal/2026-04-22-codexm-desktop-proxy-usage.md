@@ -11,6 +11,8 @@ Make Codex Desktop show a coherent proxy-owned account and quota view when `code
 - `account-info` comes from the Electron main process.
 - The returned `plan` is decoded from the current auth token claim `https://api.openai.com/auth.chatgpt_plan_type`.
 - Usage settings are visible when auth method is `chatgpt` and `account-info.plan` is `plus`, `pro`, or `prolite`.
+- The webview caches this route under the query key `["vscode", "account-info"]`.
+- This is not a `/backend-api/*` network route, so proxy route shims cannot fix it directly.
 
 ### Usage settings data
 
@@ -43,7 +45,7 @@ The Desktop usage settings view depends on these backend routes:
   - integer `used_percent`
   - unlimited synthetic credits
 
-### What is still broken
+### What was still broken before the Desktop-side refresh
 
 1. `/backend-api/subscriptions/auto_top_up/settings` is transparently forwarded.
    - With synthetic proxy auth this returns `403`.
@@ -55,6 +57,14 @@ The Desktop usage settings view depends on these backend routes:
 
 3. `/backend-api/accounts/check/v4-2023-04-27` is also transparently forwarded and returns `403` for synthetic auth.
    - This is primarily an auto-top-up dialog issue, but it is part of the same proxy-owned account surface.
+
+4. `account-info` can still stay `null` inside the webview query cache after proxy enable / switch.
+   - The main-process route decodes `getAuthToken({ refreshToken: false })`.
+   - In practice this can lag or disagree with `account/read`, so the usage settings gate still hides the usage page.
+
+5. Invalidating the usage-related React Query entries is not sufficient by itself.
+   - In live Desktop, the mounted queries can immediately fall back to the same synthetic-auth error path.
+   - The result is a stale `rate-limit-status = null` or an `accounts/check` error even after the proxy routes themselves are already returning coherent synthetic data.
 
 ## Recommended proxy contract
 
@@ -90,6 +100,41 @@ When proxy mode is enabled and the incoming request is synthetic proxy auth or a
 - The chosen upstream account is an internal transport detail.
 - Mixing synthetic usage with real upstream account metadata produces inconsistent UI and makes proxy mode appear to be a real saved upstream account.
 
+## Desktop-side repair for `account-info`
+
+### Why network-only proxying is not enough
+
+- `account-info` is served by the Desktop main process, not by `/backend-api/*`.
+- The current handler calls `getAuthToken({ refreshToken: false })` and decodes JWT claims locally.
+- `getAuthToken({ refreshToken: false })` returns the Desktop main-process `authTokenCache` when it exists.
+- The available source-level refresh paths are not a safe targeted UI refresh:
+  - `account/updated` notification clears the cache, but it is emitted by the app-server rather than exposed as a renderer command.
+  - app-server transport close / restart clears the cache, but can interrupt active work.
+  - Desktop HTTP fetch refreshes with `getAuthToken({ refreshToken: true })` only after an authenticated request returns `401`, which is not deterministic after account switching.
+- Because of that, there is no additional proxy HTTP route we can transparently shim to fix `account-info`.
+- The least disruptive repair is to update the renderer query data that gates usage visibility, then let real non-proxy sessions fall back to the native route.
+
+### Chosen repair
+
+- After managed Desktop launch / switch, `codexm` injects a renderer-side refresh expression.
+- That expression:
+  - waits until `account/read` is available over the Desktop MCP bridge
+  - finds the live React Query client from the current React root
+  - when the current account is the synthetic proxy account, seeds the raw React Query cache directly with a future `updatedAt` for:
+    - `["vscode", "account-info"]`
+    - `["rate-limit-status"]`
+    - `["usage-settings", "auto-top-up"]`
+    - `["accounts", "check"]`
+    - `["accounts", "check", "v4-2023-04-27", "codexm-proxy-account"]`
+    - `["usage-settings", "auto-top-up-billing-currency", "codexm-proxy-account"]`
+  - uses the same synthetic payload family as the proxy routes, so Desktop sees one coherent proxy-owned account surface
+  - keeps the synthetic fetch shim installed for later renderer refetches, but does not rely on invalidate/refetch to make the initial UI recover
+
+### Non-proxy behavior
+
+- When the current account is not the synthetic proxy account, `codexm` removes the seeded proxy-owned query entries and invalidates the native Desktop keys.
+- That keeps proxy-off behavior on the native Desktop path and avoids leaving stale synthetic account or usage data behind.
+
 ## Last-good quota cache
 
 ### Goal
@@ -118,5 +163,9 @@ Keep `codexm list` and TUI readable when a refresh fails, without relying on a s
   - `/backend-api/wham/accounts/check`
   - `/backend-api/subscriptions/auto_top_up/settings`
   - `/backend-api/accounts/check/v4-2023-04-27`
+- The Desktop renderer query cache is seeded to synthetic proxy account data after proxy switch / launch, including:
+  - `["vscode", "account-info"]`
+  - `["rate-limit-status"]`
+  - `["accounts", "check"]`
 - `codexm list` and TUI show `[stale]` rows from account-scoped `last_good_quota` after a refresh failure.
 - Fallback does not apply when the stored `last_good_quota` is older than the configured max age.

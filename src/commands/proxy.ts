@@ -237,6 +237,7 @@ export async function handleProxyCommand(options: {
         options.desktopLauncher,
         {
           force,
+          desiredDesktopApiBaseUrl: enabledState.base_url,
           signal: options.interruptSignal,
           statusStream: options.stderr,
           statusDelayMs: options.managedDesktopWaitStatusDelayMs,
@@ -306,6 +307,7 @@ export async function handleProxyCommand(options: {
         options.desktopLauncher,
         {
           force,
+          desiredDesktopApiBaseUrl: null,
           signal: options.interruptSignal,
           statusStream: options.stderr,
           statusDelayMs: options.managedDesktopWaitStatusDelayMs,

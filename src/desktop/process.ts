@@ -11,6 +11,7 @@ export type LaunchProcessLike = (options: {
   appPath: string;
   binaryPath: string;
   args: readonly string[];
+  env?: Record<string, string>;
 }) => Promise<void>;
 
 type SpawnLike = typeof spawnCallback;
@@ -59,13 +60,18 @@ export async function launchManagedDesktopProcess(options: {
   appPath: string;
   binaryPath: string;
   args: readonly string[];
+  env?: Record<string, string>;
 }, spawnImpl: SpawnLike = spawnCallback): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     // Launch through LaunchServices so Electron's own update/restart flow can
     // quit and relaunch the app cleanly. Spawning the inner binary directly
     // makes the Desktop behave like an unmanaged executable and can wedge the
     // official "restart to update" path on macOS.
-    const child = spawnImpl("open", ["-na", options.appPath, "--args", ...options.args], {
+    const envArgs = Object.entries(options.env ?? {}).flatMap(([key, value]) => [
+      "--env",
+      `${key}=${value}`,
+    ]);
+    const child = spawnImpl("open", [...envArgs, "-na", options.appPath, "--args", ...options.args], {
       detached: true,
       stdio: "ignore",
     });

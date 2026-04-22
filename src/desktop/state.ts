@@ -25,6 +25,7 @@ export function parseManagedState(raw: string): ManagedCodexDesktopState | null 
   const remoteDebuggingPort = parsed.remote_debugging_port;
   const managedByCodexm = parsed.managed_by_codexm;
   const startedAt = parsed.started_at;
+  const desktopApiBaseUrl = parsed.desktop_api_base_url;
 
   if (
     typeof pid !== "number" ||
@@ -35,18 +36,27 @@ export function parseManagedState(raw: string): ManagedCodexDesktopState | null 
     !Number.isInteger(remoteDebuggingPort) ||
     remoteDebuggingPort <= 0 ||
     managedByCodexm !== true ||
-    !isNonEmptyString(startedAt)
+    !isNonEmptyString(startedAt) ||
+    !(
+      desktopApiBaseUrl === undefined ||
+      desktopApiBaseUrl === null ||
+      isNonEmptyString(desktopApiBaseUrl)
+    )
   ) {
     return null;
   }
 
-  return {
+  const state: ManagedCodexDesktopState = {
     pid,
     app_path: appPath,
     remote_debugging_port: remoteDebuggingPort,
     managed_by_codexm: true,
     started_at: startedAt,
   };
+  if (desktopApiBaseUrl !== undefined) {
+    state.desktop_api_base_url = desktopApiBaseUrl;
+  }
+  return state;
 }
 
 export async function ensureStateDirectory(statePath: string): Promise<void> {

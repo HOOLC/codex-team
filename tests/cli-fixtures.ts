@@ -34,7 +34,7 @@ export function createDesktopLauncherStub(overrides: Partial<{
   findInstalledApp: () => Promise<string | null>;
   listRunningApps: () => Promise<RunningCodexDesktop[]>;
   quitRunningApps: (options?: { force?: boolean }) => Promise<void>;
-  launch: (appPath: string) => Promise<void>;
+  launch: (appPath: string, options?: { apiBaseUrl?: string | null }) => Promise<void>;
   activateApp: (appPath: string) => Promise<void>;
   writeManagedState: (state: ManagedCodexDesktopState) => Promise<void>;
   readManagedState: () => Promise<ManagedCodexDesktopState | null>;
@@ -48,6 +48,7 @@ export function createDesktopLauncherStub(overrides: Partial<{
   readCurrentRuntimeQuota: () => Promise<RuntimeQuotaSnapshot | null>;
   readManagedCurrentAccount: () => Promise<ManagedCurrentAccountSnapshot | null>;
   readManagedCurrentQuota: () => Promise<ManagedCurrentQuotaSnapshot | null>;
+  refreshManagedAccountSurface: () => Promise<boolean>;
   isRunningInsideDesktopShell: () => Promise<boolean>;
   applyManagedSwitch: (options?: {
     force?: boolean;
@@ -154,6 +155,8 @@ export function createDesktopLauncherStub(overrides: Partial<{
       ?? (async () => null),
     readManagedCurrentAccount: overrides.readManagedCurrentAccount ?? (async () => null),
     readManagedCurrentQuota: overrides.readManagedCurrentQuota ?? (async () => null),
+    refreshManagedAccountSurface:
+      overrides.refreshManagedAccountSurface ?? (async () => false),
     isRunningInsideDesktopShell: overrides.isRunningInsideDesktopShell ?? (async () => false),
     applyManagedSwitch: overrides.applyManagedSwitch ?? (async () => false),
     watchManagedQuotaSignals: overrides.watchManagedQuotaSignals ?? (async () => undefined),

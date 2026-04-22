@@ -30,7 +30,7 @@ import { selectCurrentNextResetWindow, toAutoSwitchCandidate } from "../cli/quot
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
 import {
   isOnlyManagedDesktopInstanceRunning,
-  resolveManagedDesktopState,
+  launchManagedDesktopSession,
 } from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
 import type { WatchProcessManager } from "../watch/process.js";
@@ -67,7 +67,10 @@ import {
   readLatestProxyUpstreamSelection,
   type ProxyLastUpstreamSelection,
 } from "../proxy/request-log.js";
-import { resolveProxyManualUpstreamAccountName } from "../proxy/runtime.js";
+import {
+  resolveManagedDesktopApiBaseUrl,
+  resolveProxyManualUpstreamAccountName,
+} from "../proxy/runtime.js";
 import { readProxyState } from "../proxy/state.js";
 import {
   deleteAccountForTui,
@@ -725,6 +728,7 @@ export async function handleTuiCommand(options: {
                   options.desktopLauncher,
                   {
                     force: false,
+                    desiredDesktopApiBaseUrl: null,
                     signal: switchOptions.signal ?? options.interruptSignal,
                     statusStream: silentStatusStream,
                     onStatusMessage: switchOptions.onStatusMessage,
@@ -742,20 +746,21 @@ export async function handleTuiCommand(options: {
                 };
               }
 
-              await enableProxyMode({
+              const enabledProxyState = await enableProxyMode({
                 store: options.store,
                 proxyProcessManager,
                 debug: false,
               });
               await refreshManagedDesktopAfterSwitch(
-                warnings,
-                options.desktopLauncher,
-                {
-                  force: switchOptions.force,
-                  signal: switchOptions.signal ?? options.interruptSignal,
-                  statusStream: silentStatusStream,
-                  onStatusMessage: switchOptions.onStatusMessage,
-                  statusDelayMs: options.managedDesktopWaitStatusDelayMs,
+                  warnings,
+                  options.desktopLauncher,
+                  {
+                    force: switchOptions.force,
+                    desiredDesktopApiBaseUrl: enabledProxyState.base_url,
+                    signal: switchOptions.signal ?? options.interruptSignal,
+                    statusStream: silentStatusStream,
+                    onStatusMessage: switchOptions.onStatusMessage,
+                    statusDelayMs: options.managedDesktopWaitStatusDelayMs,
                   statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
                 },
               );
@@ -808,6 +813,7 @@ export async function handleTuiCommand(options: {
           if (!appPath) {
             throw new Error("Codex Desktop not found at /Applications/Codex.app.");
           }
+          const desktopApiBaseUrl = await resolveManagedDesktopApiBaseUrl(options.store);
 
           const runningApps = await options.desktopLauncher.listRunningApps();
           if (runningApps.length > 0 && !desktopOptions.forceRelaunch) {
@@ -837,27 +843,25 @@ export async function handleTuiCommand(options: {
             });
           }
 
-          await options.desktopLauncher.launch(appPath);
-          const managedState = await resolveManagedDesktopState(
-            options.desktopLauncher,
+          const { refreshedAccountSurface } = await launchManagedDesktopSession({
+            desktopLauncher: options.desktopLauncher,
             appPath,
-            runningApps,
+            existingApps: runningApps,
             platform,
-          );
-          if (!managedState) {
-            await options.desktopLauncher.clearManagedState().catch(() => undefined);
-            throw new Error(
-              "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
+            desktopApiBaseUrl,
+          });
+          const warningMessages: string[] = [];
+          if (!refreshedAccountSurface) {
+            warningMessages.push(
+              "Opened Desktop, but codexm could not refresh the in-app account surface yet.",
             );
           }
-
-          await options.desktopLauncher.writeManagedState(managedState);
           await externalUpdateMonitors.reconcileNow();
           return {
             statusMessage: runningApps.length > 0 && desktopOptions.forceRelaunch
               ? `Relaunched Codex Desktop for "${name}".`
               : `Opened Codex Desktop for "${name}".`,
-            warningMessages: [],
+            warningMessages,
           };
         },
         exportAccount: async (source, outputPath) =>

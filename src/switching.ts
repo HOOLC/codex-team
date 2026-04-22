@@ -123,6 +123,7 @@ export async function refreshManagedDesktopAfterSwitch(
   desktopLauncher: CodexDesktopLauncher,
   options: {
     force?: boolean;
+    desiredDesktopApiBaseUrl?: string | null;
     signal?: AbortSignal;
     statusStream?: NodeJS.WriteStream;
     onStatusMessage?: (message: string) => void;
@@ -131,6 +132,33 @@ export async function refreshManagedDesktopAfterSwitch(
     timeoutMs?: number;
   } = {},
 ): Promise<"applied" | "killed" | "none" | "other-running" | "failed"> {
+  const normalizeDesktopApiBaseUrl = (value: string | null | undefined): string | null => {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const trimmed = value.trim().replace(/\/+$/u, "");
+    return trimmed === "" ? null : trimmed;
+  };
+
+  try {
+    const managedState = await desktopLauncher.readManagedState();
+    if (managedState && Object.prototype.hasOwnProperty.call(options, "desiredDesktopApiBaseUrl")) {
+      const currentDesktopApiBaseUrl = normalizeDesktopApiBaseUrl(managedState.desktop_api_base_url);
+      const desiredDesktopApiBaseUrl = normalizeDesktopApiBaseUrl(options.desiredDesktopApiBaseUrl);
+      if (currentDesktopApiBaseUrl !== desiredDesktopApiBaseUrl) {
+        warnings.push(
+          desiredDesktopApiBaseUrl
+            ? `The running codexm-managed Codex Desktop session still uses ${currentDesktopApiBaseUrl ?? "the default backend"} for Desktop fetches. Relaunch Codex Desktop via "codexm launch" to apply proxy routing at ${desiredDesktopApiBaseUrl}.`
+            : "The running codexm-managed Codex Desktop session still uses the proxy Desktop fetch base URL. Relaunch Codex Desktop via \"codexm launch\" to return Desktop fetches to the direct backend.",
+        );
+        return "failed";
+      }
+    }
+  } catch {
+    // Keep Desktop state inspection best-effort, same as process inspection below.
+  }
+
   let reporter: ReturnType<typeof startManagedDesktopWaitReporter> | null = null;
   if (options.force !== true && (options.statusStream || options.onStatusMessage)) {
     try {

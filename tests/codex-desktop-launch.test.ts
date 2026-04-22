@@ -108,6 +108,44 @@ describe("codex-desktop-launch", () => {
     expect(unrefCalled).toBe(true);
   });
 
+  test("passes CODEX_API_BASE_URL to Desktop launch when proxy routing is requested", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const calls: Array<{
+      appPath: string;
+      binaryPath: string;
+      args: string[];
+      env?: Record<string, string>;
+    }> = [];
+    const launcher = createCodexDesktopLauncher({
+      statePath,
+      launchProcessImpl: async (options) => {
+        calls.push({
+          appPath: options.appPath,
+          binaryPath: options.binaryPath,
+          args: [...options.args],
+          env: options.env,
+        });
+      },
+    });
+
+    try {
+      await launcher.launch("/Applications/Codex.app", {
+        apiBaseUrl: "http://127.0.0.1:14555/backend-api",
+      });
+      expect(calls[0]?.appPath).toBe("/Applications/Codex.app");
+      expect(calls[0]?.binaryPath).toBe("/Applications/Codex.app/Contents/MacOS/Codex");
+      expect(calls[0]?.args).toEqual([
+        `--remote-debugging-port=${DEFAULT_CODEX_REMOTE_DEBUGGING_PORT}`,
+      ]);
+      expect(calls[0]?.env).toEqual({
+        CODEX_API_BASE_URL: "http://127.0.0.1:14555/backend-api",
+      });
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("lists running Codex Desktop processes from ps output", async () => {
     const launcher = createCodexDesktopLauncher({
       execFileImpl: async (file) => {
@@ -420,9 +458,8 @@ describe("codex-desktop-launch", () => {
       expect(sentMessages).toHaveLength(1);
       expect(sentMessages[0]).toContain('"method":"Runtime.evaluate"');
       expect(sentMessages[0]).toContain("codex-app-server-restart");
-      expect(sentMessages[0]).not.toContain("query-cache-invalidate");
-      expect(sentMessages[0]).not.toContain("rate-limit-status");
-      expect(sentMessages[0]).not.toContain("account-info");
+      expect(sentMessages[0]).toContain("restartAppServer");
+      expect(sentMessages[0]).toContain("waitForAccountReadiness");
       expect(sentMessages[0]).not.toContain("account/updated");
     } finally {
       await cleanupTempHome(homeDir);
@@ -849,10 +886,90 @@ describe("codex-desktop-launch", () => {
       expect(sentMessages[0]).toContain('\\"mcp-request\\"');
       expect(sentMessages[0]).toContain("fallbackPollIntervalMs");
       expect(sentMessages[0]).toContain("codex-app-server-restart");
-      expect(sentMessages[0]).toContain("query-cache-invalidate");
-      expect(sentMessages[0]).toContain("rate-limit-status");
-      expect(sentMessages[0]).toContain("account-info");
+      expect(sentMessages[0]).toContain("restartAppServer");
+      expect(sentMessages[0]).toContain("waitForAccountReadiness");
       expect(sentMessages[0]).not.toContain("account/updated");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("refreshes the managed Desktop account surface by restarting the app server", async () => {
+    const homeDir = await createTempHome();
+    const statePath = join(homeDir, ".codex-team", "desktop-state.json");
+    const sentMessages: string[] = [];
+
+    try {
+      const launcher = createCodexDesktopLauncher({
+        statePath,
+        execFileImpl: async (file) => {
+          if (file === "ps") {
+            return {
+              stdout:
+                "123 /Applications/Codex.app/Contents/MacOS/Codex --remote-debugging-port=39223\n",
+              stderr: "",
+            };
+          }
+
+          throw new Error(`unexpected command: ${file}`);
+        },
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              type: "page",
+              url: "app://-/index.html?hostId=local",
+              webSocketDebuggerUrl: "ws://127.0.0.1:39223/devtools/page/1",
+            },
+          ],
+        }),
+        createWebSocketImpl: () => {
+          const socket = {
+            onopen: null as (() => void) | null,
+            onmessage: null as ((event: { data: unknown }) => void) | null,
+            onerror: null as ((event: unknown) => void) | null,
+            onclose: null as (() => void) | null,
+            send(data: string) {
+              sentMessages.push(data);
+              socket.onmessage?.({
+                data: JSON.stringify({
+                  id: 1,
+                  result: {
+                    result: {
+                      type: "object",
+                    },
+                  },
+                }),
+              });
+            },
+            close() {
+              return;
+            },
+          };
+
+          queueMicrotask(() => {
+            socket.onopen?.();
+          });
+
+          return socket;
+        },
+      });
+
+      await launcher.writeManagedState({
+        pid: 123,
+        app_path: "/Applications/Codex.app",
+        remote_debugging_port: DEFAULT_CODEX_REMOTE_DEBUGGING_PORT,
+        managed_by_codexm: true,
+        started_at: "2026-04-07T00:00:00.000Z",
+      });
+
+      await expect(launcher.refreshManagedAccountSurface()).resolves.toBe(true);
+      expect(sentMessages).toHaveLength(1);
+      expect(sentMessages[0]).toContain('"method":"Runtime.evaluate"');
+      expect(sentMessages[0]).toContain("codex-app-server-restart");
+      expect(sentMessages[0]).toContain("restartAppServer");
+      expect(sentMessages[0]).toContain("waitForAccountReadiness");
     } finally {
       await cleanupTempHome(homeDir);
     }

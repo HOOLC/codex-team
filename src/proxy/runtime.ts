@@ -58,6 +58,13 @@ export async function isSyntheticProxyConfigActive(
   }
 }
 
+export async function resolveManagedDesktopApiBaseUrl(
+  store: AccountStore,
+): Promise<string | null> {
+  const state = await readProxyState(store.paths.codexTeamDir);
+  return state?.enabled === true ? state.base_url : null;
+}
+
 async function resolveProxyDirectAuthBackupPath(store: AccountStore): Promise<string | null> {
   const state = await readProxyState(store.paths.codexTeamDir);
   if (state?.direct_auth_backup_path && await pathExists(state.direct_auth_backup_path)) {
@@ -108,10 +115,11 @@ async function resolveDirectConfigBackupContent(
     return null;
   }
 
+  const directConfigBackupPath = await resolveProxyDirectConfigBackupPath(store);
   const candidatePaths = [
     ...(account.configPath ? [account.configPath] : []),
     ...(await pathExists(store.paths.currentConfigPath) ? [store.paths.currentConfigPath] : []),
-    ...((await resolveProxyDirectConfigBackupPath(store)) ? [await resolveProxyDirectConfigBackupPath(store) as string] : []),
+    ...(directConfigBackupPath ? [directConfigBackupPath] : []),
   ];
   for (const path of candidatePaths) {
     if (!(await pathExists(path))) {

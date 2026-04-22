@@ -85,4 +85,36 @@ describe("switching lock", () => {
     ))).toBe(true);
     expect(messages).toContain("Applied the switch to the managed Codex Desktop session.");
   });
+
+  test("warns instead of hot-refreshing when the managed Desktop base URL differs from the desired proxy route", async () => {
+    const warnings: string[] = [];
+    let applyManagedSwitchCalls = 0;
+
+    const outcome = await refreshManagedDesktopAfterSwitch(
+      warnings,
+      createDesktopLauncherStub({
+        readManagedState: async () => ({
+          pid: 123,
+          app_path: "/Applications/Codex.app",
+          remote_debugging_port: 39223,
+          managed_by_codexm: true,
+          started_at: "2026-04-22T00:00:00.000Z",
+          desktop_api_base_url: null,
+        }),
+        applyManagedSwitch: async () => {
+          applyManagedSwitchCalls += 1;
+          return true;
+        },
+      }),
+      {
+        desiredDesktopApiBaseUrl: "http://127.0.0.1:14555/backend-api",
+      },
+    );
+
+    expect(outcome).toBe("failed");
+    expect(applyManagedSwitchCalls).toBe(0);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Relaunch Codex Desktop via \"codexm launch\"");
+    expect(warnings[0]).toContain("http://127.0.0.1:14555/backend-api");
+  });
 });

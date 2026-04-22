@@ -7,14 +7,18 @@ import { getUsage } from "../cli/spec.js";
 import {
   confirmDesktopRelaunch,
   isOnlyManagedDesktopInstanceRunning,
-  resolveManagedDesktopState,
+  launchManagedDesktopSession,
   restoreLaunchBackup,
 } from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { defaultDaemonState } from "../daemon/state.js";
 import { proxyBackendBaseUrl, proxyOpenAIBaseUrl, resolveProxyPort } from "../proxy/constants.js";
-import { isSyntheticProxyRuntimeActive, restoreSyntheticProxyRuntime } from "../proxy/runtime.js";
+import {
+  isSyntheticProxyRuntimeActive,
+  resolveManagedDesktopApiBaseUrl,
+  restoreSyntheticProxyRuntime,
+} from "../proxy/runtime.js";
 import {
   describeBusySwitchLock,
   resolveManagedAccountByName,
@@ -85,8 +89,10 @@ export async function handleLaunchCommand(options: {
   if (!appPath) {
     throw new Error("Codex Desktop not found at /Applications/Codex.app.");
   }
+  const desktopApiBaseUrl = await resolveManagedDesktopApiBaseUrl(store);
   debugLog(`launch: requested_account=${name ?? "current"}`);
   debugLog(`launch: using app path ${appPath}`);
+  debugLog(`launch: desktop_api_base_url=${desktopApiBaseUrl ?? "<default>"}`);
 
   const runningApps = await desktopLauncher.listRunningApps();
   debugLog(`launch: running_desktop_instances=${runningApps.length}`);
@@ -157,23 +163,21 @@ export async function handleLaunchCommand(options: {
       }
 
       try {
-        await desktopLauncher.launch(appPath);
-        const managedState = await resolveManagedDesktopState(
+        const { managedState, refreshedAccountSurface } = await launchManagedDesktopSession({
           desktopLauncher,
           appPath,
-          runningApps,
-          launchPlatform,
-        );
-        if (!managedState) {
-          await desktopLauncher.clearManagedState().catch(() => undefined);
-          throw new Error(
-            "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
-          );
-        }
-        await desktopLauncher.writeManagedState(managedState);
+          existingApps: runningApps,
+          platform: launchPlatform,
+          desktopApiBaseUrl,
+        });
         debugLog(
           `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
         );
+        if (!refreshedAccountSurface) {
+          warnings.push(
+            "Codex Desktop launched, but codexm could not refresh the in-app account surface yet.",
+          );
+        }
       } catch (error) {
         if (switchedAccount) {
           await restoreLaunchBackup(store, switchBackupPath).catch(() => undefined);
@@ -187,23 +191,21 @@ export async function handleLaunchCommand(options: {
       await lock.release();
     }
   } else {
-    await desktopLauncher.launch(appPath);
-    const managedState = await resolveManagedDesktopState(
+    const { managedState, refreshedAccountSurface } = await launchManagedDesktopSession({
       desktopLauncher,
       appPath,
-      runningApps,
-      launchPlatform,
-    );
-    if (!managedState) {
-      await desktopLauncher.clearManagedState().catch(() => undefined);
-      throw new Error(
-        "Failed to confirm the newly launched Codex Desktop process for managed-session tracking.",
-      );
-    }
-    await desktopLauncher.writeManagedState(managedState);
+      existingApps: runningApps,
+      platform: launchPlatform,
+      desktopApiBaseUrl,
+    });
     debugLog(
       `launch: recorded managed desktop pid=${managedState.pid} port=${managedState.remote_debugging_port}`,
     );
+    if (!refreshedAccountSurface) {
+      warnings.push(
+        "Codex Desktop launched, but codexm could not refresh the in-app account surface yet.",
+      );
+    }
   }
 
   const currentDaemonState = (await daemonProcessManager.getStatus()).state
