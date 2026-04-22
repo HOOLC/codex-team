@@ -12,7 +12,13 @@ import { restoreDirectRuntime, writeSyntheticProxyRuntime } from "../proxy/confi
 import type { ProxyProcessManager } from "../proxy/process.js";
 import { startProxyServer } from "../proxy/server.js";
 import { readProxyState, writeProxyState, type ProxyProcessState } from "../proxy/state.js";
-import { appendEventLog, appendProxyRequestLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
+import {
+  appendEventLog,
+  appendProxyErrorLog,
+  appendProxyRequestLog,
+  buildEventPayload,
+  shortenErrorMessage,
+} from "../logging.js";
 import {
   describeBusySwitchLock,
   refreshManagedDesktopAfterSwitch,
@@ -164,6 +170,9 @@ export async function handleProxyCommand(options: {
       debugLog: options.debugLog,
       requestLogger: async (payload) => {
         await appendProxyRequestLog(options.store.paths.codexTeamDir, payload);
+      },
+      errorRequestLogger: async (payload) => {
+        await appendProxyErrorLog(options.store.paths.codexTeamDir, payload);
       },
     });
     options.stdout.write(

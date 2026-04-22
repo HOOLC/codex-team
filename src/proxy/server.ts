@@ -55,6 +55,7 @@ export interface StartProxyServerOptions {
   fetchImpl?: typeof fetch;
   debugLog?: (message: string) => void;
   requestLogger?: (payload: Record<string, unknown>) => Promise<void> | void;
+  errorRequestLogger?: (payload: Record<string, unknown>) => Promise<void> | void;
   connectWebSocketImpl?: (options: {
     url: string;
     headers: OutgoingHttpHeaders;
@@ -70,6 +71,7 @@ interface ProxyForwardResult {
   upstreamKind: "chatgpt" | "openai";
   syntheticUsage?: boolean;
   diagnostic?: Record<string, unknown>;
+  errorPayload?: Record<string, unknown>;
 }
 
 interface ProxyStoredConversation {
@@ -247,8 +249,25 @@ function shouldUseSyntheticDesktopUsageSurface(request: IncomingMessage): boolea
     || isCodexDesktopRequest(request);
 }
 
+function buildJsonBodyText(payload: unknown): string {
+  return `${JSON.stringify(payload)}\n`;
+}
+
+function buildProxyErrorResponsePayload(message: string): Record<string, unknown> {
+  return {
+    error: {
+      message,
+      type: "codexm_proxy_error",
+    },
+  };
+}
+
+function buildProxyErrorResponseText(message: string): string {
+  return buildJsonBodyText(buildProxyErrorResponsePayload(message));
+}
+
 function writeJson(response: ServerResponse, statusCode: number, payload: unknown): number {
-  const body = `${JSON.stringify(payload)}\n`;
+  const body = buildJsonBodyText(payload);
   response.writeHead(statusCode, {
     "content-type": "application/json",
   });
@@ -257,12 +276,7 @@ function writeJson(response: ServerResponse, statusCode: number, payload: unknow
 }
 
 function writeError(response: ServerResponse, statusCode: number, message: string): number {
-  return writeJson(response, statusCode, {
-    error: {
-      message,
-      type: "codexm_proxy_error",
-    },
-  });
+  return writeJson(response, statusCode, buildProxyErrorResponsePayload(message));
 }
 
 async function writeUpstreamResponse(response: ServerResponse, upstream: Response): Promise<number> {
@@ -314,6 +328,98 @@ function writeBufferedResponse(
   response.writeHead(statusCode, headers);
   response.end(bodyText);
   return Buffer.byteLength(bodyText);
+}
+
+function upstreamRequestHeadersToRecord(
+  headers: Headers | Record<string, string> | null,
+): Record<string, string> | null {
+  if (!headers) {
+    return null;
+  }
+
+  if (headers instanceof Headers) {
+    return headersToRecord(headers);
+  }
+
+  return { ...headers };
+}
+
+function shouldRecordErrorPayload(statusCode: number): boolean {
+  return statusCode !== 200;
+}
+
+function buildRequestResponseLogPayload(options: {
+  request: IncomingMessage;
+  bodyText: string;
+  upstreamUrl: string | null;
+  upstreamRequestHeaders: Headers | Record<string, string> | null;
+  responseHeaders: Record<string, string> | null;
+  responseBodyText: string;
+}): Record<string, unknown> {
+  return {
+    request_headers: incomingHeadersToRecord(options.request),
+    request_body_text: options.bodyText,
+    upstream_url: options.upstreamUrl,
+    upstream_request_headers: upstreamRequestHeadersToRecord(options.upstreamRequestHeaders),
+    response_headers: options.responseHeaders,
+    response_body_text: options.responseBodyText,
+  };
+}
+
+function buildLocalErrorLogPayload(options: {
+  request: IncomingMessage;
+  bodyText: string;
+  responseBodyText: string;
+  responseHeaders?: Record<string, string> | null;
+}): Record<string, unknown> {
+  return buildRequestResponseLogPayload({
+    request: options.request,
+    bodyText: options.bodyText,
+    upstreamUrl: null,
+    upstreamRequestHeaders: null,
+    responseHeaders: options.responseHeaders ?? {
+      "content-type": "application/json",
+    },
+    responseBodyText: options.responseBodyText,
+  });
+}
+
+async function writeUpstreamResponseWithLogging(options: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  bodyText: string;
+  upstream: Response;
+  upstreamUrl: string;
+  upstreamRequestHeaders: Headers | Record<string, string>;
+  captureDiagnostic?: boolean;
+}): Promise<{
+  responseBytes: number;
+  diagnostic?: Record<string, unknown>;
+  errorPayload?: Record<string, unknown>;
+}> {
+  const captureDiagnostic = options.captureDiagnostic === true;
+  const captureError = shouldRecordErrorPayload(options.upstream.status);
+  if (!captureDiagnostic && !captureError) {
+    return {
+      responseBytes: await writeUpstreamResponse(options.response, options.upstream),
+    };
+  }
+
+  const buffered = await writeBufferedUpstreamResponse(options.response, options.upstream);
+  const payload = buildRequestResponseLogPayload({
+    request: options.request,
+    bodyText: options.bodyText,
+    upstreamUrl: options.upstreamUrl,
+    upstreamRequestHeaders: options.upstreamRequestHeaders,
+    responseHeaders: buffered.responseHeaders,
+    responseBodyText: buffered.responseBodyText,
+  });
+
+  return {
+    responseBytes: buffered.responseBytes,
+    diagnostic: captureDiagnostic ? payload : undefined,
+    errorPayload: captureError ? payload : undefined,
+  };
 }
 
 function parseJsonBody(bodyText: string): Record<string, unknown> {
@@ -626,13 +732,19 @@ async function forwardChatGPTBackend(options: {
     : requestHeadersToFetchHeaders(options.request);
 
   if (shouldReplaceAuth && !selected) {
+    const errorMessage = "No eligible ChatGPT account is available for proxy upstream.";
     return {
       statusCode: 503,
-      responseBytes: writeError(options.response, 503, "No eligible ChatGPT account is available for proxy upstream."),
+      responseBytes: writeError(options.response, 503, errorMessage),
       authKind: "synthetic-chatgpt",
       selectedAccount: null,
       selectedAuthMode: null,
       upstreamKind: "chatgpt",
+      errorPayload: buildLocalErrorLogPayload({
+        request: options.request,
+        bodyText: options.bodyText,
+        responseBodyText: buildProxyErrorResponseText(errorMessage),
+      }),
     };
   }
 
@@ -645,32 +757,24 @@ async function forwardChatGPTBackend(options: {
       options.bodyText,
     ),
   );
-  if (shouldCaptureDiagnosticPayload(options.pathname)) {
-    const buffered = await writeBufferedUpstreamResponse(options.response, upstream);
-    return {
-      statusCode: upstream.status,
-      responseBytes: buffered.responseBytes,
-      authKind: shouldReplaceAuth ? "synthetic-chatgpt" : "direct-chatgpt",
-      selectedAccount: selected?.account.name ?? null,
-      selectedAuthMode: selected?.account.auth_mode ?? null,
-      upstreamKind: "chatgpt",
-      diagnostic: {
-        request_headers: incomingHeadersToRecord(options.request),
-        request_body_text: options.bodyText,
-        upstream_url: upstreamUrl,
-        upstream_request_headers: headersToRecord(outgoingHeaders),
-        response_headers: buffered.responseHeaders,
-        response_body_text: buffered.responseBodyText,
-      },
-    };
-  }
+  const logged = await writeUpstreamResponseWithLogging({
+    request: options.request,
+    response: options.response,
+    bodyText: options.bodyText,
+    upstream,
+    upstreamUrl,
+    upstreamRequestHeaders: outgoingHeaders,
+    captureDiagnostic: shouldCaptureDiagnosticPayload(options.pathname),
+  });
   return {
     statusCode: upstream.status,
-    responseBytes: await writeUpstreamResponse(options.response, upstream),
+    responseBytes: logged.responseBytes,
     authKind: shouldReplaceAuth ? "synthetic-chatgpt" : "direct-chatgpt",
     selectedAccount: selected?.account.name ?? null,
     selectedAuthMode: selected?.account.auth_mode ?? null,
     upstreamKind: "chatgpt",
+    diagnostic: logged.diagnostic,
+    errorPayload: logged.errorPayload,
   };
 }
 
@@ -1120,6 +1224,15 @@ async function readBufferedJsonPayload(upstream: Response): Promise<{
     };
   }
 
+  const contentType = upstream.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType.includes("text/event-stream") || bodyText.startsWith("event:") || bodyText.startsWith("data:")) {
+    return {
+      bodyText,
+      payload: parseResponsePayloadFromSse(bodyText),
+      responseHeaders,
+    };
+  }
+
   try {
     return {
       bodyText,
@@ -1422,22 +1535,33 @@ async function forwardTransparentOpenAI(options: {
   fetchImpl: typeof fetch;
   authKind: "apikey" | "unknown";
 }): Promise<ProxyForwardResult> {
+  const upstreamUrl = `${OPENAI_UPSTREAM_BASE_URL}${options.pathname.replace(/^\/v1/u, "")}${options.search}`;
+  const outgoingHeaders = requestHeadersToFetchHeaders(options.request);
   const upstream = await options.fetchImpl(
-    `${OPENAI_UPSTREAM_BASE_URL}${options.pathname.replace(/^\/v1/u, "")}${options.search}`,
+    upstreamUrl,
     fetchInitForRequest(
       options.request,
-      requestHeadersToFetchHeaders(options.request),
+      outgoingHeaders,
       options.bodyText,
     ),
   );
+  const logged = await writeUpstreamResponseWithLogging({
+    request: options.request,
+    response: options.response,
+    bodyText: options.bodyText,
+    upstream,
+    upstreamUrl,
+    upstreamRequestHeaders: outgoingHeaders,
+  });
 
   return {
     statusCode: upstream.status,
-    responseBytes: await writeUpstreamResponse(options.response, upstream),
+    responseBytes: logged.responseBytes,
     authKind: options.authKind,
     selectedAccount: null,
     selectedAuthMode: null,
     upstreamKind: "openai",
+    errorPayload: logged.errorPayload,
   };
 }
 
@@ -1452,22 +1576,32 @@ async function forwardRawChatGPTCompatibleRoute(options: {
   authKind: "direct-chatgpt" | "synthetic-chatgpt";
   selected: ProxyUpstreamAccount | null;
 }): Promise<ProxyForwardResult> {
+  const upstreamUrl = toChatGPTCodexUrl(options.pathname, options.search);
   const upstream = await options.fetchImpl(
-    toChatGPTCodexUrl(options.pathname, options.search),
+    upstreamUrl,
     fetchInitForRequest(
       options.request,
       options.headers,
       options.bodyText,
     ),
   );
+  const logged = await writeUpstreamResponseWithLogging({
+    request: options.request,
+    response: options.response,
+    bodyText: options.bodyText,
+    upstream,
+    upstreamUrl,
+    upstreamRequestHeaders: options.headers,
+  });
 
   return {
     statusCode: upstream.status,
-    responseBytes: await writeUpstreamResponse(options.response, upstream),
+    responseBytes: logged.responseBytes,
     authKind: options.authKind,
     selectedAccount: options.selected?.account.name ?? null,
     selectedAuthMode: options.selected?.account.auth_mode ?? (options.authKind === "direct-chatgpt" ? "chatgpt" : null),
     upstreamKind: "chatgpt",
+    errorPayload: logged.errorPayload,
   };
 }
 
@@ -1484,42 +1618,76 @@ async function forwardOpenAIViaDirectChatGPT(options: {
 
   if (options.pathname === "/v1/responses") {
     const body = parseJsonBody(options.bodyText);
+    const upstreamUrl = `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`;
+    const outgoingHeaders = requestHeadersToFetchHeaders(options.request);
     upstream = await options.fetchImpl(
-      `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+      upstreamUrl,
       {
         method: options.request.method ?? "POST",
-        headers: requestHeadersToFetchHeaders(options.request),
+        headers: outgoingHeaders,
         body: JSON.stringify(normalizeResponsesRequestBody(body)),
       },
     );
     const shouldStream = body.stream === true;
+    if (shouldStream) {
+      const logged = await writeUpstreamResponseWithLogging({
+        request: options.request,
+        response: options.response,
+        bodyText: options.bodyText,
+        upstream,
+        upstreamUrl,
+        upstreamRequestHeaders: outgoingHeaders,
+      });
+      return {
+        statusCode: upstream.status,
+        responseBytes: logged.responseBytes,
+        authKind: "direct-chatgpt",
+        selectedAccount: null,
+        selectedAuthMode: "chatgpt",
+        upstreamKind: "chatgpt",
+        errorPayload: logged.errorPayload,
+      };
+    }
+
+    const buffered = await readBufferedJsonPayload(upstream);
     return {
       statusCode: upstream.status,
-      responseBytes: shouldStream
-        ? await writeUpstreamResponse(options.response, upstream)
-        : writeJson(
-            options.response,
-            upstream.ok ? 200 : upstream.status,
-            await readResponsesPayload(upstream),
-          ),
+      responseBytes: writeJson(
+        options.response,
+        upstream.ok ? 200 : upstream.status,
+        buffered.payload,
+      ),
       authKind: "direct-chatgpt",
       selectedAccount: null,
       selectedAuthMode: "chatgpt",
       upstreamKind: "chatgpt",
+      errorPayload: upstream.ok
+        ? undefined
+        : buildRequestResponseLogPayload({
+            request: options.request,
+            bodyText: options.bodyText,
+            upstreamUrl,
+            upstreamRequestHeaders: outgoingHeaders,
+            responseHeaders: buffered.responseHeaders,
+            responseBodyText: buffered.bodyText,
+          }),
     };
   }
 
   if (options.pathname === "/v1/chat/completions") {
     const body = parseJsonBody(options.bodyText);
+    const upstreamUrl = `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`;
+    const outgoingHeaders = requestHeadersToFetchHeaders(options.request);
     upstream = await options.fetchImpl(
-      `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+      upstreamUrl,
       {
         method: "POST",
-        headers: requestHeadersToFetchHeaders(options.request),
+        headers: outgoingHeaders,
         body: JSON.stringify(chatCompletionToResponsesBody(body)),
       },
     );
-    responsePayload = await readResponsesPayload(upstream);
+    const buffered = await readBufferedJsonPayload(upstream);
+    responsePayload = buffered.payload;
     return {
       statusCode: upstream.ok ? 200 : upstream.status,
       responseBytes: writeJson(
@@ -1531,20 +1699,33 @@ async function forwardOpenAIViaDirectChatGPT(options: {
       selectedAccount: null,
       selectedAuthMode: "chatgpt",
       upstreamKind: "chatgpt",
+      errorPayload: upstream.ok
+        ? undefined
+        : buildRequestResponseLogPayload({
+            request: options.request,
+            bodyText: options.bodyText,
+            upstreamUrl,
+            upstreamRequestHeaders: outgoingHeaders,
+            responseHeaders: buffered.responseHeaders,
+            responseBodyText: buffered.bodyText,
+          }),
     };
   }
 
   if (options.pathname === "/v1/completions") {
     const body = parseJsonBody(options.bodyText);
+    const upstreamUrl = `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`;
+    const outgoingHeaders = requestHeadersToFetchHeaders(options.request);
     upstream = await options.fetchImpl(
-      `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+      upstreamUrl,
       {
         method: "POST",
-        headers: requestHeadersToFetchHeaders(options.request),
+        headers: outgoingHeaders,
         body: JSON.stringify(completionToResponsesBody(body)),
       },
     );
-    responsePayload = await readResponsesPayload(upstream);
+    const buffered = await readBufferedJsonPayload(upstream);
+    responsePayload = buffered.payload;
     return {
       statusCode: upstream.ok ? 200 : upstream.status,
       responseBytes: writeJson(
@@ -1556,6 +1737,16 @@ async function forwardOpenAIViaDirectChatGPT(options: {
       selectedAccount: null,
       selectedAuthMode: "chatgpt",
       upstreamKind: "chatgpt",
+      errorPayload: upstream.ok
+        ? undefined
+        : buildRequestResponseLogPayload({
+            request: options.request,
+            bodyText: options.bodyText,
+            upstreamUrl,
+            upstreamRequestHeaders: outgoingHeaders,
+            responseHeaders: buffered.responseHeaders,
+            responseBodyText: buffered.bodyText,
+          }),
     };
   }
 
@@ -1594,6 +1785,8 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
   replayedFromAccountNames: string[];
   selected: ProxyUpstreamAccount;
   upstreamStatus: number;
+  responseHeaders: Record<string, string>;
+  responseBodyText: string;
 }> {
   let selected = options.selected;
   const replayedFromAccountNames: string[] = [];
@@ -1609,7 +1802,8 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
         body: JSON.stringify(options.buildRequestBody(selected)),
       },
     );
-    const payload = await readResponsesPayload(upstream);
+    const buffered = await readBufferedJsonPayload(upstream);
+    const payload = buffered.payload;
     if (!isRetryableQuotaFailure(upstream.status, payload) || replayedFromAccountNames.length >= 1) {
       return {
         payload,
@@ -1617,6 +1811,8 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
         replayedFromAccountNames,
         selected,
         upstreamStatus: upstream.status,
+        responseHeaders: buffered.responseHeaders,
+        responseBodyText: buffered.bodyText,
       };
     }
 
@@ -1628,6 +1824,8 @@ async function fetchSyntheticChatGPTBufferedPayloadWithReplay(options: {
         replayedFromAccountNames,
         selected,
         upstreamStatus: upstream.status,
+        responseHeaders: buffered.responseHeaders,
+        responseBodyText: buffered.bodyText,
       };
     }
 
@@ -1654,21 +1852,32 @@ async function forwardOpenAIWithApiKey(options: {
     ? (options.bodyText.trim() === "" ? {} : parseJsonBody(options.bodyText))
     : {};
   if (!canReplayBufferedRoute || !isBufferedProxyReplayRoute(options.pathname, parsedBody)) {
+    const upstreamUrl = toOpenAIUrl(await readOpenAIBaseUrl(options.selected.account), options.pathname, options.search);
+    const outgoingHeaders = buildApiKeyHeaders(options.request, options.selected);
     const upstream = await options.fetchImpl(
-      toOpenAIUrl(await readOpenAIBaseUrl(options.selected.account), options.pathname, options.search),
+      upstreamUrl,
       fetchInitForRequest(
         options.request,
-        buildApiKeyHeaders(options.request, options.selected),
+        outgoingHeaders,
         options.bodyText,
       ),
     );
+    const logged = await writeUpstreamResponseWithLogging({
+      request: options.request,
+      response: options.response,
+      bodyText: options.bodyText,
+      upstream,
+      upstreamUrl,
+      upstreamRequestHeaders: outgoingHeaders,
+    });
     return {
       statusCode: upstream.status,
-      responseBytes: await writeUpstreamResponse(options.response, upstream),
+      responseBytes: logged.responseBytes,
       authKind: "apikey",
       selectedAccount: options.selected.account.name,
       selectedAuthMode: options.selected.account.auth_mode,
       upstreamKind: "openai",
+      errorPayload: logged.errorPayload,
     };
   }
 
@@ -1677,11 +1886,13 @@ async function forwardOpenAIWithApiKey(options: {
   const attemptedAccountNames = new Set<string>();
   while (true) {
     attemptedAccountNames.add(selected.account.name);
+    const upstreamUrl = toOpenAIUrl(await readOpenAIBaseUrl(selected.account), options.pathname, options.search);
+    const outgoingHeaders = buildApiKeyHeaders(options.request, selected);
     const upstream = await options.fetchImpl(
-      toOpenAIUrl(await readOpenAIBaseUrl(selected.account), options.pathname, options.search),
+      upstreamUrl,
       fetchInitForRequest(
         options.request,
-        buildApiKeyHeaders(options.request, selected),
+        outgoingHeaders,
         options.bodyText,
       ),
     );
@@ -1703,6 +1914,20 @@ async function forwardOpenAIWithApiKey(options: {
           replay_count: replayedFromAccountNames.length,
           replayed_from_account_names: replayedFromAccountNames,
         },
+        errorPayload: upstream.status === 200
+          ? undefined
+          : {
+              ...buildRequestResponseLogPayload({
+                request: options.request,
+                bodyText: options.bodyText,
+                upstreamUrl,
+                upstreamRequestHeaders: outgoingHeaders,
+                responseHeaders: buffered.responseHeaders,
+                responseBodyText: buffered.bodyText,
+              }),
+              replay_count: replayedFromAccountNames.length,
+              replayed_from_account_names: replayedFromAccountNames,
+            },
       };
     }
 
@@ -1748,21 +1973,32 @@ async function forwardOpenAIViaChatGPT(options: {
     const shouldStream = body.stream === true;
     if (shouldStream) {
       const requestBody = maybeInjectFastServiceTier(normalizeResponsesRequestBody(body), options.selected);
+      const upstreamUrl = `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`;
+      const outgoingHeaders = buildChatGPTAuthHeaders(options.request, options.selected);
       const upstream = await options.fetchImpl(
-        `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+        upstreamUrl,
         {
           method: options.request.method ?? "POST",
-          headers: buildChatGPTAuthHeaders(options.request, options.selected),
+          headers: outgoingHeaders,
           body: JSON.stringify(requestBody),
         },
       );
+      const logged = await writeUpstreamResponseWithLogging({
+        request: options.request,
+        response: options.response,
+        bodyText: options.bodyText,
+        upstream,
+        upstreamUrl,
+        upstreamRequestHeaders: outgoingHeaders,
+      });
       return {
         statusCode: upstream.status,
-        responseBytes: await writeUpstreamResponse(options.response, upstream),
+        responseBytes: logged.responseBytes,
         authKind: "synthetic-chatgpt",
         selectedAccount: options.selected.account.name,
         selectedAuthMode: options.selected.account.auth_mode,
         upstreamKind: "chatgpt",
+        errorPayload: logged.errorPayload,
       };
     }
 
@@ -1789,6 +2025,20 @@ async function forwardOpenAIViaChatGPT(options: {
         replay_count: replayed.replayCount,
         replayed_from_account_names: replayed.replayedFromAccountNames,
       },
+      errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
+        ? undefined
+        : {
+            ...buildRequestResponseLogPayload({
+              request: options.request,
+              bodyText: options.bodyText,
+              upstreamUrl: `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+              upstreamRequestHeaders: buildChatGPTAuthHeaders(options.request, replayed.selected),
+              responseHeaders: replayed.responseHeaders,
+              responseBodyText: replayed.responseBodyText,
+            }),
+            replay_count: replayed.replayCount,
+            replayed_from_account_names: replayed.replayedFromAccountNames,
+          },
     };
   }
 
@@ -1818,6 +2068,20 @@ async function forwardOpenAIViaChatGPT(options: {
         replay_count: replayed.replayCount,
         replayed_from_account_names: replayed.replayedFromAccountNames,
       },
+      errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
+        ? undefined
+        : {
+            ...buildRequestResponseLogPayload({
+              request: options.request,
+              bodyText: options.bodyText,
+              upstreamUrl: `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+              upstreamRequestHeaders: buildChatGPTAuthHeaders(options.request, replayed.selected),
+              responseHeaders: replayed.responseHeaders,
+              responseBodyText: replayed.responseBodyText,
+            }),
+            replay_count: replayed.replayCount,
+            replayed_from_account_names: replayed.replayedFromAccountNames,
+          },
     };
   }
 
@@ -1847,17 +2111,37 @@ async function forwardOpenAIViaChatGPT(options: {
         replay_count: replayed.replayCount,
         replayed_from_account_names: replayed.replayedFromAccountNames,
       },
+      errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
+        ? undefined
+        : {
+            ...buildRequestResponseLogPayload({
+              request: options.request,
+              bodyText: options.bodyText,
+              upstreamUrl: `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+              upstreamRequestHeaders: buildChatGPTAuthHeaders(options.request, replayed.selected),
+              responseHeaders: replayed.responseHeaders,
+              responseBodyText: replayed.responseBodyText,
+            }),
+            replay_count: replayed.replayCount,
+            replayed_from_account_names: replayed.replayedFromAccountNames,
+          },
     };
   }
 
   if (options.pathname === "/v1/embeddings") {
+    const errorMessage = "Embeddings require an API-key upstream account.";
     return {
       statusCode: 501,
-      responseBytes: writeError(options.response, 501, "Embeddings require an API-key upstream account."),
+      responseBytes: writeError(options.response, 501, errorMessage),
       authKind: "synthetic-chatgpt",
       selectedAccount: options.selected.account.name,
       selectedAuthMode: options.selected.account.auth_mode,
       upstreamKind: "chatgpt",
+      errorPayload: buildLocalErrorLogPayload({
+        request: options.request,
+        bodyText: options.bodyText,
+        responseBodyText: buildProxyErrorResponseText(errorMessage),
+      }),
     };
   }
 
@@ -1954,13 +2238,19 @@ async function handleOpenAIRoute(options: {
 
   const selectedChatGPT = await selectProxyAccount(options.store, "chatgpt");
   if (!selectedChatGPT) {
+    const errorMessage = "No eligible upstream account is available for proxy API.";
     return {
       statusCode: 503,
-      responseBytes: writeError(options.response, 503, "No eligible upstream account is available for proxy API."),
+      responseBytes: writeError(options.response, 503, errorMessage),
       authKind: "unknown",
       selectedAccount: null,
       selectedAuthMode: null,
       upstreamKind: "chatgpt",
+      errorPayload: buildLocalErrorLogPayload({
+        request: options.request,
+        bodyText: options.bodyText,
+        responseBodyText: buildProxyErrorResponseText(errorMessage),
+      }),
     };
   }
   return await forwardOpenAIViaChatGPT({ ...options, store: options.store, selected: selectedChatGPT });
@@ -1985,12 +2275,14 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
   };
 
   const server = createServer((request, response) => {
+    let requestBodyText = "";
     void (async () => {
       const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? `${host}:${port}`}`);
       const pathname = normalizePathname(requestUrl.pathname);
       const bodyText = await readRequestBody(request);
+      requestBodyText = bodyText;
       const startedAt = Date.now();
-      const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const requestId = createRequestId();
       options.debugLog?.(`proxy: ${request.method ?? "GET"} ${pathname}`);
       const requestBytes = Buffer.byteLength(bodyText);
 
@@ -2174,17 +2466,23 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
           fetchImpl,
         });
       } else {
+        const errorMessage = `Unknown proxy route: ${pathname}`;
         forwardResult = {
           statusCode: 404,
-          responseBytes: writeError(response, 404, `Unknown proxy route: ${pathname}`),
+          responseBytes: writeError(response, 404, errorMessage),
           authKind: "unknown",
           selectedAccount: null,
           selectedAuthMode: null,
           upstreamKind: pathname.startsWith("/v1/") ? "openai" : "chatgpt",
+          errorPayload: buildLocalErrorLogPayload({
+            request,
+            bodyText,
+            responseBodyText: buildProxyErrorResponseText(errorMessage),
+          }),
         };
       }
 
-      await options.requestLogger?.({
+      const baseRequestPayload = {
         ts: new Date().toISOString(),
         request_id: requestId,
         pid: process.pid,
@@ -2200,16 +2498,27 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         request_bytes: requestBytes,
         response_bytes: forwardResult.responseBytes,
         synthetic_usage: forwardResult.syntheticUsage ?? false,
+      };
+      await options.requestLogger?.({
+        ...baseRequestPayload,
         ...(forwardResult.diagnostic ?? {}),
       });
+      if (shouldRecordErrorPayload(forwardResult.statusCode) && forwardResult.errorPayload) {
+        await options.errorRequestLogger?.({
+          ...baseRequestPayload,
+          ...(forwardResult.errorPayload ?? {}),
+        });
+      }
     })().catch((error) => {
-      options.debugLog?.(`proxy: request failed: ${(error as Error).message}`);
+      const errorMessage = (error as Error).message;
+      options.debugLog?.(`proxy: request failed: ${errorMessage}`);
+      const responseBodyText = response.headersSent ? "" : buildProxyErrorResponseText(errorMessage);
       const responseBytes = !response.headersSent
-        ? writeError(response, 500, (error as Error).message)
+        ? writeError(response, 500, errorMessage)
         : 0;
-      void options.requestLogger?.({
+      const basePayload = {
         ts: new Date().toISOString(),
-        request_id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        request_id: createRequestId(),
         pid: process.pid,
         method: request.method ?? "GET",
         route: normalizePathname(new URL(request.url ?? "/", `http://${request.headers.host ?? `${host}:${port}`}`).pathname),
@@ -2223,7 +2532,17 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         request_bytes: 0,
         response_bytes: responseBytes,
         error_class: (error as Error).name,
-        error_message_short: (error as Error).message,
+        error_message_short: errorMessage,
+      };
+      void options.requestLogger?.(basePayload);
+      void options.errorRequestLogger?.({
+        ...basePayload,
+        ...buildLocalErrorLogPayload({
+          request,
+          bodyText: requestBodyText,
+          responseBodyText,
+          responseHeaders: response.headersSent ? null : { "content-type": "application/json" },
+        }),
       });
       if (!response.headersSent) {
         return;

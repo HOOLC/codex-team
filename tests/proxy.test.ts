@@ -1790,6 +1790,185 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy writes non-200 OpenAI traffic to the separate error logger without changing metadata logs", async () => {
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const errorLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async (url, init) => {
+          expect(String(url)).toBe("https://api.openai.com/v1/responses/compact");
+          expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sk-direct");
+          return jsonResponse({
+            error: {
+              message: "compact unsupported",
+            },
+          }, 501);
+        },
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        errorRequestLogger: async (payload) => {
+          errorLogs.push(payload);
+        },
+      });
+
+      try {
+        const response = await fetch(`${server.baseUrl}/v1/responses/compact`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer sk-direct",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            id: "resp_123",
+          }),
+        });
+
+        expect(response.status).toBe(501);
+        expect(await response.json()).toMatchObject({
+          error: {
+            message: "compact unsupported",
+          },
+        });
+        expect(requestLogs).toHaveLength(1);
+        expect(requestLogs[0]).toMatchObject({
+          route: "/v1/responses/compact",
+          surface: "v1",
+          auth_kind: "apikey",
+          selected_account_name: null,
+          selected_auth_mode: null,
+          upstream_kind: "openai",
+          status_code: 501,
+        });
+        expect("request_body_text" in requestLogs[0]).toBe(false);
+
+        expect(errorLogs).toHaveLength(1);
+        expect(errorLogs[0]).toMatchObject({
+          route: "/v1/responses/compact",
+          status_code: 501,
+          request_headers: {
+            authorization: "Bearer sk-direct",
+            "content-type": "application/json",
+          },
+          request_body_text: "{\"id\":\"resp_123\"}",
+          upstream_url: "https://api.openai.com/v1/responses/compact",
+          upstream_request_headers: {
+            authorization: "Bearer sk-direct",
+            "content-type": "application/json",
+          },
+          response_headers: {
+            "content-type": "application/json",
+          },
+        });
+        expect(
+          JSON.parse(String(errorLogs[0]?.response_body_text ?? "{}")) as Record<string, unknown>,
+        ).toMatchObject({
+          error: {
+            message: "compact unsupported",
+          },
+        });
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("proxy writes local non-200 proxy errors to the separate error logger", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await writeQuotaMeta(
+        (await store.getManagedAccount("alpha")).metaPath,
+        { status: "ok", plan_type: "plus", five_hour_used: 20, one_week_used: 40 },
+      );
+
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const errorLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        fetchImpl: async () => {
+          throw new Error("embeddings should not hit upstream");
+        },
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        errorRequestLogger: async (payload) => {
+          errorLogs.push(payload);
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const response = await fetch(`${server.baseUrl}/v1/embeddings`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          body: JSON.stringify({
+            model: "text-embedding-3-small",
+            input: "hello",
+          }),
+        });
+
+        expect(response.status).toBe(501);
+        expect(await response.json()).toMatchObject({
+          error: {
+            message: "Embeddings require an API-key upstream account.",
+          },
+        });
+        expect(requestLogs).toHaveLength(1);
+        expect(requestLogs[0]).toMatchObject({
+          route: "/v1/embeddings",
+          auth_kind: "synthetic-chatgpt",
+          selected_account_name: "alpha",
+          selected_auth_mode: "chatgpt",
+          status_code: 501,
+        });
+        expect(errorLogs).toHaveLength(1);
+        expect(errorLogs[0]).toMatchObject({
+          route: "/v1/embeddings",
+          auth_kind: "synthetic-chatgpt",
+          selected_account_name: "alpha",
+          selected_auth_mode: "chatgpt",
+          status_code: 501,
+          request_body_text: "{\"model\":\"text-embedding-3-small\",\"input\":\"hello\"}",
+          upstream_url: null,
+          upstream_request_headers: null,
+          response_headers: {
+            "content-type": "application/json",
+          },
+        });
+        expect(
+          JSON.parse(String(errorLogs[0]?.response_body_text ?? "{}")) as Record<string, unknown>,
+        ).toMatchObject({
+          error: {
+            message: "Embeddings require an API-key upstream account.",
+          },
+        });
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("proxy leaves service_tier unchanged for available synthetic ChatGPT turns", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");

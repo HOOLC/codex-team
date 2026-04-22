@@ -12,7 +12,13 @@ import {
 } from "../proxy/constants.js";
 import { ensureSyntheticProxyRuntimeActive } from "../proxy/runtime.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
-import { appendEventLog, appendProxyRequestLog, buildEventPayload, shortenErrorMessage } from "../logging.js";
+import {
+  appendEventLog,
+  appendProxyErrorLog,
+  appendProxyRequestLog,
+  buildEventPayload,
+  shortenErrorMessage,
+} from "../logging.js";
 import { drainDaemonRequests } from "../daemon/requests.js";
 import { defaultDaemonState } from "../daemon/state.js";
 import { runManagedDesktopWatchSession } from "../watch/session.js";
@@ -383,6 +389,9 @@ async function runDaemonService(options: {
         debugLog,
         requestLogger: async (payload) => {
           await appendProxyRequestLog(codexTeamDir, payload);
+        },
+        errorRequestLogger: async (payload) => {
+          await appendProxyErrorLog(codexTeamDir, payload);
         },
       });
       cleanupTasks.push(async () => {

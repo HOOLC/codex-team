@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
+import packageJson from "../package.json";
 
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -9,6 +10,9 @@ const EVENT_LOG_RETENTION_DAYS = 30;
 const EVENT_LOG_MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const PROXY_REQUEST_LOG_RETENTION_DAYS = 7;
 const PROXY_REQUEST_LOG_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
+const PROXY_ERROR_LOG_RETENTION_DAYS = 7;
+const PROXY_ERROR_LOG_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
+const CODEXM_VERSION = packageJson.version;
 
 const cleanupTracker = new Map<string, number>();
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
@@ -24,6 +28,13 @@ async function ensureLogsDir(logsDir: string): Promise<void> {
 async function appendJsonLine(path: string, payload: unknown): Promise<void> {
   await ensureLogsDir(dirname(path));
   await appendFile(path, `${JSON.stringify(payload)}\n`, { mode: FILE_MODE });
+}
+
+function withCodexmVersion(payload: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...payload,
+    codexm_version: CODEXM_VERSION,
+  };
 }
 
 async function listMatchingFiles(logsDir: string, prefix: string): Promise<string[]> {
@@ -117,6 +128,12 @@ async function maybeCleanupStructuredLogs(codexTeamDir: string): Promise<void> {
     retentionDays: PROXY_REQUEST_LOG_RETENTION_DAYS,
     maxTotalBytes: PROXY_REQUEST_LOG_MAX_TOTAL_BYTES,
   });
+  await cleanupPrefixedLogs({
+    logsDir,
+    prefix: "proxy-errors-",
+    retentionDays: PROXY_ERROR_LOG_RETENTION_DAYS,
+    maxTotalBytes: PROXY_ERROR_LOG_MAX_TOTAL_BYTES,
+  });
 }
 
 export function resolveLogsDir(codexTeamDir: string): string {
@@ -133,6 +150,10 @@ export function resolveEventLogPath(codexTeamDir: string, date = new Date()): st
 
 export function resolveProxyRequestLogPath(codexTeamDir: string, date = new Date()): string {
   return join(resolveLogsDir(codexTeamDir), `proxy-requests-${toDateKey(date)}.jsonl`);
+}
+
+export function resolveProxyErrorLogPath(codexTeamDir: string, date = new Date()): string {
+  return join(resolveLogsDir(codexTeamDir), `proxy-errors-${toDateKey(date)}.jsonl`);
 }
 
 export async function rotatePlainLog(logPath: string): Promise<void> {
@@ -170,7 +191,7 @@ export async function rotatePlainLog(logPath: string): Promise<void> {
 
 export async function appendEventLog(codexTeamDir: string, payload: Record<string, unknown>): Promise<void> {
   await maybeCleanupStructuredLogs(codexTeamDir);
-  await appendJsonLine(resolveEventLogPath(codexTeamDir), payload);
+  await appendJsonLine(resolveEventLogPath(codexTeamDir), withCodexmVersion(payload));
 }
 
 export async function appendProxyRequestLog(
@@ -178,7 +199,15 @@ export async function appendProxyRequestLog(
   payload: Record<string, unknown>,
 ): Promise<void> {
   await maybeCleanupStructuredLogs(codexTeamDir);
-  await appendJsonLine(resolveProxyRequestLogPath(codexTeamDir), payload);
+  await appendJsonLine(resolveProxyRequestLogPath(codexTeamDir), withCodexmVersion(payload));
+}
+
+export async function appendProxyErrorLog(
+  codexTeamDir: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await maybeCleanupStructuredLogs(codexTeamDir);
+  await appendJsonLine(resolveProxyErrorLogPath(codexTeamDir), withCodexmVersion(payload));
 }
 
 export function buildEventPayload(options: {
@@ -201,6 +230,7 @@ export function buildEventPayload(options: {
     trigger: options.trigger ?? "cli",
     op_id: options.opId ?? null,
     pid: process.pid,
+    codexm_version: CODEXM_VERSION,
     ...(typeof options.durationMs === "number" ? { duration_ms: options.durationMs } : {}),
     ...(options.result ? { result: options.result } : {}),
     ...(options.errorCode ? { error_code: options.errorCode } : {}),

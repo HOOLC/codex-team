@@ -112,6 +112,8 @@ codexm proxy disable
 
 `codexm daemon start`、`codexm daemon restart`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力。`codexm daemon stop` 现在只停止进程，但会保留最近一次 daemon feature 状态，所以后续再执行 `codexm daemon start` 或 `codexm daemon restart` 时，会恢复之前的 `autoswitch` 和 `proxy` 开关。`codexm proxy enable [--force]` 和 `codexm proxy disable [--force]` 现在会复用和 `switch` 一样的 managed Desktop reload 路径；如果当前没有 codexm 托管的 Desktop，会只给出 `--force` 无意义的 warning。`codexm switch <name>` 不会再隐式关闭 proxy：它会更新保存的 direct 当前账号，而这个账号会在 proxy 保持启用时立刻成为当前上游，直到后续某次 autoswitch 因耗尽信号再把它切走。只有在你明确想恢复 direct auth/config 并清掉 proxy 配置时，才使用 `codexm proxy disable`。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
 
+非 `200` 的 proxy 请求还会额外写入独立的 `proxy-errors-YYYY-MM-DD.jsonl`，里面保留 req/resp 诊断信息。结构化 JSONL 日志都会带 `codexm_version`，方便排查旧运行版本和当前代码的差异。
+
 当默认 `14555` 端口被占用时，可以设置 `CODEXM_PROXY_PORT=<port>` 统一覆盖共享 proxy/daemon 的监听端口。`codexm daemon start`、`codexm autoswitch enable`、`codexm launch`、`codexm proxy enable` 和 `codexm run --proxy` 都会读取这个环境变量；如果显式传了 `--port`，仍然以命令行参数为准。
 
 ## 输出示例
