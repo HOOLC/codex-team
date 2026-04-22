@@ -39,7 +39,7 @@ npm install -g codex-team
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.21
+  --ref v0.0.22
 ```
 
 请把 `--ref` 替换成与你安装的 CLI 版本对应的 release tag。如果你的 coding agent 会缓存已安装 skill，安装后请重启或重新加载它。
@@ -101,7 +101,7 @@ codexm run -- --model o3
 
 `codexm launch` 会启动 Desktop 并确保共享 baseline daemon 已运行，`codexm autoswitch enable` 会开启 daemon 驱动的后台自动切号。`codexm watch` 仍然是前台 quota 监控命令；`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
 
-### 4. 使用本地 proxy 账号
+### 4. 启用 proxy 模式
 
 ```bash
 codexm proxy enable
@@ -110,15 +110,11 @@ codexm run --proxy -- --model o3
 codexm proxy disable
 ```
 
-`codexm proxy enable` 会在 `127.0.0.1` 启动本地 daemon，写入一个 synthetic ChatGPT auth（`proxy@codexm.local`），并把本地 auth/config 指向这个 proxy。live config 现在会保留内建 provider 身份，只改 transport URL，所以 proxy 和非 proxy 会继续共用同一份 live thread 历史。dashboard 和 `codexm list` 总会显示一个 `proxy` 行，它的 quota 来自真实池：统计未保护、允许 auto-switch 且仍保留 quota 快照的账号，包含已经耗尽的账号，这样整个池子都归零时也会继续显示 `0%`，不会直接消失；受保护账号不计入。Codex Desktop 里的 usage/account 读取现在也会保持在同一个 synthetic proxy 账号视图上，不再因为最近一次命中的真实 upstream 而漂移。它的 `5H`、`1W` 和 `ETA` 都基于这个池子的真实剩余额度聚合，消耗速率仍然沿用用户全局 watch 历史。启用 proxy 模式后，这个 synthetic 账号会成为默认 `CODEX_HOME` 的当前账号。proxy 选路现在会默认跟随保存的 direct/current upstream，而不是每条消息都重新排序：`codexm switch <name>` 会立刻成为 proxy 的当前上游；如果后续 daemon 因 quota 耗尽信号触发 autoswitch，proxy 才会再跟着切走。现在只要 daemon autoswitch 开启，proxy 在遇到可重试的 quota exhausted 失败且尚未向下游输出内容时，还会自动重放一次 `/v1/responses` websocket turn 或一条缓冲型 REST 请求（`stream: false` 的 `/v1/responses`、`/v1/chat/completions`、`/v1/completions`，以及对应的 API-key 非流式路径）；一旦已经开始向下游输出，就保留原始失败，不做半途续流。只要 proxy 已启用，`codexm list` 和 dashboard 里当前配置的真实 upstream 行都会带上 `@` 标记，即使还没有新的 proxy 请求发出。最近一次真实 proxy 命中仍会单独显示为 `Proxy last upstream: ...` 和 dashboard 详情区里的 `Last upstream: ...`。这个 daemon 同时提供 OpenAI-compatible `/v1` 接口，覆盖 Responses、Chat Completions、旧版 Completions、Models，以及有 API-key 上游时的 Embeddings。
+`codexm proxy enable` 会启动或复用共享本地 daemon，写入一个 synthetic `proxy` 账号（`proxy@codexm.local`），并把默认 runtime 的 transport URL 指到本地 proxy。live proxy 和非 proxy 会继续保留同一个 provider 身份，因此仍然共用同一份 live thread 历史。`codexm list` 和 dashboard 总会显示 synthetic `proxy` 行；proxy 开启时，`@` 表示当前配置的真实 upstream。
 
-对 `codexm` 托管的 proxy 入口，`codexm proxy enable` 现在会改写 `chatgpt_base_url` 和 `openai_base_url`，但不再改 live provider 身份；`codexm run --proxy` 仍然会在隔离 overlay 里使用自定义 provider。这样 live proxy CLI/Desktop 能继续共用历史，而隔离 proxy run 仍然可以把实时 Responses websocket turn 和 REST 请求都强制导向本地 proxy。这个保证仍然只覆盖 `codexm` 托管入口；如果你绕过 `codexm` 直接裸跑 `codex` 或 Desktop，则不保证一定经过本地 proxy。
+proxy 保持启用时，`codexm switch <name>` 会切换当前真实 upstream；如果后续 daemon 因 quota 耗尽触发 autoswitch，proxy 才会再跟着切走。在真正向下游输出内容之前，proxy 还可以自动重放一次可重试的 quota exhausted websocket turn 或缓冲型 REST 请求。这个共享 daemon 同时也暴露常用的 OpenAI-compatible `/v1` 接口。
 
-`codexm daemon start`、`codexm daemon restart`、`codexm autoswitch enable` 和 `codexm proxy enable` 操作的是同一个共享后台 daemon。用 `codexm daemon status` 查看当前启用能力。`codexm daemon stop` 现在只停止进程，但会保留最近一次 daemon feature 状态，所以后续再执行 `codexm daemon start` 或 `codexm daemon restart` 时，会恢复之前的 `autoswitch` 和 `proxy` 开关。对于 `codexm` 托管的 Desktop，会话内的账号刷新仍然走 `codexm switch <name>` 触发的 Codex app server restart；默认会等当前 thread 跑完，`--force` 才会跳过等待。proxy 路由切换是另一条链路：managed Desktop 的 `/backend-api/*` 请求会使用 `codexm launch` 启动 Desktop 时注入的 `CODEX_API_BASE_URL`，所以如果 Desktop 已经在跑，再执行 `codexm proxy enable/disable` 不会伪装成热更新成功，而是明确提示你重新执行一次 `codexm launch`，让新的 proxy 或 direct backend 路由在 Desktop 侧生效。这个提示在可探测时会优先读取当前 Desktop 进程启动时的代理环境变量，而不是只信任保存下来的 state。`codexm switch <name>` 不会再隐式关闭 proxy：它会更新保存的 direct 当前账号，而这个账号会在 proxy 保持启用时立刻成为当前上游，直到后续某次 autoswitch 因耗尽信号再把它切走。只有在你明确想恢复 direct auth/config 并清掉本地 proxy 接线时，才使用 `codexm proxy disable`；它不会关闭已经在监听的共享 proxy daemon，所以其他工具仍可继续走这个端口，除非你显式执行 `codexm proxy stop` 或 `codexm daemon stop`。daemon 会把可读的 `daemon.log`、结构化的每日事件日志，以及每日 proxy 请求元信息日志写到 `~/.codex-team/logs/`。
-
-非 `200` 的 proxy 请求还会额外写入独立的 `proxy-errors-YYYY-MM-DD.jsonl`，里面保留 req/resp 诊断信息。结构化 JSONL 日志始终带 `codexm_version`，proxy request log 还会记录 `service_tier`（`default` / `priority`）；设置 `CODEXM_LOG_BUILD_META=1` 后，还会额外记录本地构建元信息，例如 `codexm_git_sha`，方便排查 daemon 和 proxy 实际跑的是哪份代码。
-
-当默认 `14555` 端口被占用时，可以设置 `CODEXM_PROXY_PORT=<port>` 统一覆盖共享 proxy/daemon 的监听端口。`codexm daemon start`、`codexm autoswitch enable`、`codexm launch`、`codexm proxy enable` 和 `codexm run --proxy` 都会读取这个环境变量；如果显式传了 `--port`，仍然以命令行参数为准。
+`codexm proxy enable` 作用于默认 runtime，`codexm run --proxy` 则用于不想写入 live `CODEX_HOME` 的隔离 overlay。共享 daemon 状态可以通过 `codexm daemon status` 查看。更详细的 quota 聚合、重放规则、Desktop 行为、端口和日志说明见 [proxy.md](./skills/codexm-usage/references/proxy.md) 和 [managed-desktop.md](./skills/codexm-usage/references/managed-desktop.md)。
 
 ## 输出示例
 
@@ -193,7 +189,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。完整键位、输入框状态、确认框和 proxy 行行为统一整理在 [dashboard.md](./skills/codexm-usage/references/dashboard.md)。高频差异点是：synthetic `proxy` 行上按 `Enter` 会切换 proxy，当前 `proxy` 行上按 `f` 会重新应用 proxy 接线，`Esc` 负责回退或取消，`q` 只在主列表直接退出，而 `e` 只导出当前选中的托管 direct 账号。dashboard 列表里的 `Next reset` 现在和 `codexm list` 使用同一套格式，最后 1 小时内会显示带颜色的分钟倒计时，详情区会固定展示 `5H reset` 和 `1W reset`。如果刷新 quota 失败，`codexm list` 和 dashboard 会回退到该账号最近一次成功的 quota 快照，最多保留 7 天，并把该行标成 `[stale]`。synthetic `proxy` 行即使在 proxy 关闭时也会保留；proxy 已启用时，`@` 标记表示当前配置的真实 upstream，`Last upstream: ...` 只会在最近一次真实 proxy 命中已知时出现。`[autoswitch:on|off]` 状态位仍然只表示 daemon/watch 的开关，不表示 proxy 内部上游选路。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；这条前台 watch 会跟随当前 autoswitch 开关，并在退出时停止。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。完整键位、输入框控制、确认框和 proxy 行行为见 [dashboard.md](./skills/codexm-usage/references/dashboard.md)。高频动作只有几项：`Enter` 切换选中的 direct 账号，或在 `proxy` 行上切换 proxy；`f` reload 当前选中项；`e` 导出当前选中的托管 direct 账号；`Esc` 回退；`q` 从主列表退出。dashboard 会复用 `codexm list` 的 reset 倒计时格式，以及 `@` / `Last upstream` / `[stale]` 这些展示规则。
 
 ## 什么时候该用哪个命令？
 

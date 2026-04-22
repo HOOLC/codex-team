@@ -3,6 +3,7 @@
 - Open the interactive account dashboard in a TTY: `codexm`
 - Open the dashboard explicitly, optionally with an initial filter: `codexm tui [query]`
 - Dashboard keymap and prompt behavior: [dashboard.md](dashboard.md)
+- Proxy mode guide: [proxy.md](proxy.md)
 - Check the current local auth and best-effort live usage: `codexm current`
 - Force a fresh current-account usage refresh: `codexm current --refresh`
 - Diagnose local auth, direct runtime, and managed Desktop consistency: `codexm doctor`
@@ -41,6 +42,7 @@
 
 - Use plain `codexm` in a TTY when the user wants the interactive dashboard immediately; use `codexm tui [query]` when they want an explicit dashboard entry or an initial filter.
 - Use [dashboard.md](dashboard.md) when the user is asking what the interactive dashboard hotkeys, prompts, confirmations, or proxy-row actions do.
+- Use [proxy.md](proxy.md) when the user is asking how proxy mode routes traffic, picks the current upstream, replays quota-exhausted requests, or differs from `run --proxy`.
 - Use `codexm current` when the user does not know what auth is active now or wants a quick current-usage summary.
 - Use `codexm current --refresh` when the user explicitly wants the latest usage data instead of best-effort live data.
 - Use `codexm doctor` when the user is debugging mismatches between local auth, direct runtime reads, and managed Desktop state.
