@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { appendFile, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import packageJson from "../package.json";
@@ -13,9 +14,13 @@ const PROXY_REQUEST_LOG_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
 const PROXY_ERROR_LOG_RETENTION_DAYS = 7;
 const PROXY_ERROR_LOG_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
 const CODEXM_VERSION = packageJson.version;
+const CODEXM_LOG_BUILD_META_ENV = "CODEXM_LOG_BUILD_META";
+const CODEXM_GIT_SHA_ENV = "CODEXM_GIT_SHA";
 
 const cleanupTracker = new Map<string, number>();
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+let cachedBuildMetadataKey: string | null = null;
+let cachedBuildMetadata: Record<string, unknown> = {};
 
 function toDateKey(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -30,10 +35,54 @@ async function appendJsonLine(path: string, payload: unknown): Promise<void> {
   await appendFile(path, `${JSON.stringify(payload)}\n`, { mode: FILE_MODE });
 }
 
+function shouldLogBuildMetadata(): boolean {
+  const raw = process.env[CODEXM_LOG_BUILD_META_ENV];
+  return raw ? /^(1|true|yes|on)$/iu.test(raw) : false;
+}
+
+function resolveGitSha(): string | null {
+  const override = process.env[CODEXM_GIT_SHA_ENV]?.trim();
+  if (override) {
+    return override;
+  }
+
+  try {
+    const repoRoot = new URL("..", import.meta.url);
+    const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return sha === "" ? null : sha;
+  } catch {
+    return null;
+  }
+}
+
+function resolveCodexmBuildMetadata(): Record<string, unknown> {
+  if (!shouldLogBuildMetadata()) {
+    return {};
+  }
+
+  const gitSha = resolveGitSha();
+  return gitSha ? { codexm_git_sha: gitSha } : {};
+}
+
+function getCodexmBuildMetadata(): Record<string, unknown> {
+  const cacheKey = `${process.env[CODEXM_LOG_BUILD_META_ENV] ?? ""}\u0000${process.env[CODEXM_GIT_SHA_ENV] ?? ""}`;
+  if (cacheKey === cachedBuildMetadataKey) {
+    return cachedBuildMetadata;
+  }
+  cachedBuildMetadataKey = cacheKey;
+  cachedBuildMetadata = resolveCodexmBuildMetadata();
+  return cachedBuildMetadata;
+}
+
 function withCodexmVersion(payload: Record<string, unknown>): Record<string, unknown> {
   return {
     ...payload,
     codexm_version: CODEXM_VERSION,
+    ...getCodexmBuildMetadata(),
   };
 }
 
@@ -231,6 +280,7 @@ export function buildEventPayload(options: {
     op_id: options.opId ?? null,
     pid: process.pid,
     codexm_version: CODEXM_VERSION,
+    ...getCodexmBuildMetadata(),
     ...(typeof options.durationMs === "number" ? { duration_ms: options.durationMs } : {}),
     ...(options.result ? { result: options.result } : {}),
     ...(options.errorCode ? { error_code: options.errorCode } : {}),
