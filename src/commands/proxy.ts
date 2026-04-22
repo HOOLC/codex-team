@@ -137,6 +137,100 @@ export async function disableProxyMode(options: {
   };
 }
 
+export async function enableProxyModeWithDesktopRefresh(options: {
+  store: AccountStore;
+  proxyProcessManager: ProxyProcessManager;
+  desktopLauncher: CodexDesktopLauncher;
+  force: boolean;
+  debug: boolean;
+  host?: string;
+  port?: number;
+  signal?: AbortSignal;
+  statusStream?: NodeJS.WriteStream;
+  onStatusMessage?: (message: string) => void;
+  managedDesktopWaitStatusDelayMs: number;
+  managedDesktopWaitStatusIntervalMs: number;
+}): Promise<{
+  state: ProxyProcessState;
+  warnings: string[];
+  desktopForceWarning: string | null;
+}> {
+  const warnings: string[] = [];
+  const state = await enableProxyMode({
+    store: options.store,
+    proxyProcessManager: options.proxyProcessManager,
+    host: options.host,
+    port: options.port,
+    debug: options.debug,
+  });
+  const refreshOutcome = await refreshManagedDesktopAfterSwitch(
+    warnings,
+    options.desktopLauncher,
+    {
+      force: options.force,
+      desiredDesktopApiBaseUrl: state.base_url,
+      signal: options.signal,
+      statusStream: options.statusStream,
+      onStatusMessage: options.onStatusMessage,
+      statusDelayMs: options.managedDesktopWaitStatusDelayMs,
+      statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+    },
+  );
+
+  return {
+    state,
+    warnings,
+    desktopForceWarning: options.force && refreshOutcome === "none"
+      ? PROXY_FORCE_WARNING
+      : null,
+  };
+}
+
+export async function disableProxyModeWithDesktopRefresh(options: {
+  store: AccountStore;
+  proxyProcessManager: ProxyProcessManager;
+  desktopLauncher: CodexDesktopLauncher;
+  force: boolean;
+  signal?: AbortSignal;
+  statusStream?: NodeJS.WriteStream;
+  onStatusMessage?: (message: string) => void;
+  managedDesktopWaitStatusDelayMs: number;
+  managedDesktopWaitStatusIntervalMs: number;
+}): Promise<{
+  restored: { auth_restored: boolean; config_restored: boolean };
+  stopped: { running: boolean; state: ProxyProcessState | null; stopped: boolean };
+  warnings: string[];
+  desktopForceWarning: string | null;
+}> {
+  const warnings: string[] = [];
+  const { restored, stopped } = await disableProxyMode({
+    store: options.store,
+    proxyProcessManager: options.proxyProcessManager,
+  });
+  const refreshOutcome = await refreshManagedDesktopAfterSwitch(
+    warnings,
+    options.desktopLauncher,
+    {
+      force: options.force,
+      desiredDesktopApiBaseUrl: null,
+      signal: options.signal,
+      statusStream: options.statusStream,
+      onStatusMessage: options.onStatusMessage,
+      statusDelayMs: options.managedDesktopWaitStatusDelayMs,
+      statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+    },
+  );
+
+  return {
+    restored,
+    stopped,
+    warnings,
+    desktopForceWarning: options.force && refreshOutcome === "none"
+      ? PROXY_FORCE_WARNING
+      : null,
+  };
+}
+
 export async function handleProxyCommand(options: {
   store: AccountStore;
   positionals: string[];
@@ -222,31 +316,25 @@ export async function handleProxyCommand(options: {
     }
 
     let enabledState: ProxyProcessState;
-    const warnings: string[] = [];
+    let warnings: string[] = [];
     let desktopForceWarning: string | null = null;
     try {
-      enabledState = await enableProxyMode({
+      const enabled = await enableProxyModeWithDesktopRefresh({
         store: options.store,
         proxyProcessManager: options.proxyProcessManager,
+        desktopLauncher: options.desktopLauncher,
+        force,
         host,
         port,
         debug: options.debug,
+        signal: options.interruptSignal,
+        statusStream: options.stderr,
+        managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
+        managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
       });
-      const refreshOutcome = await refreshManagedDesktopAfterSwitch(
-        warnings,
-        options.desktopLauncher,
-        {
-          force,
-          desiredDesktopApiBaseUrl: enabledState.base_url,
-          signal: options.interruptSignal,
-          statusStream: options.stderr,
-          statusDelayMs: options.managedDesktopWaitStatusDelayMs,
-          statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
-        },
-      );
-      if (force && refreshOutcome === "none") {
-        desktopForceWarning = PROXY_FORCE_WARNING;
-      }
+      enabledState = enabled.state;
+      warnings = enabled.warnings;
+      desktopForceWarning = enabled.desktopForceWarning;
     } catch (error) {
       await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
         component: "proxy",
@@ -295,28 +383,23 @@ export async function handleProxyCommand(options: {
 
     let restored: { auth_restored: boolean; config_restored: boolean };
     let stopped: { running: boolean; state: ProxyProcessState | null; stopped: boolean };
-    const warnings: string[] = [];
+    let warnings: string[] = [];
     let desktopForceWarning: string | null = null;
     try {
-      ({ restored, stopped } = await disableProxyMode({
+      const disabled = await disableProxyModeWithDesktopRefresh({
         store: options.store,
         proxyProcessManager: options.proxyProcessManager,
-      }));
-      const refreshOutcome = await refreshManagedDesktopAfterSwitch(
-        warnings,
-        options.desktopLauncher,
-        {
-          force,
-          desiredDesktopApiBaseUrl: null,
-          signal: options.interruptSignal,
-          statusStream: options.stderr,
-          statusDelayMs: options.managedDesktopWaitStatusDelayMs,
-          statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
-        },
-      );
-      if (force && refreshOutcome === "none") {
-        desktopForceWarning = PROXY_FORCE_WARNING;
-      }
+        desktopLauncher: options.desktopLauncher,
+        force,
+        signal: options.interruptSignal,
+        statusStream: options.stderr,
+        managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
+        managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
+      });
+      restored = disabled.restored;
+      stopped = disabled.stopped;
+      warnings = disabled.warnings;
+      desktopForceWarning = disabled.desktopForceWarning;
     } finally {
       await lock.release();
     }

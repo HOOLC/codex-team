@@ -2,9 +2,8 @@ import type { AccountStore } from "../account-store/index.js";
 import { writeJson } from "../cli/output.js";
 import { getUsage } from "../cli/spec.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
-import { defaultDaemonState } from "../daemon/state.js";
+import { buildDaemonConfig, defaultDaemonState } from "../daemon/state.js";
 import { appendEventLog, buildEventPayload } from "../logging.js";
-import { proxyBackendBaseUrl, proxyOpenAIBaseUrl, resolveProxyPort } from "../proxy/constants.js";
 
 function describeStatus(status: {
   enabled: boolean;
@@ -44,22 +43,17 @@ export async function enableAutoswitchMode(options: {
 }): Promise<Awaited<ReturnType<DaemonProcessManager["ensureConfig"]>>> {
   const currentState = (await options.daemonProcessManager.getStatus()).state
     ?? defaultDaemonState(options.store.paths.codexTeamDir);
-  const host = currentState.host;
-  const port = resolveProxyPort({
-    env: process.env,
-    fallback: currentState.port,
-  });
-  const result = await options.daemonProcessManager.ensureConfig({
-    stayalive: true,
-    watch: true,
-    auto_switch: true,
-    proxy: currentState.proxy,
-    host,
-    port,
-    debug: currentState.debug || options.debug,
-    base_url: proxyBackendBaseUrl(host, port),
-    openai_base_url: proxyOpenAIBaseUrl(host, port),
-  });
+  const result = await options.daemonProcessManager.ensureConfig(buildDaemonConfig({
+    currentState,
+    codexTeamDir: options.store.paths.codexTeamDir,
+    debug: options.debug,
+    overrides: {
+      stayalive: true,
+      watch: true,
+      auto_switch: true,
+      proxy: currentState.proxy,
+    },
+  }));
   await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
     component: "watch",
     event: "daemon.feature_state_changed",
@@ -82,17 +76,17 @@ export async function disableAutoswitchMode(options: {
     return null;
   }
 
-  const result = await options.daemonProcessManager.ensureConfig({
-    stayalive: true,
-    watch: false,
-    auto_switch: false,
-    proxy: status.state.proxy,
-    host: status.state.host,
-    port: status.state.port,
-    debug: status.state.debug,
-    base_url: status.state.base_url,
-    openai_base_url: status.state.openai_base_url,
-  });
+  const result = await options.daemonProcessManager.ensureConfig(buildDaemonConfig({
+    currentState: status.state,
+    codexTeamDir: options.store.paths.codexTeamDir,
+    overrides: {
+      stayalive: true,
+      watch: false,
+      auto_switch: false,
+      proxy: status.state.proxy,
+      host: status.state.host,
+    },
+  }));
   await appendEventLog(options.store.paths.codexTeamDir, buildEventPayload({
     component: "watch",
     event: "daemon.feature_state_changed",

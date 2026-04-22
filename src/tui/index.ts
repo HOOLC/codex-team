@@ -1821,8 +1821,11 @@ export async function runAccountDashboardTui(
   const runSimpleAction = async (
     label: string,
     run: () => Promise<AccountDashboardActionResult>,
+    options?: {
+      busyLabel?: string;
+    },
   ) => {
-    busyMessage = label;
+    busyMessage = options?.busyLabel ?? label;
     render();
 
     try {
@@ -2256,8 +2259,12 @@ export async function runAccountDashboardTui(
           return;
         }
         promptState = null;
-        await runSimpleAction("Export", async () =>
-          await options.exportAccount!(source, value),
+        await runSimpleAction(
+          "Export",
+          async () => await options.exportAccount!(source, value),
+          {
+            busyLabel: "Exporting share bundle...",
+          },
         );
         return;
       }
@@ -2309,8 +2316,12 @@ export async function runAccountDashboardTui(
 
       const bundlePath = promptState.bundlePath;
       promptState = null;
-      await runSimpleAction("Import", async () =>
-        await options.importBundle!(bundlePath, localName),
+      await runSimpleAction(
+        "Import",
+        async () => await options.importBundle!(bundlePath, localName),
+        {
+          busyLabel: "Importing share bundle...",
+        },
       );
       detailOverride = null;
       return;
@@ -2389,8 +2400,12 @@ export async function runAccountDashboardTui(
     const confirmKind = activeConfirm.kind;
     confirmState = null;
     if (confirmKind === "delete") {
-      await runSimpleAction("Delete", async () =>
-        await options.deleteAccount!(accountName),
+      await runSimpleAction(
+        "Delete",
+        async () => await options.deleteAccount!(accountName),
+        {
+          busyLabel: `Deleting "${accountName}"...`,
+        },
       );
       return;
     }
@@ -2568,7 +2583,13 @@ export async function runAccountDashboardTui(
         return;
       }
 
-      await runSimpleAction("Autoswitch", async () => await options.toggleAutoswitch!());
+      await runSimpleAction(
+        "Autoswitch",
+        async () => await options.toggleAutoswitch!(),
+        {
+          busyLabel: "Updating autoswitch mode...",
+        },
+      );
       return;
     }
     if (event.value === "e") {
@@ -2628,7 +2649,9 @@ export async function runAccountDashboardTui(
 
       const currentUndo = undoAction;
       undoAction = null;
-      await runSimpleAction("Undo", async () => await currentUndo.run());
+      await runSimpleAction("Undo", async () => await currentUndo.run(), {
+        busyLabel: "Undoing last action...",
+      });
       return;
     }
     if (event.value === "p") {
@@ -2655,11 +2678,17 @@ export async function runAccountDashboardTui(
         return;
       }
 
-      await runSimpleAction("Protection", async () =>
-        await options.toggleAutoSwitchProtection!(
-          selected.name,
-          !selected.autoSwitchEligible,
-        ));
+      await runSimpleAction(
+        "Protection",
+        async () =>
+          await options.toggleAutoSwitchProtection!(
+            selected.name,
+            !selected.autoSwitchEligible,
+          ),
+        {
+          busyLabel: `Updating auto-switch protection for "${selected.name}"...`,
+        },
+      );
       return;
     }
     if (event.value === "f") {

@@ -78,7 +78,10 @@ import {
   importShareBundleForTui,
   previewShareBundleForTui,
 } from "./tui-share.js";
-import { disableProxyMode, enableProxyMode } from "./proxy.js";
+import {
+  disableProxyModeWithDesktopRefresh,
+  enableProxyModeWithDesktopRefresh,
+} from "./proxy.js";
 import {
   disableAutoswitchMode,
   enableAutoswitchMode,
@@ -86,7 +89,6 @@ import {
 } from "./autoswitch.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { triggerDaemonAuthRefresh } from "../daemon/trigger.js";
-import { refreshManagedDesktopAfterSwitch } from "../switching.js";
 import {
   createAccountDashboardExternalUpdateFeed,
   resolveCurrentManagedAccountLabel,
@@ -720,58 +722,48 @@ export async function handleTuiCommand(options: {
           try {
             if (name === PROXY_ACCOUNT_NAME) {
               const proxyCurrentlyActive = currentManagedAccountRef.value === PROXY_ACCOUNT_NAME;
-              const warnings: string[] = [];
               if (proxyCurrentlyActive && !switchOptions.force) {
-                await disableProxyMode({
+                const disabled = await disableProxyModeWithDesktopRefresh({
                   store: options.store,
                   proxyProcessManager,
+                  desktopLauncher: options.desktopLauncher,
+                  force: false,
+                  signal: switchOptions.signal ?? options.interruptSignal,
+                  statusStream: silentStatusStream,
+                  onStatusMessage: switchOptions.onStatusMessage,
+                  managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
+                  managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
                 });
-                await refreshManagedDesktopAfterSwitch(
-                  warnings,
-                  options.desktopLauncher,
-                  {
-                    force: false,
-                    desiredDesktopApiBaseUrl: null,
-                    signal: switchOptions.signal ?? options.interruptSignal,
-                    statusStream: silentStatusStream,
-                    onStatusMessage: switchOptions.onStatusMessage,
-                    statusDelayMs: options.managedDesktopWaitStatusDelayMs,
-                    statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
-                  },
-                );
                 currentManagedAccountRef.value = await resolveCurrentManagedAccountLabel(options.store);
                 return {
                   statusMessage: "Disabled proxy.",
                   currentName: currentManagedAccountRef.value,
                   proxyUpstreamName: null,
                   proxyLastUpstreamLabel: null,
-                  warningMessages: warnings,
+                  warningMessages: disabled.warnings,
                 };
               }
 
-              const enabledProxyState = await enableProxyMode({
+              const enabledProxy = await enableProxyModeWithDesktopRefresh({
                 store: options.store,
                 proxyProcessManager,
+                desktopLauncher: options.desktopLauncher,
+                force: switchOptions.force,
                 debug: false,
+                signal: switchOptions.signal ?? options.interruptSignal,
+                statusStream: silentStatusStream,
+                onStatusMessage: switchOptions.onStatusMessage,
+                managedDesktopWaitStatusDelayMs: options.managedDesktopWaitStatusDelayMs,
+                managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
               });
-              await refreshManagedDesktopAfterSwitch(
-                  warnings,
-                  options.desktopLauncher,
-                  {
-                    force: switchOptions.force,
-                    desiredDesktopApiBaseUrl: enabledProxyState.base_url,
-                    signal: switchOptions.signal ?? options.interruptSignal,
-                    statusStream: silentStatusStream,
-                    onStatusMessage: switchOptions.onStatusMessage,
-                    statusDelayMs: options.managedDesktopWaitStatusDelayMs,
-                  statusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
-                },
-              );
               currentManagedAccountRef.value = PROXY_ACCOUNT_NAME;
               return {
                 statusMessage: proxyCurrentlyActive ? "Reloaded proxy." : 'Switched to "proxy".',
                 currentName: PROXY_ACCOUNT_NAME,
-                warningMessages: warnings,
+                warningMessages: [
+                  ...enabledProxy.warnings,
+                  ...(enabledProxy.desktopForceWarning ? [enabledProxy.desktopForceWarning] : []),
+                ],
               };
             }
             const { result, desktopForceWarning, proxyRetained } = await performManualSwitch({

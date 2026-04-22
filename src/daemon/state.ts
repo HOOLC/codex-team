@@ -29,6 +29,36 @@ export interface DaemonStatus {
   state: DaemonProcessState | null;
 }
 
+export function buildDaemonConfig(options: {
+  codexTeamDir: string;
+  currentState?: DaemonProcessState | null;
+  portOverride?: string;
+  debug?: boolean;
+  overrides?: Partial<Pick<DaemonProcessState, "stayalive" | "watch" | "auto_switch" | "proxy" | "host">>;
+}): Omit<DaemonProcessState, "pid" | "started_at" | "log_path"> {
+  const currentState = options.currentState ?? defaultDaemonState(options.codexTeamDir);
+  const host = options.overrides?.host ?? currentState.host;
+  const port = resolveProxyPort({
+    env: process.env,
+    cliValue: options.portOverride,
+    fallback: currentState.port,
+  });
+  const watch = options.overrides?.watch ?? currentState.watch;
+  const requestedAutoSwitch = options.overrides?.auto_switch ?? currentState.auto_switch;
+
+  return {
+    stayalive: options.overrides?.stayalive ?? currentState.stayalive,
+    watch,
+    auto_switch: watch ? requestedAutoSwitch : false,
+    proxy: options.overrides?.proxy ?? currentState.proxy,
+    host,
+    port,
+    base_url: proxyBackendBaseUrl(host, port),
+    openai_base_url: proxyOpenAIBaseUrl(host, port),
+    debug: currentState.debug || options.debug === true,
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

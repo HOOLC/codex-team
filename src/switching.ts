@@ -48,6 +48,11 @@ export interface SwitchLockOwner {
   started_at: string;
 }
 
+export interface ProxyPreservedSwitchResult {
+  result: Awaited<ReturnType<AccountStore["switchAccount"]>>;
+  proxyRetained: boolean;
+}
+
 type SwitchLockOwnerReadResult =
   | { status: "ok"; owner: SwitchLockOwner }
   | { status: "missing" | "invalid"; owner: null };
@@ -68,6 +73,28 @@ export function stripManagedDesktopWarning(warnings: string[]): string[] {
       warning !== NON_MANAGED_DESKTOP_WARNING_PREFIX &&
       warning !== NON_MANAGED_DESKTOP_FOLLOWUP_WARNING,
   );
+}
+
+export async function switchAccountPreservingProxyRuntime(options: {
+  store: AccountStore;
+  name: string;
+  restoreFailureMessage: string;
+}): Promise<ProxyPreservedSwitchResult> {
+  const proxyModeWasActive = await isSyntheticProxyRuntimeActive(options.store);
+  const result = await options.store.switchAccount(options.name);
+  let proxyRetained = false;
+
+  if (proxyModeWasActive) {
+    proxyRetained = await restoreSyntheticProxyRuntime(options.store);
+    if (!proxyRetained) {
+      result.warnings.push(options.restoreFailureMessage);
+    }
+  }
+
+  return {
+    result,
+    proxyRetained,
+  };
 }
 
 function startManagedDesktopWaitReporter(
@@ -391,16 +418,12 @@ export async function performAutoSwitch(
 
   let result: Awaited<ReturnType<AccountStore["switchAccount"]>>;
   try {
-    const proxyModeWasActive = await isSyntheticProxyRuntimeActive(store);
-    result = await store.switchAccount(selected.name);
-    if (proxyModeWasActive) {
-      const proxyRetained = await restoreSyntheticProxyRuntime(store);
-      if (!proxyRetained) {
-        result.warnings.push(
-          `Proxy was active, but codexm could not restore the proxy runtime after auto-switching to "${selected.name}". Direct auth is active locally.`,
-        );
-      }
-    }
+    ({ result } = await switchAccountPreservingProxyRuntime({
+      store,
+      name: selected.name,
+      restoreFailureMessage:
+        `Proxy was active, but codexm could not restore the proxy runtime after auto-switching to "${selected.name}". Direct auth is active locally.`,
+    }));
   } catch (error) {
     await appendEventLog(store.paths.codexTeamDir, buildEventPayload({
       component: "switch",

@@ -12,17 +12,15 @@ import {
 } from "../desktop/managed-state.js";
 import { getPlatform } from "../platform.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
-import { defaultDaemonState } from "../daemon/state.js";
-import { proxyBackendBaseUrl, proxyOpenAIBaseUrl, resolveProxyPort } from "../proxy/constants.js";
+import { buildDaemonConfig, defaultDaemonState } from "../daemon/state.js";
 import {
-  isSyntheticProxyRuntimeActive,
   resolveManagedDesktopApiBaseUrl,
-  restoreSyntheticProxyRuntime,
 } from "../proxy/runtime.js";
 import {
   describeBusySwitchLock,
   resolveManagedAccountByName,
   selectAutoSwitchAccount,
+  switchAccountPreservingProxyRuntime,
   stripManagedDesktopWarning,
   tryAcquireSwitchLock,
 } from "../switching.js";
@@ -127,7 +125,6 @@ export async function handleLaunchCommand(options: {
 
   let switchedAccount: Awaited<ReturnType<AccountStore["switchAccount"]>>["account"] | null = null;
   let switchBackupPath: string | null = null;
-  let proxyModeWasActive = false;
   const requestedTargetName = name;
 
   if (auto || requestedTargetName) {
@@ -146,17 +143,15 @@ export async function handleLaunchCommand(options: {
       }
       const currentStatus = await store.getCurrentStatus();
       if (targetName && !currentStatus.matched_accounts.includes(targetName)) {
-        proxyModeWasActive = await isSyntheticProxyRuntimeActive(store);
-        const switchResult = await store.switchAccount(targetName);
+        const switchResult = (await switchAccountPreservingProxyRuntime({
+          store,
+          name: targetName,
+          restoreFailureMessage:
+            `Proxy was active, but codexm could not restore the proxy runtime after switching "${targetName}". Direct auth is active locally.`,
+        })).result;
         warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
         switchedAccount = switchResult.account;
         switchBackupPath = switchResult.backup_path;
-        if (proxyModeWasActive && !await restoreSyntheticProxyRuntime(store)) {
-          warnings.push(
-            `Proxy was active, but codexm could not restore the proxy runtime after switching "${targetName}". Direct auth is active locally.`,
-          );
-          proxyModeWasActive = false;
-        }
         debugLog(`launch: pre-switched account=${switchResult.account.name}`);
       } else if (targetName) {
         switchedAccount = await resolveManagedAccountByName(store, targetName);
@@ -210,22 +205,14 @@ export async function handleLaunchCommand(options: {
 
   const currentDaemonState = (await daemonProcessManager.getStatus()).state
     ?? defaultDaemonState(store.paths.codexTeamDir);
-  const daemonHost = currentDaemonState.host;
-  const daemonPort = resolveProxyPort({
-    env: process.env,
-    fallback: currentDaemonState.port,
-  });
-  const daemonResult = await daemonProcessManager.ensureConfig({
-    stayalive: true,
-    watch: currentDaemonState.watch,
-    auto_switch: currentDaemonState.watch ? currentDaemonState.auto_switch : false,
-    proxy: currentDaemonState.proxy,
-    host: daemonHost,
-    port: daemonPort,
-    debug: currentDaemonState.debug || debug,
-    base_url: proxyBackendBaseUrl(daemonHost, daemonPort),
-    openai_base_url: proxyOpenAIBaseUrl(daemonHost, daemonPort),
-  });
+  const daemonResult = await daemonProcessManager.ensureConfig(buildDaemonConfig({
+    currentState: currentDaemonState,
+    codexTeamDir: store.paths.codexTeamDir,
+    debug,
+    overrides: {
+      stayalive: true,
+    },
+  }));
 
   if (json) {
     writeJson(streams.stdout, {

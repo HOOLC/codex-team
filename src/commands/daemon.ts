@@ -6,8 +6,6 @@ import { AUTH_REFRESH_SWEEP_INTERVAL_MS, runAuthRefreshSweep } from "../auth-ref
 import { startProxyServer } from "../proxy/server.js";
 import {
   DEFAULT_PROXY_HOST,
-  proxyBackendBaseUrl,
-  proxyOpenAIBaseUrl,
   resolveProxyPort,
 } from "../proxy/constants.js";
 import { ensureSyntheticProxyRuntimeActive } from "../proxy/runtime.js";
@@ -20,7 +18,7 @@ import {
   shortenErrorMessage,
 } from "../logging.js";
 import { drainDaemonRequests } from "../daemon/requests.js";
-import { defaultDaemonState } from "../daemon/state.js";
+import { buildDaemonConfig } from "../daemon/state.js";
 import { runManagedDesktopWatchSession } from "../watch/session.js";
 import { refreshManagedDesktopAfterSwitch } from "../switching.js";
 
@@ -178,33 +176,6 @@ async function runDaemonProxyRuntimeLoop(options: {
     }
     await delay(intervalMs, options.signal);
   }
-}
-
-function buildDaemonStartConfig(options: {
-  currentState: Awaited<ReturnType<DaemonProcessManager["getStatus"]>>["state"];
-  codexTeamDir: string;
-  portOverride?: string;
-  debug: boolean;
-}) {
-  const currentState = options.currentState ?? defaultDaemonState(options.codexTeamDir);
-  const host = currentState.host;
-  const port = resolveProxyPort({
-    env: process.env,
-    cliValue: options.portOverride,
-    fallback: currentState.port,
-  });
-
-  return {
-    stayalive: true,
-    watch: currentState.watch,
-    auto_switch: currentState.watch ? currentState.auto_switch : false,
-    proxy: currentState.proxy,
-    host,
-    port,
-    debug: currentState.debug || options.debug,
-    base_url: proxyBackendBaseUrl(host, port),
-    openai_base_url: proxyOpenAIBaseUrl(host, port),
-  };
 }
 
 async function runDaemonWatchLoop(options: {
@@ -517,11 +488,14 @@ export async function handleDaemonCommand(options: {
 
   if (subcommand === "start") {
     const currentState = (await options.daemonProcessManager.getStatus()).state;
-    const result = await options.daemonProcessManager.ensureConfig(buildDaemonStartConfig({
+    const result = await options.daemonProcessManager.ensureConfig(buildDaemonConfig({
       currentState,
       codexTeamDir: options.store.paths.codexTeamDir,
       portOverride: options.optionValues.get("--port"),
       debug: options.debug,
+      overrides: {
+        stayalive: true,
+      },
     }));
     const payload = {
       ok: true,
@@ -548,11 +522,14 @@ export async function handleDaemonCommand(options: {
     if (status.running) {
       await options.daemonProcessManager.stop();
     }
-    const result = await options.daemonProcessManager.ensureConfig(buildDaemonStartConfig({
+    const result = await options.daemonProcessManager.ensureConfig(buildDaemonConfig({
       currentState: status.state,
       codexTeamDir: options.store.paths.codexTeamDir,
       portOverride: options.optionValues.get("--port"),
       debug: options.debug,
+      overrides: {
+        stayalive: true,
+      },
     }));
     const payload = {
       ok: true,

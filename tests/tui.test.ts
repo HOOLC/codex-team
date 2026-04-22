@@ -583,6 +583,10 @@ describe("Account Dashboard TUI", () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();
     const toggleCalls: Array<{ name: string; eligible: boolean }> = [];
+    let releaseToggle!: () => void;
+    const toggleGate = new Promise<void>((resolve) => {
+      releaseToggle = resolve;
+    });
 
     const tuiPromise = runAccountDashboardTui({
       stdin,
@@ -595,6 +599,7 @@ describe("Account Dashboard TUI", () => {
       }),
       toggleAutoSwitchProtection: async (name, eligible) => {
         toggleCalls.push({ name, eligible });
+        await toggleGate;
         return {
           statusMessage: eligible
             ? `Removed auto-switch protection from "${name}".`
@@ -611,7 +616,15 @@ describe("Account Dashboard TUI", () => {
     await flushLoop();
     await flushLoop();
 
+    expect(latestDashboardFrame(stdout.read())).toContain(
+      'Updating auto-switch protection for "beta"...',
+    );
     expect(toggleCalls).toEqual([{ name: "beta", eligible: true }]);
+
+    releaseToggle();
+    await flushLoop();
+    await flushLoop();
+
     expect(latestDashboardFrame(stdout.read())).toContain(
       'Removed auto-switch protection from "beta".',
     );

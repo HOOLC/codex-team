@@ -1,12 +1,8 @@
-import { readFile } from "node:fs/promises";
 import { stdin as defaultStdin, stdout as defaultStdout, stderr as defaultStderr } from "node:process";
 import packageJson from "../package.json";
 
 import {
-  getSnapshotAccountId,
-  getSnapshotEmail,
   maskAccountId,
-  parseAuthSnapshot,
 } from "./auth-snapshot.js";
 import {
   AccountStore,
@@ -88,10 +84,13 @@ import {
   runCodexWithAutoRestart,
 } from "./codex-cli-runner.js";
 import {
-  prepareIsolatedCodexRun,
-  prepareIsolatedProxyRun,
   startIsolatedQuotaHistorySampler,
 } from "./run/isolated-runtime.js";
+import {
+  runDirectCodexSession,
+  runIsolatedAccountCodexSession,
+  runIsolatedProxyCodexSession,
+} from "./run/codex-session.js";
 import {
   createPlatformDesktopLauncher,
 } from "./platform-desktop-adapter.js";
@@ -131,24 +130,6 @@ function createDebugLogger(
   return (message: string) => {
     stream.write(`[debug] ${message}\n`);
   };
-}
-
-async function readCurrentRunAccountMetadata(
-  store: AccountStore,
-): Promise<{ accountId: string | null; email: string | null }> {
-  try {
-    const rawAuth = await readFile(store.paths.currentAuthPath, "utf8");
-    const snapshot = parseAuthSnapshot(rawAuth);
-    return {
-      accountId: getSnapshotAccountId(snapshot) || null,
-      email: getSnapshotEmail(snapshot) ?? null,
-    };
-  } catch {
-    return {
-      accountId: null,
-      email: null,
-    };
-  }
 }
 
 const DEFAULT_MANAGED_DESKTOP_WAIT_STATUS_DELAY_MS = 1_000;
@@ -708,45 +689,30 @@ export async function runCli(
                   port: resolveProxyPort(),
                   debug,
                 });
-          const preparedRun = await prepareIsolatedProxyRun({
+          streams.stderr.write(
+            `[codexm run] Starting codex in isolated proxy mode through ${proxyState.base_url}...\n`,
+          );
+          if (codexArgs.length > 0) {
+            streams.stderr.write(
+              `[codexm run] codex args: ${codexArgs.join(" ")}\n`,
+            );
+          }
+          streams.stderr.write(
+            `[codexm run] CODEX_HOME is isolated for this process. It will not write local threads into the live runtime.\n\n`,
+          );
+          const result = await runIsolatedProxyCodexSession({
             backendBaseUrl: proxyState.base_url,
             openAIBaseUrl: proxyState.openai_base_url,
-            baseEnv: process.env,
             store,
+            runCodexCli,
+            codexArgs,
+            debugLog,
+            stderr: streams.stderr,
+            signal: interruptSignal,
           });
-
-          try {
-            streams.stderr.write(
-              `[codexm run] Starting codex in isolated proxy mode through ${proxyState.base_url}...\n`,
-            );
-            if (codexArgs.length > 0) {
-              streams.stderr.write(
-                `[codexm run] codex args: ${codexArgs.join(" ")}\n`,
-              );
-            }
-            streams.stderr.write(
-              `[codexm run] CODEX_HOME is isolated for this process. It will not write local threads into the live runtime.\n\n`,
-            );
-            const result = await runCodexCli({
-              codexArgs,
-              accountId: preparedRun.account.account_id,
-              email: preparedRun.account.email,
-              authFilePath: preparedRun.authFilePath,
-              sessionsDirPath: preparedRun.sessionsDirPath,
-              env: preparedRun.env,
-              disableAuthWatch: true,
-              registerProcess: false,
-              debugLog,
-              stderr: streams.stderr,
-            });
-            return result.exitCode;
-          } finally {
-            await preparedRun.cleanup();
-          }
+          return result.exitCode;
         }
         if (!isolatedAccountName) {
-          const currentAccount = await readCurrentRunAccountMetadata(store);
-
           streams.stderr.write(
             `[codexm run] Starting codex with auto-restart on auth changes...
 `,
@@ -763,12 +729,13 @@ export async function runCli(
 `,
           );
 
-          const result = await runCodexCli({
+          const result = await runDirectCodexSession({
+            store,
+            runCodexCli,
             codexArgs,
-            accountId: currentAccount.accountId,
-            email: currentAccount.email,
             debugLog,
             stderr: streams.stderr,
+            signal: interruptSignal,
           });
 
           if (result.restartCount > 0) {
@@ -781,54 +748,34 @@ export async function runCli(
           return result.exitCode;
         }
 
-        const preparedRun = await prepareIsolatedCodexRun({
-          accountName: isolatedAccountName,
-          baseEnv: process.env,
-          store,
-        });
-        const sampler = startIsolatedQuotaHistorySamplerImpl({
-          account: preparedRun.account,
-          codexHomeEnv: preparedRun.env,
-          pollIntervalMs: watchQuotaMinReadIntervalMs,
-          scopeId: preparedRun.runId,
-          store,
-          debugLog,
-        });
-
-        try {
+        streams.stderr.write(
+          `[codexm run] Starting codex in isolated mode with saved snapshot "${isolatedAccountName}"...
+`,
+        );
+        if (codexArgs.length > 0) {
           streams.stderr.write(
-            `[codexm run] Starting codex in isolated mode with saved snapshot "${preparedRun.account.name}"...
+            `[codexm run] codex args: ${codexArgs.join(" ")}
 `,
           );
-          if (codexArgs.length > 0) {
-            streams.stderr.write(
-              `[codexm run] codex args: ${codexArgs.join(" ")}
-`,
-            );
-          }
-          streams.stderr.write(
-            `[codexm run] CODEX_HOME is isolated for this process. It will not follow codexm switch/watch restarts.
-
-`,
-          );
-
-          const result = await runCodexCli({
-            codexArgs,
-            accountId: preparedRun.account.account_id,
-            email: preparedRun.account.email ?? null,
-            authFilePath: preparedRun.authFilePath,
-            sessionsDirPath: preparedRun.sessionsDirPath,
-            env: preparedRun.env,
-            disableAuthWatch: true,
-            registerProcess: false,
-            debugLog,
-            stderr: streams.stderr,
-          });
-          return result.exitCode;
-        } finally {
-          await sampler.stop();
-          await preparedRun.cleanup();
         }
+        streams.stderr.write(
+          `[codexm run] CODEX_HOME is isolated for this process. It will not follow codexm switch/watch restarts.
+
+`,
+        );
+
+        const result = await runIsolatedAccountCodexSession({
+          accountName: isolatedAccountName,
+          store,
+          runCodexCli,
+          codexArgs,
+          debugLog,
+          stderr: streams.stderr,
+          signal: interruptSignal,
+          pollIntervalMs: watchQuotaMinReadIntervalMs,
+          startIsolatedQuotaHistorySamplerImpl,
+        });
+        return result.exitCode;
       }
 
 

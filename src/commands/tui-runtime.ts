@@ -4,11 +4,11 @@ import { basename, dirname } from "node:path";
 import { type AccountStore } from "../account-store/index.js";
 import type { DaemonProcessManager } from "../daemon/process.js";
 import { type CodexDesktopLauncher } from "../desktop/launcher.js";
+import { startIsolatedQuotaHistorySampler, type PreparedIsolatedCodexRun } from "../run/isolated-runtime.js";
 import {
-  prepareIsolatedCodexRun,
-  startIsolatedQuotaHistorySampler,
-  type PreparedIsolatedCodexRun,
-} from "../run/isolated-runtime.js";
+  runDirectCodexSession,
+  runIsolatedAccountCodexSession,
+} from "../run/codex-session.js";
 import {
   createWatchLeaseManager,
   type WatchLeaseManager,
@@ -476,11 +476,10 @@ export async function runDashboardCodexSession(options: {
   stderr: NodeJS.WriteStream;
   signal?: AbortSignal;
 }): Promise<number> {
-  const currentStatus = await options.store.getCurrentStatus();
-  return (await options.runCodexCli({
+  return (await runDirectCodexSession({
+    store: options.store,
+    runCodexCli: options.runCodexCli,
     codexArgs: [],
-    accountId: currentStatus.account_id,
-    email: null,
     debugLog: options.debugLog,
     stderr: options.stderr,
     signal: options.signal,
@@ -501,40 +500,16 @@ export async function runDashboardIsolatedCodexSession(options: {
   }) => Promise<PreparedIsolatedCodexRun>;
   startIsolatedQuotaHistorySamplerImpl?: typeof startIsolatedQuotaHistorySampler;
 }): Promise<number> {
-  const prepareIsolatedRunImpl =
-    options.prepareIsolatedRunImpl ?? prepareIsolatedCodexRun;
-  const startIsolatedQuotaHistorySamplerImpl =
-    options.startIsolatedQuotaHistorySamplerImpl ?? startIsolatedQuotaHistorySampler;
-  const preparedRun = await prepareIsolatedRunImpl({
+  return (await runIsolatedAccountCodexSession({
     accountName: options.accountName,
-    baseEnv: process.env,
     store: options.store,
-  });
-  const sampler = startIsolatedQuotaHistorySamplerImpl({
-    account: preparedRun.account,
-    codexHomeEnv: preparedRun.env,
-    pollIntervalMs: DEFAULT_TUI_WATCH_QUOTA_MIN_READ_INTERVAL_MS,
-    scopeId: preparedRun.runId,
-    store: options.store,
+    runCodexCli: options.runCodexCli,
+    codexArgs: [],
     debugLog: options.debugLog,
-  });
-
-  try {
-    return (await options.runCodexCli({
-      codexArgs: [],
-      accountId: preparedRun.account.account_id,
-      email: preparedRun.account.email ?? null,
-      authFilePath: preparedRun.authFilePath,
-      sessionsDirPath: preparedRun.sessionsDirPath,
-      env: preparedRun.env,
-      disableAuthWatch: true,
-      registerProcess: false,
-      debugLog: options.debugLog,
-      stderr: options.stderr,
-      signal: options.signal,
-    })).exitCode;
-  } finally {
-    await sampler.stop();
-    await preparedRun.cleanup();
-  }
+    stderr: options.stderr,
+    signal: options.signal,
+    pollIntervalMs: DEFAULT_TUI_WATCH_QUOTA_MIN_READ_INTERVAL_MS,
+    prepareIsolatedRunImpl: options.prepareIsolatedRunImpl,
+    startIsolatedQuotaHistorySamplerImpl: options.startIsolatedQuotaHistorySamplerImpl,
+  })).exitCode;
 }
