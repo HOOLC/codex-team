@@ -34,10 +34,38 @@ describe("watch-output", () => {
         },
       }),
     ).toBe('quota account="alpha" usage=available 5H=80% left 1W=90% left');
+    expect(
+      describeWatchQuotaEvent("proxy", {
+        name: "proxy",
+        account_id: "acct-proxy",
+        user_id: null,
+        identity: "id-proxy",
+        plan_type: "pro",
+        available: "available",
+        refresh_status: "ok",
+        fetched_at: "2026-04-13T00:00:00.000Z",
+        credits_balance: 1,
+        unlimited: false,
+        error_message: null,
+        five_hour: {
+          used_percent: 20,
+          window_seconds: 18_000,
+          reset_at: "2026-04-13T05:00:00.000Z",
+        },
+        one_week: {
+          used_percent: 10,
+          window_seconds: 604_800,
+          reset_at: "2026-04-20T00:00:00.000Z",
+        },
+      }, "plus4"),
+    ).toBe('quota account="proxy" upstream="plus4" usage=available 5H=80% left 1W=90% left');
   });
 
   test("renders unavailable quota lines without percent fields", () => {
     expect(describeWatchQuotaEvent("alpha", null)).toBe('quota account="alpha" status=unavailable');
+    expect(describeWatchQuotaEvent("proxy", null, "plus4")).toBe(
+      'quota account="proxy" upstream="plus4" status=unavailable',
+    );
   });
 
   test("renders reconnect and auto-switch events", () => {

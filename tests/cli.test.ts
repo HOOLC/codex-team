@@ -14,6 +14,7 @@ import {
   textResponse,
   withEnvVar,
   writeCurrentAuth,
+  writeProxyRequestLog,
 } from "./test-helpers.js";
 import {
   captureWritable,
@@ -150,6 +151,79 @@ describe("CLI", () => {
       expect(history).toContain(`\"identity\":\"${account.identity}\"`);
       expect(history).toContain("\"used_percent\":10");
       expect(history).toContain("\"used_percent\":20");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("watch records proxy history with upstream metadata and prints proxy upstream fields", async () => {
+    const homeDir = await createTempHome();
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-watch-proxy-source");
+      await store.saveCurrentAccount("plus-main");
+      await writeProxyRequestLog(homeDir, [{
+        ts: "2026-04-10T10:14:00.000Z",
+        selected_account_name: "plus-main",
+        selected_auth_mode: "chatgpt",
+      }]);
+      await writeFile(
+        store.paths.currentAuthPath,
+        `${JSON.stringify(createSyntheticProxyAuthSnapshot(new Date("2026-04-10T10:00:00.000Z")), null, 2)}\n`,
+      );
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["watch", "--no-auto-switch"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          watchManagedQuotaSignals: async (options) => {
+            await options?.onQuotaSignal?.({
+              requestId: "req-proxy-1",
+              url: "mcp:account/rateLimits/read",
+              status: null,
+              reason: "quota_dirty",
+              bodySnippet: null,
+              shouldAutoSwitch: false,
+              quota: {
+                plan_type: "pro",
+                credits_balance: null,
+                unlimited: false,
+                fetched_at: "2026-04-10T10:15:00.000Z",
+                five_hour: {
+                  used_percent: 20,
+                  window_seconds: 18_000,
+                  reset_at: "2026-04-10T14:00:00.000Z",
+                },
+                one_week: {
+                  used_percent: 6,
+                  window_seconds: 604_800,
+                  reset_at: "2026-04-16T10:00:00.000Z",
+                },
+              },
+            });
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr.read()).toBe("");
+      expect(stdout.read()).toMatch(
+        /\[\d{2}:\d{2}:\d{2}\] quota account="proxy" upstream="plus-main" usage=available 5H=80% left 1W=94% left/,
+      );
+
+      const historyPath = join(homeDir, ".codex-team", "watch-quota-history.jsonl");
+      const history = await readFile(historyPath, "utf8");
+      expect(history).toContain("\"account_name\":\"proxy\"");
+      expect(history).toContain("\"upstream_account_name\":\"plus-main\"");
+      expect(history).toContain("\"account_id\":\"codexm-proxy-account\"");
+      expect(history).toContain("\"identity\":\"codexm-proxy-account:codexm-proxy\"");
     } finally {
       await cleanupTempHome(homeDir);
     }

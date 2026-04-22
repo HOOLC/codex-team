@@ -6,6 +6,12 @@ import {
   convertOneWeekPercentToPlusWeeklyUnits,
   resolveFiveHourToOneWeekRawRatio,
 } from "../plan-quota-profile.js";
+import {
+  PROXY_ACCOUNT_ID,
+  PROXY_ACCOUNT_NAME,
+  PROXY_IDENTITY,
+  PROXY_PLAN_TYPE,
+} from "../proxy/constants.js";
 
 const WATCH_HISTORY_FILE_NAME = "watch-quota-history.jsonl";
 const WATCH_HISTORY_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -27,6 +33,7 @@ export interface WatchHistoryRecord {
   scope_kind: "global" | "isolated";
   scope_id: string | null;
   account_name: string;
+  upstream_account_name?: string | null;
   account_id: string | null;
   identity: string | null;
   plan_type: string | null;
@@ -172,6 +179,10 @@ function parseWatchHistoryRecord(raw: unknown): WatchHistoryRecord | null {
     scope_kind: candidate.scope_kind === "isolated" ? "isolated" : "global",
     scope_id: typeof candidate.scope_id === "string" ? candidate.scope_id : null,
     account_name: candidate.account_name,
+    upstream_account_name:
+      candidate.upstream_account_name === null || typeof candidate.upstream_account_name === "string"
+        ? candidate.upstream_account_name
+        : null,
     account_id:
       candidate.account_id === null || typeof candidate.account_id === "string"
         ? candidate.account_id
@@ -311,6 +322,12 @@ function normalizeRecordInput(raw: unknown): WatchHistoryRecord {
       : candidate.accountId === null || typeof candidate.accountId === "string"
         ? candidate.accountId
         : null;
+  const upstreamAccountName =
+    candidate.upstream_account_name === null || typeof candidate.upstream_account_name === "string"
+      ? candidate.upstream_account_name
+      : candidate.upstreamAccountName === null || typeof candidate.upstreamAccountName === "string"
+        ? candidate.upstreamAccountName
+        : null;
 
   const identity =
     candidate.identity === null || typeof candidate.identity === "string"
@@ -341,6 +358,7 @@ function normalizeRecordInput(raw: unknown): WatchHistoryRecord {
     scope_kind: scopeKind,
     scope_id: scopeId,
     account_name: accountName,
+    ...(upstreamAccountName !== null ? { upstream_account_name: upstreamAccountName } : {}),
     account_id: accountId,
     identity,
     plan_type: planType,
@@ -656,12 +674,25 @@ function buildObservedRatioDiagnostic(
   };
 }
 
+function isSyntheticProObservedRatioRecord(record: WatchHistoryRecord): boolean {
+  if (record.plan_type !== PROXY_PLAN_TYPE) {
+    return false;
+  }
+
+  return (
+    record.account_name === PROXY_ACCOUNT_NAME
+    || record.account_id === PROXY_ACCOUNT_ID
+    || record.identity === PROXY_IDENTITY
+  );
+}
+
 export function computeWatchObservedRatioDiagnostics(
   history: WatchHistoryRecord[],
   now = new Date(),
 ): WatchHistoryObservedRatioDiagnostic[] {
   const recentHistory = history
     .filter((record) => isInsideObservedRatioWindow(record.recorded_at, now))
+    .filter((record) => !isSyntheticProObservedRatioRecord(record))
     .sort((left, right) => Date.parse(left.recorded_at) - Date.parse(right.recorded_at));
 
   const metrics = collectContinuousSegments(recentHistory)
@@ -859,6 +890,7 @@ function hasMeaningfulDifference(left: WatchHistoryRecord, right: WatchHistoryRe
     left.scope_kind !== right.scope_kind ||
     left.scope_id !== right.scope_id ||
     left.account_name !== right.account_name ||
+    (left.upstream_account_name ?? null) !== (right.upstream_account_name ?? null) ||
     left.account_id !== right.account_id ||
     left.identity !== right.identity ||
     left.plan_type !== right.plan_type ||

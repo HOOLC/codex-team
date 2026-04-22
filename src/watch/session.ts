@@ -4,6 +4,12 @@ import type {
   ManagedQuotaSignal,
   ManagedWatchActivitySignal,
 } from "../desktop/launcher.js";
+import {
+  PROXY_ACCOUNT_ID,
+  PROXY_ACCOUNT_NAME,
+  PROXY_IDENTITY,
+} from "../proxy/constants.js";
+import { readLatestProxyUpstreamSelection } from "../proxy/request-log.js";
 import { createCliProcessManager } from "./cli-watcher.js";
 import {
   isTerminalWatchQuota,
@@ -35,25 +41,52 @@ interface CliStreams {
   stderr: NodeJS.WriteStream;
 }
 
-async function resolveWatchHistoryIdentity(
+interface WatchAccountContext {
+  accountName: string;
+  upstreamAccountName: string | null;
+  accountId: string | null;
+  identity: string | null;
+}
+
+async function resolveWatchAccountContext(
   store: AccountStore,
   accountLabel: string,
   debugLog: (message: string) => void,
-): Promise<{ accountId: string; identity: string } | null> {
+): Promise<WatchAccountContext | null> {
   try {
+    const current = await store.getCurrentStatus();
+    if (current.account_id === PROXY_ACCOUNT_ID) {
+      const latestUpstream =
+        accountLabel === "current"
+          ? await readLatestProxyUpstreamSelection(store.paths.codexTeamDir)
+          : null;
+      return {
+        accountName: PROXY_ACCOUNT_NAME,
+        upstreamAccountName:
+          accountLabel !== "current"
+            ? accountLabel
+            : current.matched_accounts.length === 1
+              ? current.matched_accounts[0] ?? null
+              : latestUpstream?.accountName ?? null,
+        accountId: PROXY_ACCOUNT_ID,
+        identity: PROXY_IDENTITY,
+      };
+    }
+
     const { accounts } = await store.listAccounts();
 
     if (accountLabel !== "current") {
       const named = accounts.find((account) => account.name === accountLabel);
       if (named) {
         return {
+          accountName: accountLabel,
+          upstreamAccountName: null,
           accountId: named.account_id,
           identity: named.identity,
         };
       }
     }
 
-    const current = await store.getCurrentStatus();
     if (current.matched_accounts.length !== 1) {
       return null;
     }
@@ -64,11 +97,13 @@ async function resolveWatchHistoryIdentity(
     }
 
     return {
+      accountName: matched.name,
+      upstreamAccountName: null,
       accountId: matched.account_id,
       identity: matched.identity,
     };
   } catch (error) {
-    debugLog(`watch: failed to resolve managed account identity: ${(error as Error).message}`);
+    debugLog(`watch: failed to resolve watch account context: ${(error as Error).message}`);
     return null;
   }
 }
@@ -87,7 +122,7 @@ async function persistWatchHistorySample(options: {
   }
 
   try {
-    const historyIdentity = await resolveWatchHistoryIdentity(
+    const accountContext = await resolveWatchAccountContext(
       options.store,
       options.accountLabel,
       options.debugLog,
@@ -96,9 +131,10 @@ async function persistWatchHistorySample(options: {
       recordedAt: options.quota.fetched_at ?? new Date().toISOString(),
       scopeKind: options.scopeKind,
       scopeId: options.scopeId ?? null,
-      accountName: options.accountLabel,
-      accountId: historyIdentity?.accountId ?? options.quota.account_id,
-      identity: historyIdentity?.identity ?? options.quota.identity,
+      accountName: accountContext?.accountName ?? options.accountLabel,
+      upstreamAccountName: accountContext?.upstreamAccountName ?? null,
+      accountId: accountContext?.accountId ?? options.quota.account_id,
+      identity: accountContext?.identity ?? options.quota.identity,
       planType: options.quota.plan_type,
       available: options.quota.available,
       fiveHour: options.quota.five_hour
@@ -179,8 +215,17 @@ export async function runCliWatchSession(options: {
     requestId: string;
     quota: ReturnType<typeof toCliQuotaSummaryFromRuntimeQuota> | null;
     shouldAutoSwitch: boolean;
-  }) => {
-    const quotaUpdateLine = describeWatchQuotaEvent(cliCurrentAccountLabel, quotaSignal.quota);
+    }) => {
+    const watchAccountContext = await resolveWatchAccountContext(
+      store,
+      cliCurrentAccountLabel,
+      debugLog,
+    );
+    const quotaUpdateLine = describeWatchQuotaEvent(
+      watchAccountContext?.accountName ?? cliCurrentAccountLabel,
+      quotaSignal.quota,
+      watchAccountContext?.upstreamAccountName ?? null,
+    );
     if (quotaUpdateLine !== cliLastQuotaUpdateLine) {
       streams.stdout.write(`${formatWatchLogLine(quotaUpdateLine)}\n`);
       cliLastQuotaUpdateLine = quotaUpdateLine;
@@ -380,6 +425,11 @@ export async function runManagedDesktopWatchSession(options: {
     shouldAutoSwitch: boolean;
   }) => {
     const quota = quotaSignal.quota;
+    const watchAccountContext = await resolveWatchAccountContext(
+      store,
+      currentWatchAccountLabel,
+      debugLog,
+    );
     if (quota) {
       await persistWatchHistorySample({
         store,
@@ -390,7 +440,11 @@ export async function runManagedDesktopWatchSession(options: {
         scopeKind: "global",
       });
     }
-    const quotaUpdateLine = describeWatchQuotaEvent(currentWatchAccountLabel, quota);
+    const quotaUpdateLine = describeWatchQuotaEvent(
+      watchAccountContext?.accountName ?? currentWatchAccountLabel,
+      quota,
+      watchAccountContext?.upstreamAccountName ?? null,
+    );
     if (quotaUpdateLine !== lastQuotaUpdateLine) {
       streams.stdout.write(`${formatWatchLogLine(quotaUpdateLine)}\n`);
       lastQuotaUpdateLine = quotaUpdateLine;

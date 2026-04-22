@@ -99,7 +99,7 @@ codexm watch
 codexm run -- --model o3
 ```
 
-`codexm launch` 会启动 Desktop 并确保共享 baseline daemon 已运行，`codexm autoswitch enable` 会开启 daemon 驱动的后台自动切号。`codexm watch` 仍然是前台 quota 监控命令；`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
+`codexm launch` 会启动 Desktop 并确保共享 baseline daemon 已运行，`codexm autoswitch enable` 会开启 daemon 驱动的后台自动切号。`codexm watch` 仍然是前台 quota 监控命令；proxy 模式开启时，它的结构化 quota 日志会切成 `account="proxy"`，并在已知当前真实后端时附带 `upstream="..."`。`codexm run` 会包装 `codex` CLI，能够在 `~/.codex/auth.json` 被重复原子替换后继续自动重启，并在账号切换触发重启后自动恢复当前交互会话。如果你手动结束 `codexm run` 且当前 session 可恢复，它会打印可直接使用的恢复命令。
 
 ### 4. 启用 proxy 模式
 

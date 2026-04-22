@@ -143,6 +143,43 @@ async function seedRecentRatioWatchHistory(homeDir: string, accountName = "plus-
   );
 }
 
+async function seedRecentRatioWatchHistoryWithSyntheticPro(homeDir: string): Promise<void> {
+  await seedRecentRatioWatchHistory(homeDir);
+
+  const path = join(homeDir, ".codex-team", "watch-quota-history.jsonl");
+  const existing = await readFile(path, "utf8");
+  const now = Date.now();
+  const iso = (offsetMinutes: number) => new Date(now + offsetMinutes * 60_000).toISOString();
+
+  await writeFile(
+    path,
+    `${existing}${[
+      JSON.stringify({
+        recorded_at: iso(-90),
+        account_name: "proxy",
+        account_id: "codexm-proxy-account",
+        identity: "codexm-proxy-account:codexm-proxy",
+        plan_type: "pro",
+        available: "available",
+        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: iso(210) },
+        one_week: { used_percent: 10, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 6) },
+        source: "watch",
+      }),
+      JSON.stringify({
+        recorded_at: iso(-70),
+        account_name: "proxy",
+        account_id: "codexm-proxy-account",
+        identity: "codexm-proxy-account:codexm-proxy",
+        plan_type: "pro",
+        available: "available",
+        five_hour: { used_percent: 40, window_seconds: 18_000, reset_at: iso(211) },
+        one_week: { used_percent: 11, window_seconds: 604_800, reset_at: iso(7 * 24 * 60 + 7) },
+        source: "watch",
+      }),
+    ].join("\n")}\n`,
+  );
+}
+
 function labelCenter(line: string, label: string, fromIndex = 0): number {
   const start = line.indexOf(label, fromIndex);
   expect(start).toBeGreaterThanOrEqual(0);
@@ -2847,6 +2884,61 @@ wire_api = "responses"
       expect(debugOutput).toContain("[debug] list: observed_5h_1w_ratio window=24h plan=plus");
       expect(debugOutput).not.toContain("dimension=bucket");
       expect(debugOutput).not.toContain("[debug] warning: list observed_5h_1w_ratio_mismatch window=24h plan=plus");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list --debug ignores proxy synthetic pro ratio samples", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 9,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 900,
+                reset_at: 1_777_000_000,
+              },
+              secondary_window: {
+                used_percent: 31,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 90_000,
+                reset_at: 1_777_090_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          }),
+      });
+      await seedRecentRatioWatchHistoryWithSyntheticPro(homeDir);
+
+      await writeCurrentAuth(homeDir, "acct-cli-json-eta");
+      await runCli(["save", "plus-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const exitCode = await runCli(["list", "--debug"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const debugOutput = stderr.read();
+      expect(debugOutput).toContain("[debug] list: observed_5h_1w_ratio window=24h plan=plus");
+      expect(debugOutput).not.toContain("[debug] list: observed_5h_1w_ratio window=24h plan=pro");
     } finally {
       await cleanupTempHome(homeDir);
     }

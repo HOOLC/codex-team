@@ -99,7 +99,7 @@ In another terminal:
 codexm run -- --model o3
 ```
 
-`codexm launch` starts Desktop and ensures the shared baseline daemon is running. `codexm autoswitch enable` turns on daemon-backed background auto-switching for managed Desktop and proxy flows. `codexm watch` remains the foreground quota monitor, and `codexm run` wraps the `codex` CLI, survives repeated `~/.codex/auth.json` replacements, and auto-resumes the active interactive session after an account-triggered restart. If you end `codexm run` manually while a session is recoverable, it prints the resume command to use.
+`codexm launch` starts Desktop and ensures the shared baseline daemon is running. `codexm autoswitch enable` turns on daemon-backed background auto-switching for managed Desktop and proxy flows. `codexm watch` remains the foreground quota monitor; when proxy mode is active, its structured quota lines switch to `account="proxy"` and include `upstream="..."` for the current real backend when known. `codexm run` wraps the `codex` CLI, survives repeated `~/.codex/auth.json` replacements, and auto-resumes the active interactive session after an account-triggered restart. If you end `codexm run` manually while a session is recoverable, it prints the resume command to use.
 
 ### 4. Enable proxy mode
 

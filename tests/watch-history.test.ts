@@ -464,6 +464,61 @@ describe("watch history eta", () => {
     expect(diagnostics).toHaveLength(1);
   });
 
+  test("ignores synthetic proxy pro samples in observed ratio diagnostics", () => {
+    const history = [
+      makeRecord("2026-04-13T10:00:00.000Z", {
+        account_name: "proxy",
+        account_id: "codexm-proxy-account",
+        identity: "codexm-proxy-account:codexm-proxy",
+        plan_type: "pro",
+        five_hour: makeWindow(10, "2026-04-13T17:00:00.000Z"),
+        one_week: makeWindow(10, "2026-04-20T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-13T11:00:00.000Z", {
+        account_name: "proxy",
+        account_id: "codexm-proxy-account",
+        identity: "codexm-proxy-account:codexm-proxy",
+        plan_type: "pro",
+        five_hour: makeWindow(50, "2026-04-13T17:00:00.000Z"),
+        one_week: makeWindow(11, "2026-04-20T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-13T10:00:00.000Z", {
+        account_name: "pro-main",
+        account_id: "acct-pro",
+        identity: "acct-pro:user-pro",
+        plan_type: "pro",
+        five_hour: makeWindow(60, "2026-04-13T17:00:00.000Z"),
+        one_week: makeWindow(50, "2026-04-20T00:00:00.000Z"),
+      }),
+      makeRecord("2026-04-13T11:00:00.000Z", {
+        account_name: "pro-main",
+        account_id: "acct-pro",
+        identity: "acct-pro:user-pro",
+        plan_type: "pro",
+        five_hour: makeWindow(70, "2026-04-13T17:00:00.000Z"),
+        one_week: makeWindow(52, "2026-04-20T00:00:00.000Z"),
+      }),
+    ];
+
+    const diagnostics = computeWatchObservedRatioDiagnostics(
+      history,
+      new Date("2026-04-13T12:00:00.000Z"),
+    );
+
+    expect(diagnostics).toContainEqual({
+      dimension: "plan",
+      key: "pro",
+      sample_count: 1,
+      observed_mean_raw_ratio: 5,
+      observed_weighted_raw_ratio: 5,
+      variance: 0,
+      expected_raw_ratio: 5.56,
+      relative_delta: -0.1,
+      warning: false,
+    });
+    expect(diagnostics).toHaveLength(1);
+  });
+
   test("supports the store-backed ETA wrapper", async () => {
     const homeDir = await createTempHome();
     const store = createWatchHistoryStore(`${homeDir}/.codex-team`);

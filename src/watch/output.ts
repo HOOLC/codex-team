@@ -43,9 +43,12 @@ export function describeWatchQuotaUpdate(quota: CliQuotaSummary | null): string 
 export function describeWatchQuotaEvent(
   accountLabel: string,
   quota: CliQuotaSummary | null,
+  upstreamAccountLabel: string | null = null,
 ): string {
   if (!quota || quota.refresh_status !== "ok") {
-    return `quota ${formatWatchField("account", accountLabel)} status=${
+    return `quota ${formatWatchField("account", accountLabel)}${
+      upstreamAccountLabel ? ` ${formatWatchField("upstream", upstreamAccountLabel)}` : ""
+    } status=${
       quota?.refresh_status ?? "unavailable"
     }`;
   }
@@ -53,6 +56,7 @@ export function describeWatchQuotaEvent(
   return [
     "quota",
     formatWatchField("account", accountLabel),
+    ...(upstreamAccountLabel ? [formatWatchField("upstream", upstreamAccountLabel)] : []),
     `usage=${quota.available ?? "unknown"}`,
     `5H=${computeRemainingPercent(quota.five_hour?.used_percent) ?? "-"}% left`,
     `1W=${computeRemainingPercent(quota.one_week?.used_percent) ?? "-"}% left`,
