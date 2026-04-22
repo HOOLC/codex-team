@@ -39,7 +39,7 @@ npm install -g codex-team
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.20
+  --ref v0.0.21
 ```
 
 请把 `--ref` 替换成与你安装的 CLI 版本对应的 release tag。如果你的 coding agent 会缓存已安装 skill，安装后请重启或重新加载它。
@@ -65,7 +65,8 @@ codexm
 
 dashboard 里常用按键：
 
-- `Enter`：切号
+- `Enter`：切换选中的 direct 账号；如果光标在 `proxy` 行，则切换 proxy 开关
+- `/`：进入筛选
 - `a`：启用或关闭 daemon 驱动的 autoswitch
 - `f`：在当前账号上 reload，或强制切号
 - `p`：切换“是否允许自动切号选中该账号”的保护状态
@@ -73,6 +74,9 @@ dashboard 里常用按键：
 - `O`：用隔离的托管快照运行 `codex`，退出后回到 dashboard
 - `d`：打开或聚焦 Codex Desktop，但不离开 dashboard
 - `Shift+D`：用选中账号重新拉起 Codex Desktop；如果当前已有非 `codexm` 托管的 Desktop，会先确认再强制关闭重启
+- `q`：从主面板退出；`Esc` 用来后退或取消当前流程
+
+完整键位、输入框控制、确认框和 proxy 行语义见 [dashboard.md](./skills/codexm-usage/references/dashboard.md)。
 
 ### 3. 让它持续自动工作
 
@@ -189,7 +193,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 完整命令参考请使用 `codexm --help`。分享 bundle 是明文 auth 快照，只适合发给完全信任的接收方。
 
-在交互式终端里，直接运行 `codexm` 就会进入账号面板。除了 `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`，还可以用 `e` / `E` 导出选中账号或当前 auth，用 `i` 导入 bundle，用 `x` 删除选中账号，用 `u` 撤销最近一次 import/export/delete。`a` 用来切换 daemon 驱动的 autoswitch，`p` 用来切换选中账号是否允许被自动切号逻辑选中；如果当前就在用这个账号，后续自动切走它仍然是允许的。`Esc` 用来后退或取消当前流程，`q` 用来从主面板退出。dashboard 列表里的 `Next reset` 现在和 `codexm list` 使用同一套格式，最后 1 小时内会显示带颜色的分钟倒计时，详情区会固定展示 `5H reset` 和 `1W reset`。如果刷新 quota 失败，`codexm list` 和 dashboard 会回退到该账号最近一次成功的 quota 快照，最多保留 7 天，并把该行标成 `[stale]`。synthetic `proxy` 行即使在 proxy 关闭时也会保留；proxy 已启用时，`@` 标记表示当前配置的真实 upstream，`Last upstream: ...` 只会在最近一次真实 proxy 命中已知时出现。`[autoswitch:on|off]` 状态位仍然只表示 daemon/watch 的开关，不表示 proxy 内部上游选路。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；这条前台 watch 会跟随当前 autoswitch 开关，并在退出时停止。
+在交互式终端里，直接运行 `codexm` 就会进入账号面板。完整键位、输入框状态、确认框和 proxy 行行为统一整理在 [dashboard.md](./skills/codexm-usage/references/dashboard.md)。高频差异点是：synthetic `proxy` 行上按 `Enter` 会切换 proxy，当前 `proxy` 行上按 `f` 会重新应用 proxy 接线，`Esc` 负责回退或取消，`q` 只在主列表直接退出，而 `e` 只导出当前选中的托管 direct 账号。dashboard 列表里的 `Next reset` 现在和 `codexm list` 使用同一套格式，最后 1 小时内会显示带颜色的分钟倒计时，详情区会固定展示 `5H reset` 和 `1W reset`。如果刷新 quota 失败，`codexm list` 和 dashboard 会回退到该账号最近一次成功的 quota 快照，最多保留 7 天，并把该行标成 `[stale]`。synthetic `proxy` 行即使在 proxy 关闭时也会保留；proxy 已启用时，`@` 标记表示当前配置的真实 upstream，`Last upstream: ...` 只会在最近一次真实 proxy 命中已知时出现。`[autoswitch:on|off]` 状态位仍然只表示 daemon/watch 的开关，不表示 proxy 内部上游选路。如果托管 Desktop 切号需要等当前 thread 跑完，账号面板底部状态行现在会显示这段等待进度，而不是一直停在泛化的 busy 文案上。如果当前没有其他存活的 watch owner，且当前 Desktop 会话是 `codexm` 托管的，账号面板会在前台挂一个 watch；这条前台 watch 会跟随当前 autoswitch 开关，并在退出时停止。
 
 ## 什么时候该用哪个命令？
 

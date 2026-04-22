@@ -1193,18 +1193,19 @@ function renderFilterLine(
 
 function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
   const forceLabel = selectedAccount?.current ? "f reload" : "f force";
+  const wideForceLabel = selectedAccount?.current ? "f reload" : "f force-switch";
   const proxySelected = selectedAccount?.authModeLabel === "proxy";
   const hint = proxySelected
     ? width < 92
       ? `Enter | a auto | ${forceLabel} | o run | O iso | d desk | D rel | q quit`
-      : width < 132
+      : width < 144
         ? `/ filter | Enter | a auto | ${forceLabel} | o run | O iso | d desk | D rel | i imp | q quit`
-        : `j/k move | / filter | Enter | a auto | ${forceLabel} | o run | O iso | d desk | D relaunch | i imp | r refresh | q quit`
+        : `j/k move | / filter | Enter toggle proxy | a autoswitch | ${selectedAccount?.current ? "f reapply" : wideForceLabel} | o codex | O isolated | d desktop | D relaunch | i import | r refresh | q quit`
     : width < 92
       ? `Enter | a auto | ${forceLabel} | p prot | o run | O iso | d desk | D rel | q quit`
-      : width < 132
-        ? `/ filter | Enter | a auto | ${forceLabel} | p prot | o run | O iso | d desk | D rel | e/E exp | i imp | x del | u undo | q quit`
-        : `j/k move | / filter | Enter | a auto | ${forceLabel} | p prot | o run | O iso | d desk | D relaunch | e/E exp | i imp | x del | u undo | r refresh | q quit`;
+      : width < 176
+        ? `/ filter | Enter | a auto | ${forceLabel} | p prot | o run | O iso | d desk | D rel | e exp | i imp | x del | u undo | q quit`
+        : `j/k move | / filter | Enter switch | a autoswitch | ${wideForceLabel} | p protect | o codex | O isolated | d desktop | D relaunch | e export | i import | x delete | u undo | r refresh | q quit`;
   return truncate(color(hint, "dim"), width);
 }
 
@@ -2609,13 +2610,6 @@ export async function runAccountDashboardTui(
       beginExportPrompt({
         type: "managed",
         name: selected.name,
-      });
-      return;
-    }
-    if (event.value === "E") {
-      beginExportPrompt({
-        type: "current",
-        name: null,
       });
       return;
     }

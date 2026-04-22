@@ -17,6 +17,7 @@ Use this skill when the user is asking how to use `codexm` as a tool, including 
 ## Route by task
 
 - Command map: [references/commands.md](references/commands.md)
+- Dashboard keymap and prompt behavior: [references/dashboard.md](references/dashboard.md)
 - Managed Desktop behavior: [references/managed-desktop.md](references/managed-desktop.md)
 
 ## Response Guidance

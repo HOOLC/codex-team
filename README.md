@@ -39,7 +39,7 @@ Any compatible coding agent can install the same `skills/codexm-usage` path from
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.20
+  --ref v0.0.21
 ```
 
 Replace `--ref` with the release tag that matches your installed CLI version. Restart or reload your coding agent after installing the skill if it caches available skills.
@@ -66,6 +66,7 @@ codexm
 Inside the dashboard:
 
 - `Enter`: switch the selected direct account, or toggle proxy on/off when the `proxy` row is selected
+- `/`: enter filter mode
 - `a`: enable or disable daemon-backed autoswitch
 - `f`: reload the current account or force-switch
 - `p`: toggle whether the selected account can be chosen as an auto-switch target
@@ -73,6 +74,9 @@ Inside the dashboard:
 - `O`: run `codex` with an isolated managed snapshot, then return to the dashboard when it exits
 - `d`: open or focus Codex Desktop without leaving the dashboard
 - `Shift+D`: relaunch Codex Desktop for the selected account; when an unmanaged Desktop instance is already running, confirm before forcing it closed
+- `q`: quit from the main dashboard; `Esc` backs out of prompts
+
+For the full keymap, prompt controls, and proxy-row behavior, see [dashboard.md](./skills/codexm-usage/references/dashboard.md).
 
 ### 3. Keep working automatically
 
@@ -189,7 +193,7 @@ This is the main command to use when deciding which account to switch to next.
 
 Use `codexm --help` for the full command reference. Share bundles are plain auth snapshots intended only for fully trusted recipients.
 
-In a TTY, plain `codexm` opens the dashboard directly. Besides `Enter` / `a` / `f` / `p` / `o` / `O` / `d` / `Shift+D`, use `e` / `E` to export the selected or current auth, `i` to import a bundle, `x` to delete the selected account, and `u` to undo the latest import/export/delete. `Enter` on the synthetic `proxy` row toggles proxy on or off; `f` on the current proxy row reapplies proxy and refreshes managed Desktop. `a` toggles daemon-backed autoswitch, while `p` toggles whether the selected account can be picked as an auto-switch target; protection does not stop the current in-use account from being switched away later. `Esc` backs out of prompts; `q` quits from the main dashboard. The dashboard list now uses the same `Next reset` formatting as `codexm list`, including the colored minute countdown inside the last hour, and the detail pane shows both `5H reset` and `1W reset`. If a quota refresh fails, `codexm list` and the dashboard reuse that account's last good quota snapshot for up to 7 days and mark the row as `[stale]`. The synthetic `proxy` row stays visible even when proxy mode is off; while proxy mode is enabled, `@` marks the configured real upstream row, and `Last upstream: ...` only appears when a recent real proxy hit is known. The `[autoswitch:on|off]` status tag still reflects the daemon/watch feature flag, not proxy-internal upstream routing. When a managed Desktop switch has to wait for the active thread to finish, the dashboard status line now shows that wait progress instead of sitting on a generic busy label. When no other live watch owner is present and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active; that foreground watch follows the current autoswitch setting and stops when you quit.
+In a TTY, plain `codexm` opens the dashboard directly. The complete dashboard keymap, prompt states, confirmations, and proxy-row behavior live in [dashboard.md](./skills/codexm-usage/references/dashboard.md). Highlights: `Enter` toggles proxy on the synthetic `proxy` row, `f` on the current proxy row reapplies proxy wiring, `Esc` backs out of prompts while `q` quits from the main list, and `e` exports only the selected managed direct account. The dashboard list still uses the same `Next reset` formatting as `codexm list`, including the colored minute countdown inside the last hour, and the detail pane shows both `5H reset` and `1W reset`. If a quota refresh fails, `codexm list` and the dashboard reuse that account's last good quota snapshot for up to 7 days and mark the row as `[stale]`. The synthetic `proxy` row stays visible even when proxy mode is off; while proxy mode is enabled, `@` marks the configured real upstream row, and `Last upstream: ...` only appears when a recent real proxy hit is known. The `[autoswitch:on|off]` status tag still reflects the daemon/watch feature flag, not proxy-internal upstream routing. When a managed Desktop switch has to wait for the active thread to finish, the dashboard status line now shows that wait progress instead of sitting on a generic busy label. When no other live watch owner is present and the current Desktop session is codexm-managed, the dashboard keeps a foreground watch active; that foreground watch follows the current autoswitch setting and stops when you quit.
 
 ## When should I use each command?
 

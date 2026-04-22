@@ -319,7 +319,7 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("Enter");
     expect(screen).toContain("o run");
     expect(screen).toContain("D rel");
-    expect(screen).toContain("e/E exp");
+    expect(screen).toContain("e exp");
   });
 
   test("keeps wide header columns aligned with account rows", () => {
@@ -743,6 +743,24 @@ describe("Account Dashboard TUI", () => {
     );
 
     expect(screen).toContain("f reload");
+  });
+
+  test("renders expanded hint labels when width allows", () => {
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot: createSnapshot("alpha"),
+        state: createInitialAccountDashboardState(),
+        width: 220,
+        height: 28,
+      }),
+    );
+
+    expect(screen).toContain("Enter switch");
+    expect(screen).toContain("a autoswitch");
+    expect(screen).toContain("p protect");
+    expect(screen).toContain("e export");
+    expect(screen).toContain("x delete");
+    expect(screen).not.toContain("E exp");
   });
 
   test("renders an empty-state dashboard when no saved accounts exist", () => {
@@ -2050,7 +2068,7 @@ describe("Account Dashboard TUI", () => {
 
     try {
       await flushLoop();
-      stdin.emitInput("E");
+      stdin.emitInput("e");
       await flushLoop();
       expect(latestDashboardFrame(stdout.read())).toContain("Export to file:");
 
@@ -2115,7 +2133,7 @@ describe("Account Dashboard TUI", () => {
 
     try {
       await flushLoop();
-      stdin.emitInput("E");
+      stdin.emitInput("e");
       await flushLoop();
       expect(latestDashboardFrame(stdout.read())).toContain("Export to file:");
 
