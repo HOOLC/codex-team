@@ -119,21 +119,27 @@ function renderGroupedHeader(
   columns: TableColumn[],
   widths: number[],
 ): string | null {
-  const groups = new Map<string, { start: number; end: number }>();
-  const starts: number[] = [];
+  const groups = new Map<string, { firstCenter: number; lastCenter: number }>();
   let cursor = 0;
 
   for (let index = 0; index < columns.length; index += 1) {
-    starts.push(cursor);
-    const groupLabel = columns[index]?.groupLabel;
+    const column = columns[index];
+    const groupLabel = column?.groupLabel;
     if (groupLabel) {
+      const width = widths[index] ?? 0;
+      const labelWidth = visibleWidth(column?.label ?? "");
+      const align = column?.headerAlign ?? column?.align ?? "left";
+      const labelStart = align === "right"
+        ? cursor + Math.max(0, width - labelWidth)
+        : align === "center"
+          ? cursor + Math.max(0, Math.floor((width - labelWidth) / 2))
+          : cursor;
+      const labelCenter = labelStart + (labelWidth / 2);
       const existing = groups.get(groupLabel);
-      const start = starts[index] ?? 0;
-      const end = start + (widths[index] ?? 0);
       if (existing) {
-        existing.end = end;
+        existing.lastCenter = labelCenter;
       } else {
-        groups.set(groupLabel, { start, end });
+        groups.set(groupLabel, { firstCenter: labelCenter, lastCenter: labelCenter });
       }
     }
     cursor += (widths[index] ?? 0) + 2;
@@ -145,8 +151,8 @@ function renderGroupedHeader(
 
   const row = Array.from({ length: Math.max(0, cursor - 2) }, () => " ");
   for (const [label, span] of groups.entries()) {
-    const spanWidth = span.end - span.start;
-    const offset = span.start + Math.max(0, Math.floor((spanWidth - label.length) / 2));
+    const labelWidth = visibleWidth(label);
+    const offset = Math.max(0, Math.round(((span.firstCenter + span.lastCenter) / 2) - (labelWidth / 2)));
     for (let index = 0; index < label.length; index += 1) {
       row[offset + index] = label[index] ?? " ";
     }
@@ -206,8 +212,11 @@ interface BudgetedQuotaTableWidths {
   scoreWidth: number;
   etaWidth: number;
   fiveHourWidth: number;
+  fiveHourResetWidth: number;
   oneWeekWidth: number;
+  oneWeekResetWidth: number;
   nextResetWidth: number;
+  splitResetColumns: boolean;
 }
 
 function getQuotaTableSeparatorWidth(columnCount: number): number {
@@ -243,7 +252,7 @@ function computeBudgetedQuotaTableWidths(
   });
   const accountIdWidths = resolveQuotaDisplayWidth({
     header: "IDENTITY",
-    values: rows.map((row) => row.accountId),
+    values: rows.map(() => "IDENTITY"),
   });
   const planWidths = resolveQuotaDisplayWidth({
     header: "PLAN",
@@ -267,13 +276,21 @@ function computeBudgetedQuotaTableWidths(
     header: "1W",
     values: rows.map((row) => row.oneWeek),
   });
+  const fiveHourResetWidths = resolveQuotaDisplayWidth({
+    header: "RESET",
+    values: rows.map((row) => row.fiveHourReset),
+  });
+  const oneWeekResetWidths = resolveQuotaDisplayWidth({
+    header: "RESET",
+    values: rows.map((row) => row.oneWeekReset),
+  });
   const nextResetWidths = resolveQuotaDisplayWidth({
     header: "NEXT RESET",
     values: rows.map((row) => row.nextReset),
   });
 
-  const columnCount = showEtaColumn ? 8 : 7;
-  const fixedMinWidth =
+  const collapsedColumnCount = showEtaColumn ? 8 : 7;
+  const collapsedFixedMinWidth =
     nameWidths.minWidth
     + accountIdWidths.minWidth
     + planWidths.minWidth
@@ -282,11 +299,25 @@ function computeBudgetedQuotaTableWidths(
     + fiveHourWidths.minWidth
     + oneWeekWidths.minWidth
     + nextResetWidths.minWidth
-    + getQuotaTableSeparatorWidth(columnCount);
+    + getQuotaTableSeparatorWidth(collapsedColumnCount);
 
-  if (terminalWidth < fixedMinWidth) {
+  if (terminalWidth < collapsedFixedMinWidth) {
     return null;
   }
+
+  const splitColumnCount = showEtaColumn ? 9 : 8;
+  const splitFixedMinWidth =
+    nameWidths.minWidth
+    + accountIdWidths.minWidth
+    + planWidths.minWidth
+    + scoreWidths.minWidth
+    + (showEtaColumn ? etaWidths.minWidth : 0)
+    + fiveHourWidths.minWidth
+    + fiveHourResetWidths.minWidth
+    + oneWeekWidths.minWidth
+    + oneWeekResetWidths.minWidth
+    + getQuotaTableSeparatorWidth(splitColumnCount);
+  const splitResetColumns = terminalWidth >= Math.max(splitFixedMinWidth, 80);
 
   let nameWidth = nameWidths.minWidth;
   let accountIdWidth = accountIdWidths.minWidth;
@@ -294,9 +325,11 @@ function computeBudgetedQuotaTableWidths(
   let scoreWidth = scoreWidths.minWidth;
   let etaWidth = showEtaColumn ? etaWidths.minWidth : 0;
   let fiveHourWidth = fiveHourWidths.minWidth;
+  let fiveHourResetWidth = splitResetColumns ? fiveHourResetWidths.minWidth : 0;
   let oneWeekWidth = oneWeekWidths.minWidth;
+  let oneWeekResetWidth = splitResetColumns ? oneWeekResetWidths.minWidth : 0;
   let nextResetWidth = nextResetWidths.minWidth;
-  let remainingWidth = terminalWidth - fixedMinWidth;
+  let remainingWidth = terminalWidth - (splitResetColumns ? splitFixedMinWidth : collapsedFixedMinWidth);
 
   const consumeGrowth = (
     currentWidth: number,
@@ -313,16 +346,24 @@ function computeBudgetedQuotaTableWidths(
   scoreWidth = consumeGrowth(scoreWidth, scoreWidths.desiredWidth, scoreWidths.minWidth);
   fiveHourWidth = consumeGrowth(fiveHourWidth, fiveHourWidths.desiredWidth, fiveHourWidths.minWidth);
   oneWeekWidth = consumeGrowth(oneWeekWidth, oneWeekWidths.desiredWidth, oneWeekWidths.minWidth);
-  nextResetWidth = consumeGrowth(nextResetWidth, nextResetWidths.desiredWidth, nextResetWidths.minWidth);
+  if (splitResetColumns) {
+    fiveHourResetWidth = consumeGrowth(
+      fiveHourResetWidth,
+      fiveHourResetWidths.desiredWidth,
+      fiveHourResetWidths.minWidth,
+    );
+    oneWeekResetWidth = consumeGrowth(
+      oneWeekResetWidth,
+      oneWeekResetWidths.desiredWidth,
+      oneWeekResetWidths.minWidth,
+    );
+  } else {
+    nextResetWidth = consumeGrowth(nextResetWidth, nextResetWidths.desiredWidth, nextResetWidths.minWidth);
+  }
   if (showEtaColumn) {
     etaWidth = consumeGrowth(etaWidth, etaWidths.desiredWidth, etaWidths.minWidth);
   }
   planWidth = consumeGrowth(planWidth, planWidths.desiredWidth, planWidths.minWidth);
-  accountIdWidth = consumeGrowth(accountIdWidth, accountIdWidths.desiredWidth, accountIdWidths.minWidth);
-
-  if (remainingWidth > 0) {
-    accountIdWidth += remainingWidth;
-  }
 
   return {
     nameWidth,
@@ -331,8 +372,11 @@ function computeBudgetedQuotaTableWidths(
     scoreWidth,
     etaWidth,
     fiveHourWidth,
+    fiveHourResetWidth,
     oneWeekWidth,
+    oneWeekResetWidth,
     nextResetWidth,
+    splitResetColumns,
   };
 }
 
@@ -593,20 +637,42 @@ function describeQuotaAccounts(
     ? displayRows.some((row) => row.eta5hEq1w !== "-" || row.eta1w !== "-")
     : false;
 
-  const columns: TableColumn[] = [
-    { key: "name", label: `${formatAccountListMarkers({})}NAME` },
-    { key: "account_id", label: "IDENTITY" },
-    { key: "plan_type", label: "PLAN" },
-    { key: "score", label: "SCORE", align: "right", headerAlign: "right" },
-    { key: "five_hour", label: "5H", groupLabel: "USED", align: "right", headerAlign: "center" },
-    { key: "one_week", label: "1W", groupLabel: "USED", align: "right", headerAlign: "center" },
-    { key: "next_reset", label: "NEXT RESET" },
-  ];
-
   const budgetedTableWidths =
     options.terminalWidth && !options.verbose
       ? computeBudgetedQuotaTableWidths(displayRows, options.terminalWidth, showEtaColumn)
       : null;
+  const splitResetColumns = budgetedTableWidths?.splitResetColumns === true;
+  const columns: TableColumn[] = [
+    { key: "name", label: "NAME", headerAlign: "center" },
+    { key: "account_id", label: "IDENTITY", headerAlign: "center" },
+    { key: "plan_type", label: "PLAN", headerAlign: "center" },
+    { key: "score", label: "SCORE", align: "right", headerAlign: "center" },
+    ...(splitResetColumns
+      ? [
+          {
+            key: "five_hour",
+            label: "USED",
+            groupLabel: "5H",
+            align: "right" as const,
+            headerAlign: "center" as const,
+          },
+          { key: "five_hour_reset", label: "RESET", groupLabel: "5H", headerAlign: "center" as const },
+          {
+            key: "one_week",
+            label: "USED",
+            groupLabel: "1W",
+            align: "right" as const,
+            headerAlign: "center" as const,
+          },
+          { key: "one_week_reset", label: "RESET", groupLabel: "1W", headerAlign: "center" as const },
+        ]
+      : [
+          { key: "five_hour", label: "5H", align: "right" as const, headerAlign: "center" as const },
+          { key: "one_week", label: "1W", align: "right" as const, headerAlign: "center" as const },
+          { key: "next_reset", label: "NEXT RESET", headerAlign: "center" as const },
+        ]),
+  ];
+
   const rows = displayRows.map((row) => ({
     name: budgetedTableWidths
       ? `${row.markers}${truncateVisible(row.displayName, Math.max(0, budgetedTableWidths.nameWidth - visibleWidth(row.markers)))}`
@@ -629,11 +695,15 @@ function describeQuotaAccounts(
     next_reset: budgetedTableWidths
       ? truncateVisible(row.nextReset, budgetedTableWidths.nextResetWidth)
       : row.nextReset,
-    five_hour_reset: row.fiveHourReset,
+    five_hour_reset: budgetedTableWidths && splitResetColumns
+      ? truncateVisible(row.fiveHourReset, budgetedTableWidths.fiveHourResetWidth)
+      : row.fiveHourReset,
     one_week: budgetedTableWidths
       ? truncateVisible(row.oneWeek, budgetedTableWidths.oneWeekWidth)
       : row.oneWeek,
-    one_week_reset: row.oneWeekReset,
+    one_week_reset: budgetedTableWidths && splitResetColumns
+      ? truncateVisible(row.oneWeekReset, budgetedTableWidths.oneWeekResetWidth)
+      : row.oneWeekReset,
     ...(row.eta5hEq1w !== undefined ? { eta_5h_eq_1w: row.eta5hEq1w } : {}),
     ...(row.eta1w !== undefined ? { eta_1w: row.eta1w } : {}),
     ...(row.rate1wUnits !== undefined ? { rate_1w_units: row.rate1wUnits } : {}),
@@ -650,7 +720,7 @@ function describeQuotaAccounts(
       key: "eta",
       label: "ETA",
       align: "right",
-      headerAlign: "right",
+      headerAlign: "center",
     });
   }
 
@@ -658,22 +728,22 @@ function describeQuotaAccounts(
     const verboseInsertColumns: TableColumn[] = [];
     if (showVerboseEtaColumns) {
       verboseInsertColumns.push(
-        { key: "eta_5h_eq_1w", label: "ETA 5H->1W", align: "right", headerAlign: "right" },
-        { key: "eta_1w", label: "ETA 1W", align: "right", headerAlign: "right" },
+        { key: "eta_5h_eq_1w", label: "ETA 5H->1W", align: "right", headerAlign: "center" },
+        { key: "eta_1w", label: "ETA 1W", align: "right", headerAlign: "center" },
       );
     }
     verboseInsertColumns.push(
-      { key: "rate_1w_units", label: "RATE 1W UNITS", align: "right", headerAlign: "right" },
-      { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W", align: "right", headerAlign: "right" },
-      { key: "score_1h", label: "1H SCORE", align: "right", headerAlign: "right" },
-      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H", align: "right", headerAlign: "right" },
-      { key: "projected_1w_1h", label: "1W 1H", align: "right", headerAlign: "right" },
-      { key: "five_hour_to_one_week_ratio", label: "5H:1W", align: "right", headerAlign: "right" },
+      { key: "rate_1w_units", label: "RATE 1W UNITS", align: "right", headerAlign: "center" },
+      { key: "remaining_5h_eq_1w", label: "5H REMAIN->1W", align: "right", headerAlign: "center" },
+      { key: "score_1h", label: "1H SCORE", align: "right", headerAlign: "center" },
+      { key: "projected_5h_in_1w_units_1h", label: "5H->1W 1H", align: "right", headerAlign: "center" },
+      { key: "projected_1w_1h", label: "1W 1H", align: "right", headerAlign: "center" },
+      { key: "five_hour_to_one_week_ratio", label: "5H:1W", align: "right", headerAlign: "center" },
     );
     columns.splice(showEtaColumn ? 5 : 4, 0, ...verboseInsertColumns);
     columns.push(
-      { key: "five_hour_reset", label: "5H RESET AT" },
-      { key: "one_week_reset", label: "1W RESET AT" },
+      { key: "five_hour_reset", label: "5H RESET AT", headerAlign: "center" },
+      { key: "one_week_reset", label: "1W RESET AT", headerAlign: "center" },
     );
   }
 
@@ -685,8 +755,16 @@ function describeQuotaAccounts(
         budgetedTableWidths.scoreWidth,
         ...(showEtaColumn ? [budgetedTableWidths.etaWidth] : []),
         budgetedTableWidths.fiveHourWidth,
-        budgetedTableWidths.oneWeekWidth,
-        budgetedTableWidths.nextResetWidth,
+        ...(splitResetColumns
+          ? [
+              budgetedTableWidths.fiveHourResetWidth,
+              budgetedTableWidths.oneWeekWidth,
+              budgetedTableWidths.oneWeekResetWidth,
+            ]
+          : [
+              budgetedTableWidths.oneWeekWidth,
+              budgetedTableWidths.nextResetWidth,
+            ]),
       ])
     : formatTable(rows, columns);
   const compactRows = options.terminalWidth && !options.verbose && !budgetedTableWidths

@@ -29,6 +29,7 @@ Use this skill when the user is asking how to use `codexm` as a tool, including 
 - If the user asks for current usage, prefer `codexm current`; add `--refresh` only when they explicitly want the latest data.
 - If the user is debugging mismatches between local auth, managed Desktop, and direct runtime reads, route them to `codexm doctor`.
 - If the user wants to add another account without changing current auth, prefer `codexm add <name>`; use `--device-auth` for remote/headless machines and `--with-api-key` only when they explicitly want API-key auth.
+- If a saved account already exists but its auth or refresh token is broken, route them to `codexm replace <name>` so the snapshot is overwritten in place.
 - If the user wants to update the saved snapshot for the account already active in local auth, route them to `codexm update`.
 - If the user asks how to compare accounts or understand why `switch --auto` picked one, prefer `codexm list --verbose`.
 - If the user wants an interactive picker, filtering, import/export, delete, or Desktop launch in one place, route them to plain `codexm` in a TTY or `codexm tui [query]`.

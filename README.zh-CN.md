@@ -31,7 +31,7 @@ npm install -g codex-team
 
 ## 可选 Agent Skill
 
-这个仓库还维护了一个可选的 agent skill，面向支持从 GitHub 安装 `SKILL.md` bundle 的 coding agent。它不是运行 `codexm` 的必需依赖；npm 包只分发 CLI runtime 和库入口。
+这个仓库还维护了一个可选的 agent skill，面向支持从 GitHub 安装 `SKILL.md` bundle 的 coding agent。它不是运行 `codexm` 的必需依赖；npm 包只分发 CLI runtime。
 
 任何兼容的 coding agent 都可以从 GitHub 安装同一个 `skills/codexm-usage` 路径。如果你用的是 Codex 内置的 GitHub skill installer，可以把 skill 固定到与你安装的 CLI 对应的 release tag：
 
@@ -39,7 +39,7 @@ npm install -g codex-team
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.24
+  --ref v0.0.25
 ```
 
 请把 `--ref` 替换成与你安装的 CLI 版本对应的 release tag。如果你的 coding agent 会缓存已安装 skill，安装后请重启或重新加载它。
@@ -144,6 +144,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 - `codexm add <name>`: 新增一个托管账号快照
 - `codexm save <name>`: 把当前生效的 auth 保存成命名快照
+- `codexm replace <name>`: 用新的登录结果或 API key 原地覆盖已保存快照
 - `codexm update`: 刷新当前托管账号对应的已保存快照
 - `codexm rename <old> <new>`: 重命名已保存快照
 - `codexm protect <name>`: 将已保存快照排除出自动切换候选
@@ -159,6 +160,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm current`: 查看当前账号和尽力获取的 quota 摘要
 - `codexm doctor`: 诊断本地 auth、runtime 探测和托管 Desktop 一致性
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: 查看所有保存账号，并附带一行本地 usage 摘要
+- `codexm list <name>`: 查看单个已保存账号的详情，包括邮箱、identity、quota 和所选本地 usage 窗口
 - `codexm list --json`: 输出机器可读 JSON；包含 proxy 当前上游信息，以及有数据时最近一次上游命中信息
 - `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
 - `codexm proxy status`: 查看本地 proxy daemon 和 synthetic auth 状态

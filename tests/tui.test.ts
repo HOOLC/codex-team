@@ -43,6 +43,20 @@ function latestDashboardFrame(value: string): string {
   return stripAnsi(value.split("\u001B[2J\u001B[H").at(-1) ?? value);
 }
 
+function labelCenter(line: string, label: string, fromIndex = 0): number {
+  const start = line.indexOf(label, fromIndex);
+  expect(start).toBeGreaterThanOrEqual(0);
+  return start + (label.length - 1) / 2;
+}
+
+function separatorSegments(line: string): Array<{ start: number; end: number }> {
+  const matches = Array.from(line.matchAll(/-+/g));
+  return matches.map((match) => ({
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length - 1,
+  }));
+}
+
 function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
   return {
     headerLine: `codexm | current ${currentName} | 2/3 usable | updated 13:24`,
@@ -152,7 +166,9 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         etaLabel: "8.2h",
         nextResetLabel: "04-16 19:30 (6h)",
         fiveHourLabel: "18%",
+        fiveHourResetLabel: "04-16 19:30",
         oneWeekLabel: "42%",
+        oneWeekResetLabel: "04-19 11:00",
         authModeLabel: "chatgpt",
         emailLabel: "alpha@example.com",
         accountIdLabel: "acct...pha",
@@ -198,7 +214,9 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         etaLabel: "3.5h",
         nextResetLabel: "04-16 18:10 (4.7h)",
         fiveHourLabel: "36%",
+        fiveHourResetLabel: "04-16 18:10",
         oneWeekLabel: "27%",
+        oneWeekResetLabel: "04-19 11:00",
         authModeLabel: "chatgpt",
         emailLabel: "beta@example.com",
         accountIdLabel: "acct...eta",
@@ -244,7 +262,9 @@ function createSnapshot(currentName = "alpha"): AccountDashboardSnapshot {
         etaLabel: "-",
         nextResetLabel: "04-17 09:00 (19.5h)",
         fiveHourLabel: "100%",
+        fiveHourResetLabel: "04-17 09:00",
         oneWeekLabel: "100%",
+        oneWeekResetLabel: "04-17 09:00",
         authModeLabel: "chatgpt",
         emailLabel: "gamma@example.com",
         accountIdLabel: "acct...mma",
@@ -305,11 +325,11 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("Trend 30d:");
     expect(screen).toContain("NAME");
     expect(screen).toContain("IDENTITY");
-    expect(screen).toContain("USED");
     expect(screen).toContain("5H");
     expect(screen).toContain("1W");
-    expect(screen).toContain("NEXT RESET");
-    expect(screen).toContain("beta [stal");
+    expect(screen).toContain("USED");
+    expect(screen).toContain("RESET");
+    expect(screen).toContain("beta [st");
     expect(screen).toContain("alpha");
     expect(screen).toContain("Email: beta@example.com");
     expect(screen).toContain("beta [current] [protected]");
@@ -333,11 +353,23 @@ describe("Account Dashboard TUI", () => {
     );
     const lines = screen.split("\n");
     const headerLine = lines.find((line) => line.includes("NAME") && line.includes("IDENTITY"));
-    const alphaRow = lines.find((line) => line.includes(">*  alpha"));
+    const separatorLine = headerLine ? lines[lines.indexOf(headerLine) + 1] : undefined;
 
     expect(headerLine).toBeDefined();
-    expect(alphaRow).toBeDefined();
-    expect(headerLine?.indexOf("NAME")).toBe(alphaRow?.indexOf("alpha"));
+    expect(separatorLine).toBeDefined();
+
+    const segments = separatorSegments(separatorLine ?? "");
+    expect(segments.length).toBeGreaterThanOrEqual(9);
+
+    const firstColumnCenter = ((segments[1]?.start ?? 0) + (segments[1]?.end ?? 0)) / 2;
+    const secondColumnCenter = ((segments[2]?.start ?? 0) + (segments[2]?.end ?? 0)) / 2;
+    const thirdColumnCenter = ((segments[3]?.start ?? 0) + (segments[3]?.end ?? 0)) / 2;
+    const fourthColumnCenter = ((segments[4]?.start ?? 0) + (segments[4]?.end ?? 0)) / 2;
+
+    expect(Math.abs(labelCenter(headerLine ?? "", "NAME") - firstColumnCenter)).toBeLessThanOrEqual(1);
+    expect(Math.abs(labelCenter(headerLine ?? "", "IDENTITY") - secondColumnCenter)).toBeLessThanOrEqual(1);
+    expect(Math.abs(labelCenter(headerLine ?? "", "PLAN") - thirdColumnCenter)).toBeLessThanOrEqual(1);
+    expect(Math.abs(labelCenter(headerLine ?? "", "SCORE") - fourthColumnCenter)).toBeLessThanOrEqual(1);
   });
 
   test("shows prolite in the wide plan column without truncation", () => {
@@ -358,7 +390,7 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("prolite");
   });
 
-  test("centers the USED group label over 5H and 1W", () => {
+  test("renders 5H and 1W group labels above their used/reset columns", () => {
     const screen = stripAnsi(
       renderAccountDashboardScreen({
         snapshot: createSnapshot("alpha"),
@@ -368,21 +400,42 @@ describe("Account Dashboard TUI", () => {
       }),
     );
     const lines = screen.split("\n");
-    const usedLine = lines.find((line) => line.includes("USED") && !line.includes("Usage:"));
     const headerLine = lines.find(
-      (line) => line.includes("NEXT RESET") && line.includes("5H") && line.includes("1W"),
+      (line) => line.includes("NAME") && line.includes("USED") && line.includes("RESET"),
     );
+    const headerIndex = headerLine ? lines.indexOf(headerLine) : -1;
+    const groupLine = headerIndex > 0 ? lines[headerIndex - 1] : undefined;
 
-    expect(usedLine).toBeDefined();
+    expect(groupLine).toBeDefined();
     expect(headerLine).toBeDefined();
-    const usedStart = usedLine?.indexOf("USED") ?? -1;
-    const fiveHourStart = headerLine?.indexOf("5H") ?? -1;
-    const oneWeekStart = headerLine?.indexOf("1W", Math.max(0, fiveHourStart + 1)) ?? -1;
+    const fiveHourStart = groupLine?.indexOf("5H") ?? -1;
+    const oneWeekStart = groupLine?.indexOf("1W", Math.max(0, fiveHourStart + 1)) ?? -1;
+    const fiveHourUsedStart = headerLine?.indexOf("USED") ?? -1;
+    const fiveHourResetStart = headerLine?.indexOf("RESET") ?? -1;
+    const oneWeekUsedStart = headerLine?.indexOf("USED", Math.max(0, fiveHourResetStart + 1)) ?? -1;
+    const oneWeekResetStart = headerLine?.indexOf("RESET", Math.max(0, oneWeekUsedStart + 1)) ?? -1;
 
-    expect(usedStart).toBeGreaterThanOrEqual(0);
     expect(fiveHourStart).toBeGreaterThanOrEqual(0);
     expect(oneWeekStart).toBeGreaterThanOrEqual(0);
-    expect(Math.abs((usedStart + 1.5) - (((fiveHourStart + 0.5) + (oneWeekStart + 0.5)) / 2))).toBeLessThanOrEqual(1);
+    expect(fiveHourUsedStart).toBeGreaterThanOrEqual(0);
+    expect(fiveHourResetStart).toBeGreaterThanOrEqual(0);
+    expect(oneWeekUsedStart).toBeGreaterThanOrEqual(0);
+    expect(oneWeekResetStart).toBeGreaterThanOrEqual(0);
+    expect(fiveHourStart).toBeLessThan(oneWeekStart);
+    expect(fiveHourUsedStart).toBeLessThan(fiveHourResetStart);
+    expect(oneWeekUsedStart).toBeLessThan(oneWeekResetStart);
+    expect(
+      Math.abs(
+        labelCenter(groupLine ?? "", "5H")
+        - ((labelCenter(headerLine ?? "", "USED", fiveHourUsedStart) + labelCenter(headerLine ?? "", "RESET", fiveHourResetStart)) / 2),
+      ),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(
+        labelCenter(groupLine ?? "", "1W", oneWeekStart)
+        - ((labelCenter(headerLine ?? "", "USED", oneWeekUsedStart) + labelCenter(headerLine ?? "", "RESET", oneWeekResetStart)) / 2),
+      ),
+    ).toBeLessThanOrEqual(1);
   });
 
   test("keeps 0% score visible on an unselected fully exhausted row", () => {
@@ -421,15 +474,17 @@ describe("Account Dashboard TUI", () => {
       availabilityLabel: "available",
       current: false,
       autoSwitchEligible: true,
-        score: 73.4,
-        scoreLabel: "73.4%",
-        etaLabel: "1.2h",
-        nextResetLabel: "04-16 18:10 (4.7h)",
-        fiveHourLabel: "64.6%",
-        oneWeekLabel: "100.0%",
-        authModeLabel: "proxy",
-        emailLabel: "proxy@codexm.local",
-        accountIdLabel: "-",
+      score: 73.4,
+      scoreLabel: "73.4%",
+      etaLabel: "1.2h",
+      nextResetLabel: "04-16 18:10 (4.7h)",
+      fiveHourLabel: "64.6%",
+      fiveHourResetLabel: "04-16 18:10",
+      oneWeekLabel: "100.0%",
+      oneWeekResetLabel: "04-19 11:00",
+      authModeLabel: "proxy",
+      emailLabel: "proxy@codexm.local",
+      accountIdLabel: "-",
       userIdLabel: "-",
       joinedAtLabel: "-",
       lastSwitchedAtLabel: "-",
@@ -485,7 +540,7 @@ describe("Account Dashboard TUI", () => {
     expect(proxyRow).not.toContain(" pro ");
     expect(screen).toContain("64.6%");
     expect(screen).toContain("100.0%");
-    expect(screen).toContain("Pool: auto-switch eligible accounts");
+    expect(screen).toContain("Pool: auto-switch eligible");
     expect(screen).toContain("Last upstream: alpha (chatgpt");
     expect(screen).not.toContain("Identity: proxy");
     expect(screen).not.toContain("p prot");
@@ -634,6 +689,60 @@ describe("Account Dashboard TUI", () => {
       code: 0,
       action: "quit",
     });
+  });
+
+  test("keeps navigation responsive while protection toggle is pending", async () => {
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    let releaseToggle!: () => void;
+    const toggleGate = new Promise<void>((resolve) => {
+      releaseToggle = resolve;
+    });
+
+    const tuiPromise = runAccountDashboardTui({
+      stdin,
+      stdout,
+      autoRefreshIntervalMs: null,
+      loadSnapshot: async () => createSnapshot("alpha"),
+      switchAccount: async () => ({
+        statusMessage: 'Switched to "alpha".',
+        warningMessages: [],
+      }),
+      toggleAutoSwitchProtection: async () => {
+        await toggleGate;
+        return {
+          statusMessage: 'Removed auto-switch protection from "beta".',
+          preferredName: "beta",
+        };
+      },
+    });
+
+    try {
+      await flushLoop();
+      stdin.emitInput("j");
+      await flushLoop();
+      stdin.emitInput("p");
+      await flushLoop();
+      stdin.emitInput("j");
+      await flushLoop();
+
+      expect(latestDashboardFrame(stdout.read())).toMatch(/>\s+gamma/u);
+
+      releaseToggle();
+      await flushLoop();
+      await flushLoop();
+
+      stdin.emitInput("q");
+      await expect(tuiPromise).resolves.toMatchObject({
+        code: 0,
+        action: "quit",
+      });
+    } catch (error) {
+      releaseToggle();
+      stdin.emitInput("q");
+      await tuiPromise;
+      throw error;
+    }
   });
 
   test("toggles autoswitch from the dashboard with a and refreshes the snapshot", async () => {
@@ -866,7 +975,8 @@ describe("Account Dashboard TUI", () => {
     const headerLine = screen.split("\n").find((line) => line.includes("NAME"));
 
     expect(headerLine).toBeDefined();
-    expect(headerLine).toContain("NEXT RESET");
+    expect(headerLine).toContain("USED");
+    expect(headerLine).toContain("RESET");
     expect(headerLine).not.toContain("ETA");
   });
 
@@ -935,7 +1045,7 @@ describe("Account Dashboard TUI", () => {
       }),
     );
 
-    expect(screen).toContain(">   beta [stal");
+    expect(screen).toMatch(/>\s+beta \[st/u);
     expect(screen).toContain("Refreshing accounts...");
   });
 
@@ -1019,7 +1129,9 @@ describe("Account Dashboard TUI", () => {
         etaLabel: "9.1h",
         nextResetLabel: "04-16 19:30 (6h)",
         fiveHourLabel: "8%",
+        fiveHourResetLabel: "04-16 19:30",
         oneWeekLabel: "12%",
+        oneWeekResetLabel: "04-19 11:00",
         authModeLabel: "proxy",
         emailLabel: "proxy@codexm.local",
         accountIdLabel: "",
@@ -1094,7 +1206,9 @@ describe("Account Dashboard TUI", () => {
         etaLabel: "9.1h",
         nextResetLabel: "04-16 19:30 (6h)",
         fiveHourLabel: "8%",
+        fiveHourResetLabel: "04-16 19:30",
         oneWeekLabel: "12%",
+        oneWeekResetLabel: "04-19 11:00",
         authModeLabel: "proxy",
         emailLabel: "proxy@codexm.local",
         accountIdLabel: "",
@@ -1705,7 +1819,9 @@ describe("Account Dashboard TUI", () => {
         etaLabel: "9.1h",
         nextResetLabel: "04-16 19:30 (6h)",
         fiveHourLabel: "8%",
+        fiveHourResetLabel: "04-16 19:30",
         oneWeekLabel: "12%",
+        oneWeekResetLabel: "04-19 11:00",
         authModeLabel: "proxy",
         emailLabel: "proxy@codexm.local",
         accountIdLabel: "",
@@ -3122,6 +3238,7 @@ describe("Account Dashboard TUI", () => {
 
   test("builds a ranked dashboard snapshot from refreshed quota data", async () => {
     const homeDir = await createTempHome();
+    const resetAt = (offsetMinutes: number) => new Date(Date.now() + offsetMinutes * 60_000).toISOString();
 
     try {
       const snapshot = await buildAccountDashboardSnapshot({
@@ -3207,8 +3324,8 @@ describe("Account Dashboard TUI", () => {
                 fetched_at: "2026-04-16T08:00:00.000Z",
                 error_message: null,
                 unlimited: true,
-                five_hour: { used_percent: 36, window_seconds: 18_000, reset_at: "2026-04-16T10:00:00.000Z" },
-                one_week: { used_percent: 27, window_seconds: 604_800, reset_at: "2026-04-18T10:00:00.000Z" },
+                five_hour: { used_percent: 36, window_seconds: 18_000, reset_at: resetAt(120) },
+                one_week: { used_percent: 27, window_seconds: 604_800, reset_at: resetAt(7 * 24 * 60) },
               },
               {
                 name: "alpha",
@@ -3221,8 +3338,8 @@ describe("Account Dashboard TUI", () => {
                 fetched_at: "2026-04-16T08:00:00.000Z",
                 error_message: null,
                 unlimited: false,
-                five_hour: { used_percent: 18, window_seconds: 18_000, reset_at: "2026-04-16T11:00:00.000Z" },
-                one_week: { used_percent: 42, window_seconds: 604_800, reset_at: "2026-04-19T11:00:00.000Z" },
+                five_hour: { used_percent: 18, window_seconds: 18_000, reset_at: resetAt(180) },
+                one_week: { used_percent: 42, window_seconds: 604_800, reset_at: resetAt(8 * 24 * 60) },
               },
             ],
             failures: [{ name: "gamma", error: "quota failed" }],
@@ -3420,6 +3537,9 @@ describe("Account Dashboard TUI", () => {
                 created_at: "2026-03-19T01:00:00.000Z",
                 updated_at: "2026-04-16T05:20:00.000Z",
                 last_switched_at: "2026-04-15T02:10:00.000Z",
+                last_auth_refresh_status: "error",
+                last_auth_refresh_error:
+                  "Token refresh failed: 401: Your refresh token has already been used to generate a new access token. Please try signing in again.",
                 quota: {
                   status: "stale",
                   plan_type: "pro",
@@ -3456,6 +3576,9 @@ describe("Account Dashboard TUI", () => {
         emailLabel: "beta@example.com",
         refreshStatusLabel: "stale",
       });
+      expect(snapshot.warnings).toContain(
+        'Saved auth for beta needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace beta" to refresh it.',
+      );
       expect(snapshot.accounts[1]?.detailLines).toEqual(
         expect.arrayContaining([
           "Identity: acct-beta:user-beta",
@@ -3557,6 +3680,12 @@ describe("Account Dashboard TUI", () => {
       });
       const enabledProxyRow = enabledSnapshot.accounts.find((account) => account.name === "proxy");
       expect(enabledProxyRow?.proxyLastUpstreamLabel ?? "").toContain("alpha (chatgpt");
+      expect(enabledProxyRow?.detailLines).toEqual(
+        expect.arrayContaining([
+          "ChatGPT: http://127.0.0.1:14555/backend-api",
+          "OpenAI: http://127.0.0.1:14555/v1",
+        ]),
+      );
       expect(enabledSnapshot.accounts.find((account) => account.name === "alpha")?.proxyUpstreamActive).toBe(true);
     } finally {
       await cleanupTempHome(homeDir);

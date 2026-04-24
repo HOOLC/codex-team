@@ -34,6 +34,12 @@ dayjs.extend(timezone);
 
 const execFileAsync = promisify(execFile);
 
+function encodeTestJwt(payload: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" }), "utf8").toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return `${header}.${body}.sig`;
+}
+
 async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Promise<void> {
   await mkdir(join(homeDir, ".codex-team"), { recursive: true });
   await writeFile(
@@ -193,6 +199,14 @@ function labelEnd(line: string, label: string, fromIndex = 0): number {
   return resolvedStart + label.length - 1;
 }
 
+function separatorSegments(line: string): Array<{ start: number; end: number }> {
+  const matches = Array.from(line.matchAll(/-+/g));
+  return matches.map((match) => ({
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length - 1,
+  }));
+}
+
 describe("CLI Read Commands", () => {
   test("prints version from --version", async () => {
     const stdout = captureWritable();
@@ -224,6 +238,7 @@ describe("CLI Read Commands", () => {
     expect(output).toContain("codexm --version");
     expect(output).toContain("codexm current [--json]");
     expect(output).toContain("codexm add <name> [--device-auth|--with-api-key] [--force] [--json]");
+    expect(output).toContain("codexm replace <name> [--device-auth|--with-api-key] [--json]");
     expect(output).toContain("codexm doctor [--json]");
     expect(output).toContain("codexm list [name] [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose] [--json]");
     expect(output).toContain("codexm launch [name] [--auto] [--json]");
@@ -447,7 +462,7 @@ describe("CLI Read Commands", () => {
       expect(script).toContain('proxy) subcommands="enable disable status stop" ;;');
       expect(script).toContain('overlay) subcommands="create delete gc" ;;');
       expect(script).toContain('completion) subcommands="zsh bash" ;;');
-      expect(script).toContain("list|ls|switch|launch|protect|unprotect|remove|rename)");
+      expect(script).toContain("list|ls|replace|switch|launch|protect|unprotect|remove|rename)");
       expect(script).not.toContain("launch)|");
       expect(stderr.read()).toBe("");
     } finally {
@@ -1574,10 +1589,11 @@ wire_api = "responses"
       const lines = output.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
       const headerTopIndex =
-        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("5H")
           ? tableStartIndex - 1
           : tableStartIndex;
       const tableLines = lines.slice(headerTopIndex, headerTopIndex + 5);
+      const headerRow = tableLines.find((line) => line.includes("NAME"));
       const currentRow = tableLines.find((line) => line.includes("quota-main"));
 
       expect(lines[0]).toBe("Current managed account: quota-main");
@@ -1588,7 +1604,7 @@ wire_api = "responses"
       expect(output).not.toContain("AVAILABLE");
       expect(output).toContain("ETA");
       expect(output).toContain("SCORE");
-      expect(output).toContain("NEXT RESET");
+      expect(output).toContain("RESET");
       expect(output).toContain("*  quota-main [P]");
       expect(output).toContain("   quota-backup");
       expect(output).toContain("2.1h");
@@ -1596,27 +1612,34 @@ wire_api = "responses"
         dayjs.utc("2026-03-18T21:17:21.000Z").tz(dayjs.tz.guess()).format("MM-DD HH:mm"),
       );
       expect(tableLines).toHaveLength(5);
+      expect(headerRow).toBeDefined();
       expect(currentRow).toBeDefined();
-      expect(tableLines[1]?.indexOf("NAME")).toBe(currentRow?.indexOf("quota-main"));
-      expect(tableLines[0]).toContain("USED");
-      expect(tableLines[1]).toContain("5H");
-      expect(tableLines[1]).toContain("1W");
-      const usedCenter = labelCenter(tableLines[0] ?? "", "USED");
-      const fiveHourCenter = labelCenter(tableLines[1] ?? "", "5H");
-      const oneWeekCenter = labelCenter(tableLines[1] ?? "", "1W", (tableLines[1]?.indexOf("5H") ?? 0) + 1);
-      expect(Math.abs(usedCenter - (fiveHourCenter + oneWeekCenter) / 2)).toBeLessThanOrEqual(1);
+      const nameHeaderIndex = headerRow?.indexOf("NAME") ?? -1;
+      const currentNameIndex = currentRow?.indexOf("quota-main") ?? -1;
+      expect(nameHeaderIndex).toBeGreaterThanOrEqual(currentNameIndex);
+      expect(nameHeaderIndex).toBeLessThanOrEqual(currentNameIndex + "quota-main [P]".length);
+      if (headerTopIndex < tableStartIndex) {
+        expect(tableLines[0]).toContain("5H");
+        expect(tableLines[0]).toContain("1W");
+        expect(headerRow).toContain("USED");
+        expect(headerRow).toContain("RESET");
+      } else {
+        expect(headerRow).toContain("5H");
+        expect(headerRow).toContain("1W");
+        expect(headerRow).toContain("NEXT RESET");
+      }
 
-      const identityColumn = tableLines[1]?.indexOf("IDENTITY") ?? -1;
+      const identityColumn = headerRow?.indexOf("IDENTITY") ?? -1;
       const identityCell = currentRow?.slice(identityColumn, identityColumn + "IDENTITY".length).trim();
       expect(identityCell).toMatch(/^[^\s.]{3}\.\.[^\s.]{3}$/);
       expect(currentRow).toContain("15%");
       expect(currentRow).toContain("45%");
-      expect(tableLines[1]?.indexOf("PLAN")).toBe(tableLines[4]?.indexOf("plus"));
-      expect((tableLines[1]?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
-        tableLines[1]?.indexOf("PLAN") ?? -1,
+      expect(headerRow?.indexOf("PLAN")).toBe(tableLines[4]?.indexOf("plus"));
+      expect((headerRow?.indexOf("SCORE") ?? -1)).toBeGreaterThan(
+        headerRow?.indexOf("PLAN") ?? -1,
       );
-      expect((tableLines[1]?.indexOf("ETA") ?? -1)).toBeGreaterThan(
-        tableLines[1]?.indexOf("SCORE") ?? -1,
+      expect((headerRow?.indexOf("ETA") ?? -1)).toBeGreaterThan(
+        headerRow?.indexOf("SCORE") ?? -1,
       );
     } finally {
       await cleanupTempHome(homeDir);
@@ -1800,6 +1823,164 @@ wire_api = "responses"
     }
   });
 
+  test("list <name> shows a single managed account detail including email and usage", async () => {
+    const homeDir = await createTempHome();
+    const nowSeconds = Math.floor(Date.now() / 1_000);
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 21,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 0,
+                reset_at: nowSeconds - 300,
+              },
+              secondary_window: {
+                used_percent: 34,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 90_000,
+                reset_at: nowSeconds + 90_000,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          }),
+      });
+
+      await writeCurrentAuth(homeDir, "acct-detail-alpha", "chatgpt", "plus", "user-detail-alpha");
+      await runCli(["save", "detail-alpha", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["list", "detail-alpha"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read();
+      expect(output).toContain("Name: detail-alpha");
+      expect(output).toContain("Email: acct-detail-alpha@example.com");
+      expect(output).toContain("Current: yes");
+      expect(output).toContain("Identity: acct-detail-alpha:user-detail-alpha");
+      expect(output).toContain("Quota: available");
+      expect(output).toContain("5H used/reset: 21% / -");
+      expect(output).toMatch(/1W used\/reset: 34% \/ \d{2}-\d{2} \d{2}:\d{2}/u);
+      expect(output).toContain("Usage 7d:");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list warns once when saved auth refresh is broken and replace is needed", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          throw new TypeError("fetch failed");
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auth-broken");
+      await runCli(["save", "auth-broken", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      const metaPath = join(homeDir, ".codex-team", "accounts", "auth-broken", "meta.json");
+      const meta = JSON.parse(await readFile(metaPath, "utf8"));
+      meta.last_auth_refresh_status = "error";
+      meta.last_auth_refresh_error =
+        "Token refresh failed: 401: Your refresh token has already been used to generate a new access token. Please try signing in again.";
+      await writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["list"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toContain(
+        'Warning: Saved auth for auth-broken needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace auth-broken" to refresh it.',
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list warns when a failed auth refresh is nearing access token expiry even before quota turns stale", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          throw new TypeError("fetch failed");
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-auth-expiring");
+      await runCli(["save", "auth-expiring", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const authPath = join(homeDir, ".codex-team", "accounts", "auth-expiring", "auth.json");
+      const auth = JSON.parse(await readFile(authPath, "utf8"));
+      const accessExpSeconds = Math.floor((Date.now() + (2 * 24 * 60 * 60 * 1_000)) / 1_000);
+      auth.tokens.access_token = encodeTestJwt({
+        iss: "https://auth.openai.com",
+        aud: "app_codexm_tests",
+        client_id: "app_codexm_tests",
+        exp: accessExpSeconds,
+        "https://api.openai.com/auth": {
+          chatgpt_account_id: "acct-auth-expiring",
+          chatgpt_plan_type: "plus",
+        },
+      });
+      await writeFile(authPath, `${JSON.stringify(auth, null, 2)}\n`);
+
+      const metaPath = join(homeDir, ".codex-team", "accounts", "auth-expiring", "meta.json");
+      const meta = JSON.parse(await readFile(metaPath, "utf8"));
+      meta.quota = {
+        ...meta.quota,
+        status: "ok",
+      };
+      meta.last_auth_refresh_status = "error";
+      meta.last_auth_refresh_error =
+        "Token refresh failed: 401: Your refresh token has already been used to generate a new access token. Please try signing in again.";
+      await writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["list"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toContain(
+        'Warning: Saved auth for auth-expiring needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace auth-expiring" to refresh it.',
+      );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("list text output uses distinct score and usage color thresholds", async () => {
     const homeDir = await createTempHome();
 
@@ -1930,10 +2111,11 @@ wire_api = "responses"
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
       const headerTopIndex =
-        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("5H")
           ? tableStartIndex - 1
           : tableStartIndex;
       const tableLines = lines.slice(headerTopIndex, headerTopIndex + 12);
+      const headerRow = tableLines.find((line) => line.includes("NAME"));
       const weeklyBlockedRow = tableLines.find((line) => line.includes("quota-weekly-blocked"));
       const fiveHourBlockedRow = tableLines.find((line) => line.includes("quota-five-hour-blocked"));
       const criticalRow = tableLines.find((line) => line.includes("quota-critical"));
@@ -1947,10 +2129,21 @@ wire_api = "responses"
       expect(healthyRow).toBeDefined();
       expect(fullRow).toBeDefined();
       expect(lowRow).toBeDefined();
-      const scoreColumn = tableLines[1]?.indexOf("SCORE") ?? -1;
-      const used5hColumn = tableLines[1]?.indexOf("5H") ?? -1;
-      const used1wColumn = tableLines[1]?.indexOf("1W") ?? -1;
-      const nextResetColumn = tableLines[1]?.indexOf("NEXT RESET") ?? -1;
+      expect(headerRow).toBeDefined();
+      const splitHeader = headerTopIndex < tableStartIndex;
+      const scoreColumn = headerRow?.indexOf("SCORE") ?? -1;
+      const used5hColumn = splitHeader
+        ? headerRow?.indexOf("USED") ?? -1
+        : headerRow?.indexOf("5H") ?? -1;
+      const reset5hColumn = splitHeader
+        ? headerRow?.indexOf("RESET") ?? -1
+        : headerRow?.indexOf("NEXT RESET") ?? -1;
+      const used1wColumn = splitHeader
+        ? headerRow?.indexOf("USED", Math.max(0, reset5hColumn + 1)) ?? -1
+        : headerRow?.indexOf("1W") ?? -1;
+      const reset1wColumn = splitHeader
+        ? headerRow?.indexOf("RESET", Math.max(0, used1wColumn + 1)) ?? -1
+        : reset5hColumn;
       const scoreEnds = [
         labelEnd(weeklyBlockedRow ?? "", "0%", scoreColumn),
         labelEnd(fiveHourBlockedRow ?? "", "0%", scoreColumn),
@@ -1974,7 +2167,10 @@ wire_api = "responses"
       ];
       expect(new Set(used1wEnds).size).toBe(1);
       expect(lowRow?.includes("(5m)")).toBe(true);
-      expect(lowRow?.indexOf("(5m)", nextResetColumn)).toBeGreaterThan(nextResetColumn);
+      expect(lowRow?.indexOf("(5m)", reset5hColumn)).toBeGreaterThan(reset5hColumn);
+      if (splitHeader) {
+        expect(healthyRow?.indexOf("(12h)", reset1wColumn)).toBeGreaterThan(reset1wColumn);
+      }
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2145,7 +2341,7 @@ wire_api = "responses"
       const lines = plainOutput.trimEnd().split("\n");
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
       const headerTopIndex =
-        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("USED")
+        tableStartIndex > 0 && lines[tableStartIndex - 1]?.includes("5H")
           ? tableStartIndex - 1
           : tableStartIndex;
       const tableLines = lines.slice(headerTopIndex, headerTopIndex + 7);
@@ -2155,8 +2351,8 @@ wire_api = "responses"
       expect(decimalRow).toBeDefined();
       expect(integerRow).toBeDefined();
 
-      const used5hColumn = tableLines[1]?.indexOf("5H") ?? -1;
-      const used1wColumn = tableLines[1]?.indexOf("1W") ?? -1;
+      const used5hColumn = tableLines[1]?.indexOf("USED") ?? -1;
+      const used1wColumn = tableLines[1]?.indexOf("USED", Math.max(0, used5hColumn + 1)) ?? -1;
       expect(
         new Set([
           labelEnd(decimalRow ?? "", "64.6%", used5hColumn),
@@ -2322,7 +2518,6 @@ wire_api = "responses"
       const tableStartIndex = lines.findIndex((line) => line.includes("NAME"));
       const tableLines = lines.slice(tableStartIndex, tableStartIndex + 6);
       const dataRows = tableLines.slice(2).filter((line) => !line.includes("proxy"));
-      const nextResetColumn = tableLines[0]?.indexOf("NEXT RESET") ?? -1;
       const bothBlockedRow = dataRows.find((line) => line.includes("both-blocked-later"));
 
       expect(dataRows[0]).toContain("five-hour-only-sooner");
@@ -2333,7 +2528,8 @@ wire_api = "responses"
         .unix(bothBlockedOneWeekResetAt)
         .tz(dayjs.tz.guess())
         .format("MM-DD HH:mm");
-      expect(bothBlockedRow?.indexOf(expectedRecoveryReset, nextResetColumn)).toBe(nextResetColumn);
+      expect(bothBlockedRow).toContain(expectedRecoveryReset);
+      expect(bothBlockedRow).not.toContain(`${expectedRecoveryReset} (`);
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -2489,16 +2685,105 @@ wire_api = "responses"
       expect(listCode).toBe(0);
       const output = listStdout.read().replace(/\u001b\[[0-9;]*m/g, "");
       const lines = output.trimEnd().split("\n");
-      const tableStartIndex = lines.findIndex((line) => line.includes("NAME") && line.includes("NEXT RESET"));
+      const tableStartIndex = lines.findIndex((line) => line.includes("NAME") && line.includes("RESET"));
       const tableLines = lines.slice(tableStartIndex, tableStartIndex + 5);
       const primaryRow = tableLines.find((line) => line.includes("very-long"));
+      const separatorLine = tableLines[1] ?? "";
+      const segments = separatorSegments(separatorLine);
 
       expect(tableStartIndex).toBeGreaterThanOrEqual(0);
       expect(tableLines.every((line) => line.length <= 72)).toBe(true);
       expect(primaryRow).toBeDefined();
       expect(primaryRow).toContain("very-long");
       expect(primaryRow).not.toContain("very-long-primary-account-name");
-      expect(tableLines[0]).toContain("NEXT RESET");
+      expect(tableLines[0]).toContain("RESET");
+      expect(segments.length).toBeGreaterThanOrEqual(7);
+      expect(Math.abs(labelCenter(tableLines[0] ?? "", "NAME") - (((segments[0]?.start ?? 0) + (segments[0]?.end ?? 0)) / 2))).toBeLessThanOrEqual(1);
+      expect(Math.abs(labelCenter(tableLines[0] ?? "", "IDENTITY") - (((segments[1]?.start ?? 0) + (segments[1]?.end ?? 0)) / 2))).toBeLessThanOrEqual(1);
+      expect(Math.abs(labelCenter(tableLines[0] ?? "", "PLAN") - (((segments[2]?.start ?? 0) + (segments[2]?.end ?? 0)) / 2))).toBeLessThanOrEqual(1);
+      expect(Math.abs(labelCenter(tableLines[0] ?? "", "SCORE") - (((segments[3]?.start ?? 0) + (segments[3]?.end ?? 0)) / 2))).toBeLessThanOrEqual(1);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list keeps intrinsic table width on wide terminals instead of stretching the identity column", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      await seedWatchHistory(homeDir, "quota-main");
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async (input, init) => {
+          const url = String(input);
+          if (!url.endsWith("/backend-api/wham/usage")) {
+            return textResponse("not found", 404);
+          }
+
+          const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+          const isPrimary = accountId === "acct-wide-main";
+          return jsonResponse({
+            plan_type: isPrimary ? "plus" : "prolite",
+            rate_limit: {
+              primary_window: {
+                used_percent: isPrimary ? 24 : 61,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: isPrimary ? 1_200 : 2_400,
+                reset_at: isPrimary ? 1_773_868_641 : 1_773_873_200,
+              },
+              secondary_window: {
+                used_percent: isPrimary ? 43 : 18,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          });
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-wide-main");
+      await runCli(["save", "quota-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      await writeCurrentAuth(homeDir, "acct-wide-backup");
+      await runCli(["save", "quota-backup", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      stdout.stream.isTTY = true;
+      stdout.stream.columns = 160;
+      const exitCode = await runCli(["list"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = stdout.read().replace(/\u001b\[[0-9;]*m/g, "");
+      const tableLines = output.split("\n").filter((line) => line.includes("NAME") || line.includes("quota-main"));
+      const headerRow = tableLines.find((line) => line.includes("NAME") && line.includes("IDENTITY"));
+      const currentRow = tableLines.find((line) => line.includes("quota-main"));
+
+      expect(headerRow).toBeDefined();
+      expect(currentRow).toBeDefined();
+      expect((headerRow?.length ?? 0) < 120).toBe(true);
+      expect((currentRow?.length ?? 0) < 120).toBe(true);
+
+      const identityColumn = headerRow?.indexOf("IDENTITY") ?? -1;
+      const identityCell = currentRow?.slice(identityColumn, identityColumn + "IDENTITY".length).trim();
+      expect(identityCell).toMatch(/^[^\s.]{3}\.\.[^\s.]{3}$/);
+      expect((headerRow?.indexOf("PLAN") ?? -1) - (identityColumn + "IDENTITY".length)).toBeLessThanOrEqual(4);
     } finally {
       await cleanupTempHome(homeDir);
     }

@@ -91,6 +91,23 @@ function roundToTwo(value: number): number {
   return Number(value.toFixed(2));
 }
 
+function toFutureResetAtCandidate(window: QuotaWindowSnapshot | null): string | null {
+  if (!window?.reset_at) {
+    return null;
+  }
+
+  const resetAtMs = Date.parse(window.reset_at);
+  if (!Number.isFinite(resetAtMs)) {
+    return null;
+  }
+
+  if (typeof window.reset_after_seconds === "number" && window.reset_after_seconds <= 0) {
+    return null;
+  }
+
+  return resetAtMs > Date.now() ? window.reset_at : null;
+}
+
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
@@ -220,9 +237,10 @@ function aggregateWindow(
     totalRemaining += remainingPlusUnits;
     firstWindowSeconds ??= window.window_seconds;
 
-    if (typeof window.reset_at === "string" && window.reset_at !== "") {
-      if (!resetAt || Date.parse(window.reset_at) < Date.parse(resetAt)) {
-        resetAt = window.reset_at;
+    const futureResetAt = toFutureResetAtCandidate(window);
+    if (futureResetAt) {
+      if (!resetAt || Date.parse(futureResetAt) < Date.parse(resetAt)) {
+        resetAt = futureResetAt;
       }
     }
   }
@@ -321,9 +339,10 @@ function toUsageWindowPayload(window: QuotaWindowSnapshot | null): UsageWindowPa
     return undefined;
   }
 
+  const futureResetAt = toFutureResetAtCandidate(window);
   const resetAtSeconds =
-    window.reset_at && Number.isFinite(Date.parse(window.reset_at))
-      ? Math.floor(Date.parse(window.reset_at) / 1000)
+    futureResetAt && Number.isFinite(Date.parse(futureResetAt))
+      ? Math.floor(Date.parse(futureResetAt) / 1000)
       : undefined;
 
   return {

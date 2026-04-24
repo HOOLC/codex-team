@@ -50,6 +50,7 @@ import {
 } from "../watch/history.js";
 import { type AccountDashboardSnapshot } from "../tui/index.js";
 import type { DebugLogger } from "./tui-runtime.js";
+import { summarizeAuthRepairAdvice } from "../auth-refresh.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -246,6 +247,8 @@ function buildAccountDetailLines(options: {
   now: Date;
   proxyAggregate?: Awaited<ReturnType<typeof buildProxyQuotaAggregate>> | null;
   proxyLastUpstreamLabel?: string | null;
+  proxyBaseUrl?: string | null;
+  proxyOpenAIBaseUrl?: string | null;
 }): string[] {
   const {
     account,
@@ -258,6 +261,8 @@ function buildAccountDetailLines(options: {
     now,
     proxyAggregate,
     proxyLastUpstreamLabel,
+    proxyBaseUrl,
+    proxyOpenAIBaseUrl,
   } = options;
   const etaSummary = toQuotaEtaSummary(eta);
   const formattedScore = colorizeScore(formatRemainingPercent(score), score);
@@ -299,6 +304,8 @@ function buildAccountDetailLines(options: {
     lines.push(
       "",
       "Pool: auto-switch eligible accounts",
+      ...(proxyBaseUrl ? [`ChatGPT: ${proxyBaseUrl}`] : []),
+      ...(proxyOpenAIBaseUrl ? [`OpenAI: ${proxyOpenAIBaseUrl}`] : []),
       ...(proxyLastUpstreamLabel ? [`Last upstream: ${proxyLastUpstreamLabel}`] : []),
       `Bottleneck: ${formatBottleneck(eta)}`,
     );
@@ -332,6 +339,8 @@ function buildDashboardSnapshot(options: {
   proxyAggregate?: Awaited<ReturnType<typeof buildProxyQuotaAggregate>> | null;
   proxyLastUpstream?: ProxyLastUpstreamSelection | null;
   proxyManualUpstreamName?: string | null;
+  proxyBaseUrl?: string | null;
+  proxyOpenAIBaseUrl?: string | null;
   debugLog?: DebugLogger;
 }): AccountDashboardSnapshot {
   const allAccounts = options.accounts.map((account) =>
@@ -436,7 +445,9 @@ function buildDashboardSnapshot(options: {
         etaLabel: formatEtaLabel(eta),
         nextResetLabel,
         fiveHourLabel: formatUsagePercent(account.five_hour),
+        fiveHourResetLabel: formatResetAt(account.five_hour),
         oneWeekLabel: formatUsagePercent(account.one_week),
+        oneWeekResetLabel: formatResetAt(account.one_week),
         authModeLabel: accountMetaForDetail?.auth_mode ?? "-",
         emailLabel: accountMetaForDetail?.email ?? "-",
         accountIdLabel: maskAccountId(account.account_id),
@@ -461,6 +472,8 @@ function buildDashboardSnapshot(options: {
           now,
           proxyAggregate: options.proxyAggregate,
           proxyLastUpstreamLabel,
+          proxyBaseUrl: options.proxyBaseUrl,
+          proxyOpenAIBaseUrl: options.proxyOpenAIBaseUrl,
         }),
       };
     }),
@@ -503,12 +516,17 @@ export async function buildAccountDashboardSnapshot(options: {
   const proxyLastUpstream = proxyState?.enabled === true
     ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
     : null;
+  const authRepairAdvice = await summarizeAuthRepairAdvice(accounts);
   return buildDashboardSnapshot({
     accounts,
     current,
     daemonStatus,
     failures: result.failures,
-    warnings: [...accountWarnings, ...result.warnings],
+    warnings: [
+      ...accountWarnings,
+      ...result.warnings,
+      ...(authRepairAdvice ? [authRepairAdvice] : []),
+    ],
     watchHistory,
     usageSummary,
     refreshedByName,
@@ -516,6 +534,8 @@ export async function buildAccountDashboardSnapshot(options: {
     proxyAggregate,
     proxyLastUpstream,
     proxyManualUpstreamName,
+    proxyBaseUrl: proxyState?.base_url ?? null,
+    proxyOpenAIBaseUrl: proxyState?.openai_base_url ?? null,
     debugLog: options.debugLog,
   });
 }
@@ -551,19 +571,22 @@ export async function buildCachedAccountDashboardSnapshot(options: {
   const proxyLastUpstream = proxyState?.enabled === true
     ? await readLatestProxyUpstreamSelection(options.store.paths.codexTeamDir)
     : null;
+  const authRepairAdvice = await summarizeAuthRepairAdvice(accounts);
 
   return buildDashboardSnapshot({
     accounts,
     current,
     daemonStatus,
     failures: [],
-    warnings,
+    warnings: [...warnings, ...(authRepairAdvice ? [authRepairAdvice] : [])],
     watchHistory,
     usageSummary,
     proxySummary: proxyAggregate?.summary ?? null,
     proxyAggregate,
     proxyLastUpstream,
     proxyManualUpstreamName,
+    proxyBaseUrl: proxyState?.base_url ?? null,
+    proxyOpenAIBaseUrl: proxyState?.openai_base_url ?? null,
     debugLog: options.debugLog,
   });
 }

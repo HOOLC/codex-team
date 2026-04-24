@@ -11,7 +11,7 @@
 
 ## Isolation Rules
 
-- Run the built artifact, not `tsx` source. Use `node dist/cli.cjs ...` after `pnpm build`.
+- Run the built artifact, not `tsx` source. Use `node dist/cli.js ...` after `pnpm build`.
 - Always use a temp `HOME` and isolated `CODEX_HOME`.
 - Copy only the runtime artifacts the scenario needs. The default bootstrap is:
 
@@ -29,6 +29,8 @@ test -f ~/.codex-team/state.json && cp ~/.codex-team/state.json "$HOME/.codex-te
 ```
 
 - If a case only needs a subset of those files, prefer the smaller copy.
+- Never copy live process-state files such as `.codex-team/daemon-state.json`, `.codex-team/proxy-state.json`, or `.codex-team/desktop-state.json` into the temp runtime. They can point the isolated run back at the operator's live daemon/proxy/Desktop state even when `HOME` is different.
+- Treat any PID-bearing state, socket path, lockfile, or live log cursor as contaminated-by-default. Recreate it in the temp runtime instead of cloning it from the operator's real state.
 - If the cloned current auth is already the synthetic `proxy` auth, either copy the temp runtime's `.codex-team/proxy/` backup state as well or immediately switch to a direct managed account before running non-proxy cases.
 - Use a non-default `CODEXM_PROXY_PORT` so live-run validation cannot collide with the live shared daemon/proxy.
 - TUI cases must run in a real TTY or PTY so layout, focus, raw-mode, and quit behavior are observable.
