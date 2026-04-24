@@ -1,3 +1,5 @@
+import { dirname } from "node:path";
+
 import { maskAccountId } from "../auth-snapshot.js";
 import { ensureAccountName, type AccountStore, type ManagedAccount } from "../account-store/index.js";
 import type {
@@ -224,6 +226,9 @@ export async function handleListCommand(options: {
   if (current.account_id === PROXY_ACCOUNT_ID) {
     currentAccounts.add(PROXY_ACCOUNT_NAME);
   }
+  const accountPathByName = new Map(
+    managedAccounts.map((account) => [account.name, dirname(account.authPath)] as const),
+  );
   const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
   const watchHistory = filterWatchHistoryByScope(
     await watchHistoryStore.read(now),
@@ -353,6 +358,7 @@ export async function handleListCommand(options: {
       warnings: combinedWarnings,
       successes: displayResult.successes.map((account) => ({
         ...toCliQuotaSummary(account),
+        account_path: accountPathByName.get(account.name) ?? null,
         is_current: currentAccounts.has(account.name),
         eta: toJsonEta(
           etaByName.get(account.name)

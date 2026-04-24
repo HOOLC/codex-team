@@ -1385,12 +1385,14 @@ wire_api = "responses"
         successes: [
           {
             name: "proxy",
+            account_path: null,
             is_current: false,
             available: "available",
             refresh_status: "ok",
           },
           {
             name: "quota-main",
+            account_path: join(homeDir, ".codex-team", "accounts", "quota-main"),
             is_current: true,
             available: "available",
             credits_balance: 11,
