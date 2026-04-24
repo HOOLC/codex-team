@@ -56,6 +56,7 @@ Detailed design notes live in `docs/internal/`.
 
 - `docs/internal/codex-runtime-channels.md`
 - `docs/internal/live-run-validation/overview.md`
+- `docs/internal/`: detailed design notes and longer operational references live here; keep this file focused on repo-stable contract.
 
 ## User Docs
 
