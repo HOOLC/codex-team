@@ -195,8 +195,11 @@ export async function handleTuiCommand(options: {
                 managedDesktopWaitStatusIntervalMs: options.managedDesktopWaitStatusIntervalMs,
               });
               currentManagedAccountRef.value = PROXY_ACCOUNT_NAME;
+              const proxyStatusMessage = proxyCurrentlyActive
+                ? `Reloaded proxy at ${enabledProxy.state.base_url}.`
+                : `Switched to "proxy" at ${enabledProxy.state.base_url}.`;
               return {
-                statusMessage: proxyCurrentlyActive ? "Reloaded proxy." : 'Switched to "proxy".',
+                statusMessage: proxyStatusMessage,
                 currentName: PROXY_ACCOUNT_NAME,
                 warningMessages: [
                   ...enabledProxy.warnings,

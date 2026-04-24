@@ -11,8 +11,10 @@
 - Add a new managed ChatGPT account with device-code login: `codexm add <name> --device-auth`
 - Add a managed API-key account from stdin: `printenv OPENAI_API_KEY | codexm add <name> --with-api-key`
 - Save the current auth as a named account: `codexm save <name>`
+- Replace an existing saved account in place with a fresh login or API key: `codexm replace <name>`
 - Refresh the saved snapshot for the current managed account: `codexm update`
 - List saved accounts and refreshed quota state: `codexm list`
+- Show one saved account in detail, including email and local usage: `codexm list <name>`
 - List saved accounts and also enqueue a daemon auth refresh: `codexm list --refresh`
 - Show auto-switch score details and normalized 1-hour breakdowns: `codexm list --verbose`
 - Switch local auth to a saved account; when proxy is enabled, update the proxy's current upstream instead of disabling proxy: `codexm switch <name>`
@@ -48,6 +50,7 @@
 - Use `codexm list --verbose` when the user wants score details behind auto-switch ranking.
 - Use `codexm add <name>` when the user wants to create a managed account without changing current auth.
 - Use `codexm add <name> --device-auth` on remote/headless machines where browser callback login is inconvenient.
+- Use `codexm replace <name>` when a saved account exists but its auth or refresh token is no longer usable and the user wants to overwrite that snapshot in place.
 - Use `codexm save <name>` right after the user has already logged into the desired account with native Codex auth or Codex Desktop.
 - Use `codexm update` when the current local auth already matches a managed account and the user wants to refresh the saved snapshot.
 - Use `codexm launch [name]` when the user wants Codex Desktop to start with a specific account immediately; `launch` also ensures the shared baseline daemon is running.

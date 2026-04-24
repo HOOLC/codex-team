@@ -14,6 +14,53 @@ interface CommandStreams {
 
 type DebugLogger = (message: string) => void;
 
+async function resolveAddLikeSnapshot(options: {
+  deviceAuth: boolean;
+  withApiKey: boolean;
+  authLogin: CodexLoginProvider;
+  streams: CommandStreams;
+}): Promise<{
+  snapshot:
+    | {
+      auth_mode: "apikey";
+      OPENAI_API_KEY: string;
+    }
+    | Awaited<ReturnType<CodexLoginProvider["login"]>>;
+  rawConfig: string | null;
+  sourceMode: "apikey" | "device" | "browser";
+}> {
+  const { deviceAuth, withApiKey, authLogin, streams } = options;
+  if (deviceAuth && withApiKey) {
+    throw new Error("Choose either --device-auth or --with-api-key, not both.");
+  }
+
+  if (withApiKey) {
+    const apiKey = (await readStreamToString(streams.stdin)).trim();
+    if (!apiKey) {
+      throw new Error("No API key was provided on stdin.");
+    }
+
+    return {
+      snapshot: {
+        auth_mode: "apikey",
+        OPENAI_API_KEY: apiKey,
+      },
+      rawConfig: "",
+      sourceMode: "apikey",
+    };
+  }
+
+  return {
+    snapshot: await authLogin.login({
+      mode: deviceAuth ? "device" : "browser",
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    }),
+    rawConfig: null,
+    sourceMode: deviceAuth ? "device" : "browser",
+  };
+}
+
 async function readStreamToString(stream: NodeJS.ReadStream): Promise<string> {
   let content = "";
   stream.setEncoding("utf8");
@@ -99,27 +146,19 @@ export async function handleAddCommand(options: {
   ensureAccountName(name);
   ensureNotReservedProxyAccountName(name, "name a managed account");
 
-  const snapshot = withApiKey
-    ? {
-        auth_mode: "apikey" as const,
-        OPENAI_API_KEY: (await readStreamToString(streams.stdin)).trim(),
-      }
-    : await authLogin.login({
-        mode: deviceAuth ? "device" : "browser",
-        stdout: streams.stdout,
-        stderr: streams.stderr,
-      });
-
-  if (withApiKey && !snapshot.OPENAI_API_KEY) {
-    throw new Error("No API key was provided on stdin.");
-  }
+  const { snapshot, rawConfig, sourceMode } = await resolveAddLikeSnapshot({
+    deviceAuth,
+    withApiKey,
+    authLogin,
+    streams,
+  });
 
   const account = await store.addAccountSnapshot(name, snapshot, {
     force,
-    rawConfig: withApiKey ? "" : null,
+    rawConfig,
   });
   debugLog?.(
-    `add: name=${account.name} auth_mode=${account.auth_mode} identity=${maskAccountId(account.identity)} mode=${withApiKey ? "apikey" : deviceAuth ? "device" : "browser"}`,
+    `add: name=${account.name} auth_mode=${account.auth_mode} identity=${maskAccountId(account.identity)} mode=${sourceMode}`,
   );
 
   const payload = {
@@ -132,6 +171,69 @@ export async function handleAddCommand(options: {
     writeJson(streams.stdout, payload);
   } else {
     streams.stdout.write(`Added account "${account.name}" (${maskAccountId(account.identity)}).\n`);
+  }
+
+  return 0;
+}
+
+export async function handleReplaceCommand(options: {
+  name: string | undefined;
+  positionals: string[];
+  deviceAuth: boolean;
+  withApiKey: boolean;
+  json: boolean;
+  store: AccountStore;
+  authLogin: CodexLoginProvider;
+  streams: CommandStreams;
+  debugLog?: DebugLogger;
+}): Promise<number> {
+  const {
+    name,
+    positionals,
+    deviceAuth,
+    withApiKey,
+    json,
+    store,
+    authLogin,
+    streams,
+    debugLog,
+  } = options;
+
+  if (!name || positionals.length !== 1 || (deviceAuth && withApiKey)) {
+    throw new Error(`Usage: ${getUsage("replace")}`);
+  }
+  ensureAccountName(name);
+  ensureNotReservedProxyAccountName(name, "replace a managed account");
+
+  const { accounts } = await store.listAccounts();
+  if (!accounts.some((account) => account.name === name)) {
+    throw new Error(`Managed account "${name}" does not exist.`);
+  }
+  const { snapshot, rawConfig, sourceMode } = await resolveAddLikeSnapshot({
+    deviceAuth,
+    withApiKey,
+    authLogin,
+    streams,
+  });
+
+  const account = await store.addAccountSnapshot(name, snapshot, {
+    force: true,
+    rawConfig,
+  });
+  debugLog?.(
+    `replace: name=${account.name} auth_mode=${account.auth_mode} identity=${maskAccountId(account.identity)} mode=${sourceMode}`,
+  );
+
+  const payload = {
+    ok: true,
+    action: "replace",
+    account: toCliAccount(account),
+  };
+
+  if (json) {
+    writeJson(streams.stdout, payload);
+  } else {
+    streams.stdout.write(`Replaced account "${account.name}" (${maskAccountId(account.identity)}).\n`);
   }
 
   return 0;

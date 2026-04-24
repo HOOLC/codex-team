@@ -31,7 +31,7 @@ After install, use the `codexm` command.
 
 ## Optional Agent Skill
 
-This repo also maintains an optional agent skill for coding agents that can install `SKILL.md` bundles from GitHub. The skill is not required to run `codexm`; the npm package ships only the CLI runtime and library entrypoints.
+This repo also maintains an optional agent skill for coding agents that can install `SKILL.md` bundles from GitHub. The skill is not required to run `codexm`; the npm package ships only the CLI runtime.
 
 Any compatible coding agent can install the same `skills/codexm-usage` path from GitHub. If you are using Codex's built-in GitHub skill installer, pin the skill to the same release tag as the CLI you installed:
 
@@ -39,7 +39,7 @@ Any compatible coding agent can install the same `skills/codexm-usage` path from
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.24
+  --ref v0.0.25
 ```
 
 Replace `--ref` with the release tag that matches your installed CLI version. Restart or reload your coding agent after installing the skill if it caches available skills.
@@ -144,6 +144,7 @@ This is the main command to use when deciding which account to switch to next.
 
 - `codexm add <name>`: add a new managed account snapshot
 - `codexm save <name>`: save the currently active auth as a named snapshot
+- `codexm replace <name>`: overwrite an existing saved snapshot with a new login or API key source
 - `codexm update`: refresh the saved snapshot for the current managed account
 - `codexm rename <old> <new>`: rename a saved snapshot
 - `codexm protect <name>`: exclude a saved snapshot from automatic switch target selection
@@ -159,6 +160,7 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm current`: show the current account plus best-effort quota
 - `codexm doctor`: diagnose local auth, runtime probes, and managed Desktop consistency
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: show saved accounts plus an embedded local usage summary
+- `codexm list <name>`: show one saved account in detail, including email, identity, quota, and the selected local usage window
 - `codexm list --json`: machine-readable output, including proxy current-upstream metadata and last-upstream metadata when available
 - `codexm list --debug`: include diagnostic details about quota normalization and observed ratios
 - `codexm proxy status`: inspect the local proxy daemon and synthetic auth mode

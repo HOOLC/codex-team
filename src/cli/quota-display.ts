@@ -125,16 +125,44 @@ export function compactIdentity(value: string, width: number): string {
   return `${value.slice(0, prefixWidth)}${marker}${value.slice(-suffixWidth)}`;
 }
 
+function formatResetRelativeValue(remainingSeconds: number): string {
+  if (remainingSeconds <= 0) {
+    return "now";
+  }
+
+  if (remainingSeconds < 3_600) {
+    return `${Math.max(1, Math.ceil(remainingSeconds / 60))}m`;
+  }
+
+  if (remainingSeconds < 86_400) {
+    const hours = remainingSeconds / 3_600;
+    const value = hours < 10 ? hours.toFixed(1) : String(Math.round(hours));
+    return `${value.replace(/\.0$/u, "")}h`;
+  }
+
+  const days = remainingSeconds / 86_400;
+  const value = days < 10 ? days.toFixed(1) : String(Math.round(days));
+  return `${value.replace(/\.0$/u, "")}d`;
+}
+
 export function formatResetCountdown(
   window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
 ): string {
-  const resetAfterSeconds = window?.reset_after_seconds;
-  if (typeof resetAfterSeconds !== "number" || resetAfterSeconds < 0 || resetAfterSeconds > 3_600) {
+  const resetAfterSeconds = typeof window?.reset_after_seconds === "number"
+    ? window.reset_after_seconds
+    : (window?.reset_at
+        ? Math.round((Date.parse(window.reset_at) - Date.now()) / 1_000)
+        : null);
+  if (
+    typeof resetAfterSeconds !== "number"
+    || Number.isNaN(resetAfterSeconds)
+    || resetAfterSeconds <= 0
+    || resetAfterSeconds > 3_600
+  ) {
     return "";
   }
 
-  const remainingMinutes = Math.max(1, Math.ceil(resetAfterSeconds / 60));
-  const suffix = ` (${remainingMinutes}m)`;
+  const suffix = ` (${formatResetRelativeValue(resetAfterSeconds)})`;
   return colorizeRecovery(suffix, resetAfterSeconds <= 900);
 }
 
@@ -142,6 +170,13 @@ export function formatResetAt(
   window: AccountQuotaSummary["five_hour"] | AccountQuotaSummary["one_week"],
 ): string {
   if (!window?.reset_at) {
+    return "-";
+  }
+
+  const resetAfterSeconds = typeof window.reset_after_seconds === "number"
+    ? window.reset_after_seconds
+    : Math.round((Date.parse(window.reset_at) - Date.now()) / 1_000);
+  if (!Number.isFinite(resetAfterSeconds) || resetAfterSeconds <= 0) {
     return "-";
   }
 

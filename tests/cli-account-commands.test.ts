@@ -142,6 +142,86 @@ describe("CLI Account Commands", () => {
     }
   });
 
+  test("replaces an existing managed account from a new browser login without changing current auth", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await writeCurrentAuth(homeDir, "acct-replace-before");
+      await runCli(["save", "replace-main", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+      const calls: string[] = [];
+      const exitCode = await runCli(["replace", "replace-main", "--json"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        authLogin: {
+          login: async (request) => {
+            calls.push(request.mode);
+            return createAuthPayload("acct-replaced-main", "chatgpt", "pro", "user-replaced");
+          },
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(calls).toEqual(["browser"]);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        ok: true,
+        action: "replace",
+        account: {
+          name: "replace-main",
+          account_id: "acct-replaced-main",
+          user_id: "user-replaced",
+        },
+      });
+      expect(stderr.read()).toBe("");
+
+      const savedAuthRaw = await readFile(
+        join(homeDir, ".codex-team", "accounts", "replace-main", "auth.json"),
+        "utf8",
+      );
+      expect(JSON.parse(savedAuthRaw)).toMatchObject({
+        tokens: {
+          account_id: "acct-replaced-main",
+        },
+      });
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("acct-replace-before");
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("replace rejects unknown managed account names", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["replace", "missing"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        authLogin: {
+          login: async () => createAuthPayload("acct-unreachable"),
+        },
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stdout.read()).toBe("");
+      expect(stderr.read()).toContain('Managed account "missing" does not exist.');
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("rejects mutually exclusive add login modes", async () => {
     const stdout = captureWritable();
     const stderr = captureWritable();

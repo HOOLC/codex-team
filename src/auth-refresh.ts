@@ -1,5 +1,6 @@
 import type { AccountStore, ManagedAccount } from "./account-store/index.js";
 import {
+  decodeJwtPayload,
   getSnapshotTokenExpiresAt,
   readAuthSnapshotFile,
   type AuthSnapshot,
@@ -9,12 +10,20 @@ import { extractChatGPTAuth } from "./quota-client.js";
 export const AUTH_REFRESH_SWEEP_INTERVAL_MS = 30 * 60 * 1_000;
 export const AUTH_REFRESH_MIN_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 export const AUTH_REFRESH_EXPIRY_WINDOW_MS = 48 * 60 * 60 * 1_000;
+export const AUTH_REPAIR_WARNING_WINDOW_MS = 3 * 24 * 60 * 60 * 1_000;
 
 const AUTH_REFRESH_RETRY_BACKOFF_MS = [
   30 * 60 * 1_000,
   2 * 60 * 60 * 1_000,
   6 * 60 * 60 * 1_000,
   24 * 60 * 60 * 1_000,
+];
+const AUTH_REFRESH_REPAIR_ERROR_PATTERNS = [
+  /token_expired/i,
+  /refresh token/i,
+  /sign(?:ing)? in again/i,
+  /token is expired/i,
+  /already been used to generate a new access token/i,
 ];
 
 export interface AuthRefreshDecision {
@@ -58,6 +67,70 @@ function resolveRetryBackoffMs(failCount: number): number {
   return AUTH_REFRESH_RETRY_BACKOFF_MS[
     Math.min(Math.max(0, failCount), AUTH_REFRESH_RETRY_BACKOFF_MS.length - 1)
   ] ?? AUTH_REFRESH_RETRY_BACKOFF_MS[AUTH_REFRESH_RETRY_BACKOFF_MS.length - 1]!;
+}
+
+async function needsAuthRepair(account: ManagedAccount, now: Date): Promise<boolean> {
+  const refreshError = account.last_auth_refresh_status === "error"
+    && AUTH_REFRESH_REPAIR_ERROR_PATTERNS.some((pattern) =>
+      pattern.test(account.last_auth_refresh_error ?? "")
+    );
+  if (!refreshError) {
+    return false;
+  }
+
+  if (account.quota.status === "stale") {
+    return true;
+  }
+
+  try {
+    const snapshot = await readAuthSnapshotFile(account.authPath);
+    const expiresAt = getSnapshotAccessTokenExpiresAt(snapshot) ?? getSnapshotTokenExpiresAt(snapshot);
+    if (!expiresAt) {
+      return false;
+    }
+
+    const expiresAtMs = Date.parse(expiresAt);
+    return Number.isFinite(expiresAtMs) && expiresAtMs <= now.getTime() + AUTH_REPAIR_WARNING_WINDOW_MS;
+  } catch {
+    return false;
+  }
+}
+
+function getSnapshotAccessTokenExpiresAt(snapshot: AuthSnapshot): string | null {
+  const accessToken = snapshot.tokens?.access_token;
+  if (typeof accessToken !== "string" || accessToken.trim() === "") {
+    return null;
+  }
+
+  try {
+    const exp = decodeJwtPayload(accessToken).exp;
+    return typeof exp === "number" && Number.isFinite(exp) && exp > 0
+      ? new Date(exp * 1_000).toISOString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function summarizeAuthRepairAdvice(
+  accounts: ManagedAccount[],
+  now: Date = new Date(),
+): Promise<string | null> {
+  const affected: string[] = [];
+
+  for (const account of accounts) {
+    if (await needsAuthRepair(account, now)) {
+      affected.push(account.name);
+    }
+  }
+
+  if (affected.length === 0) {
+    return null;
+  }
+
+  return affected.length === 1
+    ? `Saved auth for ${affected[0]} needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace ${affected[0]}" to refresh it.`
+    : `Saved auth for ${affected.length} accounts (${affected.join(", ")}) needs replace: refresh failed and each account is already stale or expires within 3d. Run "codexm replace <name>" for each affected account.`;
 }
 
 export function inspectManagedAccountAuthRefreshNeed(

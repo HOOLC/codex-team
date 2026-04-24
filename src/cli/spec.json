@@ -28,7 +28,7 @@
     { "flag": "--with-api-key", "description": "add account by reading an API key from stdin", "global": false },
     { "flag": "--yes", "description": "skip removal confirmation", "global": false, "aliases": ["-y"] }
   ],
-  "completionAccountCommands": ["launch", "list", "protect", "remove", "rename", "switch", "unprotect"],
+  "completionAccountCommands": ["launch", "list", "protect", "remove", "rename", "replace", "switch", "unprotect"],
   "notes": [
     "In an interactive terminal, running plain codexm opens the account dashboard; use \"codexm tui [query]\" for an explicit entry or initial filter.",
     "codexm current keeps the live runtime identity and shows best-effort quota from the proxy aggregate, direct runtime, or the saved managed snapshot.",
@@ -82,6 +82,14 @@
       "helpUsages": ["codexm save <name> [--force] [--json]"],
       "usageErrors": {
         "default": "codexm save <name> [--force] [--json]"
+      }
+    },
+    {
+      "name": "replace",
+      "flags": ["--device-auth", "--with-api-key", "--json"],
+      "helpUsages": ["codexm replace <name> [--device-auth|--with-api-key] [--json]"],
+      "usageErrors": {
+        "default": "codexm replace <name> [--device-auth|--with-api-key] [--json]"
       }
     },
     {
@@ -274,6 +282,13 @@
             }
           },
           {
+            "usage": "codexm replace <name>",
+            "description": {
+              "en": "overwrite an existing saved snapshot with a new login or API key source",
+              "zh-CN": "用新的登录结果或 API key 原地覆盖已保存快照"
+            }
+          },
+          {
             "usage": "codexm update",
             "description": {
               "en": "refresh the saved snapshot for the current managed account",
@@ -364,6 +379,13 @@
             "description": {
               "en": "show saved accounts plus an embedded local usage summary",
               "zh-CN": "查看所有保存账号，并附带一行本地 usage 摘要"
+            }
+          },
+          {
+            "usage": "codexm list <name>",
+            "description": {
+              "en": "show one saved account in detail, including email, identity, quota, and the selected local usage window",
+              "zh-CN": "查看单个已保存账号的详情，包括邮箱、identity、quota 和所选本地 usage 窗口"
             }
           },
           {

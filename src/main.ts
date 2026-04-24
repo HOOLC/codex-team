@@ -47,6 +47,7 @@ import { writeJson } from "./cli/output.js";
 import {
   handleAddCommand,
   handleProtectCommand,
+  handleReplaceCommand,
   handleRemoveCommand,
   handleRenameCommand,
   handleSaveCommand,
@@ -286,6 +287,20 @@ export async function runCli(
           force: parsed.flags.has("--force"),
           store,
           stdout: streams.stdout,
+          debugLog,
+        });
+      }
+
+      case "replace": {
+        return await handleReplaceCommand({
+          name: parsed.positionals[0],
+          positionals: parsed.positionals,
+          deviceAuth: parsed.flags.has("--device-auth"),
+          withApiKey: parsed.flags.has("--with-api-key"),
+          json,
+          store,
+          authLogin,
+          streams,
           debugLog,
         });
       }

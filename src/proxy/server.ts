@@ -1,6 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import type { OutgoingHttpHeaders } from "node:http";
+import {
+  brotliDecompressSync,
+  gunzipSync,
+  inflateSync,
+  zstdDecompressSync,
+} from "node:zlib";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
@@ -24,11 +30,41 @@ import {
 } from "./runtime.js";
 import { isSyntheticProxyBearerToken } from "./synthetic-auth.js";
 import {
+  createProxyResponseId,
+} from "./context.js";
+import {
+  cloneJsonValue,
+  parseMaybeJson,
+} from "./json.js";
+import {
+  buildRequestShapeWithoutInput,
+  persistProxyResponseCheckpointFromTurn,
+  rewriteEventResponseId,
+  rewriteProxyCreateRequest,
+  rewriteTopLevelResponseId,
+} from "./replay.js";
+import {
   buildProxyAccountCheckV4Payload,
   buildProxyAutoTopUpSettingsPayload,
   buildProxyUsagePayloadForStore,
   buildProxyWhamAccountsCheckPayloadForStore,
 } from "./quota.js";
+import {
+  canonicalOutputItemsFromResponsePayload,
+  chatCompletionToResponsesBody,
+  completionToResponsesBody,
+  normalizeResponseOutputItem,
+  normalizeResponsesInput,
+  normalizeResponsesRequestBody,
+  normalizeWebSocketInput,
+  normalizeWebSocketResponsesCreateRequestBody,
+  parseResponsePayloadFromSse,
+  parseWebSocketPayload,
+  rawWebSocketDataToText,
+  responseOutputItemsToConversationItems,
+  responsesPayloadToChatCompletion,
+  responsesPayloadToCompletion,
+} from "./responses-adapter.js";
 import {
   hasExhaustedRateLimitSignal,
   hasQuotaExhaustionSignal,
@@ -75,16 +111,14 @@ interface ProxyForwardResult {
   errorPayload?: Record<string, unknown>;
 }
 
-interface ProxyStoredConversation {
-  accountName: string;
-  conversationItems: unknown[];
-}
-
 interface ProxyActiveTurn {
   accountName: string;
   bufferedMessages: string[];
+  chainId: string;
   fullInput: unknown[];
   outputItems: unknown[];
+  parentProxyResponseId: string | null;
+  proxyResponseId: string;
   replayAttempted: boolean;
   replayCount: number;
   replayLocked: boolean;
@@ -93,6 +127,7 @@ interface ProxyActiveTurn {
   replaySkipReason: ProxyReplaySkipReason | null;
   replayedFromAccountNames: string[];
   requestBody: Record<string, unknown>;
+  requestShapeWithoutInput: Record<string, unknown>;
   requestId: string;
   serviceTier: ProxyServiceTier;
   responseId: string | null;
@@ -103,7 +138,6 @@ interface ProxyWebSocketContext {
   activeTurn: ProxyActiveTurn | null;
   connectionRequestId: string;
   downstreamAuthKind: string;
-  historyByResponseId: Map<string, ProxyStoredConversation>;
   upstreamAccount: ProxyUpstreamAccount | null;
   upstreamSocket: WebSocket | null;
 }
@@ -126,8 +160,6 @@ interface ProxyReplayDiagnostic {
   replayedFromAccountNames: string[];
 }
 
-const DEFAULT_CODEX_INSTRUCTIONS = "You are Codex.";
-
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/u, "");
 }
@@ -138,13 +170,69 @@ function normalizePathname(pathname: string): string {
     .replace(/^(?:\/backend-api){2,}(?=\/|$)/u, "/backend-api");
 }
 
-function readRequestBody(request: IncomingMessage): Promise<string> {
+function normalizedHeaderValue(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value.join(", ");
+  }
+  return value ?? "";
+}
+
+function decodeRequestBody(buffer: Buffer, contentEncodingHeader: string): Buffer {
+  const encodings = contentEncodingHeader
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  if (encodings.length === 0) {
+    return buffer;
+  }
+
+  let decoded = buffer;
+  for (const encoding of [...encodings].reverse()) {
+    switch (encoding) {
+      case "identity":
+        break;
+      case "gzip":
+      case "x-gzip":
+        decoded = gunzipSync(decoded);
+        break;
+      case "deflate":
+        decoded = inflateSync(decoded);
+        break;
+      case "br":
+        decoded = brotliDecompressSync(decoded);
+        break;
+      case "zstd":
+        decoded = zstdDecompressSync(decoded);
+        break;
+      default:
+        throw new Error(`Unsupported request content-encoding: ${encoding}`);
+    }
+  }
+
+  return decoded;
+}
+
+function readRequestBody(request: IncomingMessage): Promise<{ bodyText: string; rawBytes: number }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk) => {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    request.on("end", () => {
+      try {
+        const bodyBuffer = Buffer.concat(chunks);
+        const decodedBody = decodeRequestBody(
+          bodyBuffer,
+          normalizedHeaderValue(request.headers["content-encoding"]),
+        );
+        resolve({
+          bodyText: decodedBody.toString("utf8"),
+          rawBytes: bodyBuffer.byteLength,
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
     request.on("error", reject);
   });
 }
@@ -154,9 +242,16 @@ function requestHeadersToFetchHeaders(
   overrides: Record<string, string | null> = {},
 ): Headers {
   const headers = new Headers();
+  const normalizedOverrideKeys = new Set(Object.keys(overrides).map((key) => key.toLowerCase()));
   for (const [key, rawValue] of Object.entries(request.headers)) {
     const lowerKey = key.toLowerCase();
-    if (lowerKey === "host" || lowerKey === "content-length" || lowerKey === "connection") {
+    if (
+      lowerKey === "host"
+      || lowerKey === "content-length"
+      || lowerKey === "connection"
+      || lowerKey === "content-encoding"
+      || lowerKey === "transfer-encoding"
+    ) {
       continue;
     }
     if (Array.isArray(rawValue)) {
@@ -174,6 +269,10 @@ function requestHeadersToFetchHeaders(
     } else {
       headers.set(key, value);
     }
+  }
+
+  if (!normalizedOverrideKeys.has("accept-encoding") && !headers.has("accept-encoding")) {
+    headers.set("accept-encoding", "identity");
   }
 
   return headers;
@@ -349,8 +448,8 @@ async function writeBufferedUpstreamResponse(response: ServerResponse, upstream:
   responseHeaders: Record<string, string>;
   responseBodyText: string;
 }> {
-  const responseHeaders = upstreamResponseHeadersToRecord(upstream);
   const responseBodyText = await upstream.text();
+  const responseHeaders = upstreamResponseHeadersToRecord(upstream);
   response.writeHead(upstream.status, responseHeaders);
   response.end(responseBodyText);
   return {
@@ -358,6 +457,33 @@ async function writeBufferedUpstreamResponse(response: ServerResponse, upstream:
     responseHeaders,
     responseBodyText,
   };
+}
+
+async function writeUpstreamResponseWithOptionalBuffering(options: {
+  response: ServerResponse;
+  upstream: Response;
+}): Promise<{
+  responseBytes: number;
+  responseHeaders: Record<string, string> | null;
+  responseBodyText: string | null;
+  buffered: boolean;
+}> {
+  try {
+    const buffered = await writeBufferedUpstreamResponse(options.response, options.upstream);
+    return {
+      responseBytes: buffered.responseBytes,
+      responseHeaders: buffered.responseHeaders,
+      responseBodyText: buffered.responseBodyText,
+      buffered: true,
+    };
+  } catch {
+    return {
+      responseBytes: await writeUpstreamResponse(options.response, options.upstream),
+      responseHeaders: null,
+      responseBodyText: null,
+      buffered: false,
+    };
+  }
 }
 
 function writeBufferedResponse(
@@ -446,14 +572,32 @@ async function writeUpstreamResponseWithLogging(options: {
     };
   }
 
-  const buffered = await writeBufferedUpstreamResponse(options.response, options.upstream);
+  const buffered = await writeUpstreamResponseWithOptionalBuffering({
+    response: options.response,
+    upstream: options.upstream,
+  });
+  if (!buffered.buffered) {
+    const fallbackPayload = buildRequestResponseLogPayload({
+      request: options.request,
+      bodyText: options.bodyText,
+      upstreamUrl: options.upstreamUrl,
+      upstreamRequestHeaders: options.upstreamRequestHeaders,
+      responseHeaders: null,
+      responseBodyText: "[unavailable: upstream body could not be buffered for diagnostics]",
+    });
+    return {
+      responseBytes: buffered.responseBytes,
+      diagnostic: captureDiagnostic ? fallbackPayload : undefined,
+      errorPayload: captureError ? fallbackPayload : undefined,
+    };
+  }
   const payload = buildRequestResponseLogPayload({
     request: options.request,
     bodyText: options.bodyText,
     upstreamUrl: options.upstreamUrl,
     upstreamRequestHeaders: options.upstreamRequestHeaders,
-    responseHeaders: buffered.responseHeaders,
-    responseBodyText: buffered.responseBodyText,
+    responseHeaders: buffered.responseHeaders ?? {},
+    responseBodyText: buffered.responseBodyText ?? "",
   });
 
   return {
@@ -473,10 +617,6 @@ function parseJsonBody(bodyText: string): Record<string, unknown> {
     throw new Error("JSON request body must be an object.");
   }
   return parsed as Record<string, unknown>;
-}
-
-function parseMaybeJson(text: string): unknown {
-  return JSON.parse(text) as unknown;
 }
 
 function isApiKeyAccount(account: ManagedAccount): boolean {
@@ -673,6 +813,21 @@ function buildChatGPTAuthHeaders(request: IncomingMessage, selected: ProxyUpstre
   return requestHeadersToFetchHeaders(request, {
     authorization: `Bearer ${auth.accessToken}`,
     "ChatGPT-Account-Id": auth.accountId,
+  });
+}
+
+function buildChatGPTBackendHeaders(request: IncomingMessage, selected: ProxyUpstreamAccount | null): Headers {
+  if (!selected) {
+    return requestHeadersToFetchHeaders(request, {
+      "accept-encoding": "identity",
+    });
+  }
+
+  const auth = extractChatGPTAuth(selected.snapshot);
+  return requestHeadersToFetchHeaders(request, {
+    authorization: `Bearer ${auth.accessToken}`,
+    "ChatGPT-Account-Id": auth.accountId,
+    "accept-encoding": "identity",
   });
 }
 
@@ -898,8 +1053,8 @@ async function forwardChatGPTBackend(options: {
     ? await selectProxyAccount(options.store, "chatgpt")
     : null;
   const outgoingHeaders = shouldReplaceAuth
-    ? buildChatGPTAuthHeaders(options.request, selected)
-    : requestHeadersToFetchHeaders(options.request);
+    ? buildChatGPTBackendHeaders(options.request, selected)
+    : buildChatGPTBackendHeaders(options.request, null);
 
   if (shouldReplaceAuth && !selected) {
     const errorMessage = "No eligible ChatGPT account is available for proxy upstream.";
@@ -948,437 +1103,6 @@ async function forwardChatGPTBackend(options: {
   };
 }
 
-function resolveInstructions(value: unknown): string {
-  return typeof value === "string" && value.trim() !== ""
-    ? value
-    : DEFAULT_CODEX_INSTRUCTIONS;
-}
-
-function normalizeInputContent(content: unknown): unknown {
-  if (typeof content === "string") {
-    return [{ type: "input_text", text: content }];
-  }
-
-  if (!Array.isArray(content)) {
-    return content;
-  }
-
-  return content.map((part) => {
-    if (typeof part === "string") {
-      return { type: "input_text", text: part };
-    }
-    if (typeof part !== "object" || part === null || Array.isArray(part)) {
-      return part;
-    }
-    const record = part as Record<string, unknown>;
-    if (record.type === "text" && typeof record.text === "string") {
-      return {
-        ...record,
-        type: "input_text",
-      };
-    }
-    return record;
-  });
-}
-
-function normalizeResponsesInputItem(item: unknown): unknown {
-  if (typeof item === "string") {
-    return {
-      role: "user",
-      content: [{ type: "input_text", text: item }],
-    };
-  }
-
-  if (typeof item !== "object" || item === null || Array.isArray(item)) {
-    return item;
-  }
-
-  const record = item as Record<string, unknown>;
-  return {
-    ...record,
-    role: typeof record.role === "string" ? record.role : "user",
-    content: normalizeInputContent(record.content ?? ""),
-  };
-}
-
-function normalizeResponsesInput(input: unknown): unknown[] {
-  if (Array.isArray(input)) {
-    return input.map((item) => normalizeResponsesInputItem(item));
-  }
-  if (input === undefined) {
-    return [];
-  }
-  return [normalizeResponsesInputItem(input)];
-}
-
-function cloneJsonValue<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function normalizeWebSocketInput(input: unknown): unknown[] {
-  if (Array.isArray(input)) {
-    return cloneJsonValue(input);
-  }
-  if (input === undefined) {
-    return [];
-  }
-  return [cloneJsonValue(input)];
-}
-
-function normalizeResponseOutputContentPart(
-  part: unknown,
-  role: string,
-): Record<string, unknown> | null {
-  if (typeof part === "string") {
-    return {
-      type: role === "assistant" ? "output_text" : "input_text",
-      text: part,
-    };
-  }
-
-  if (typeof part !== "object" || part === null || Array.isArray(part)) {
-    return null;
-  }
-
-  const record = part as Record<string, unknown>;
-  const type = typeof record.type === "string" ? record.type : null;
-  const text = typeof record.text === "string"
-    ? record.text
-    : typeof record.output_text === "string"
-      ? record.output_text
-      : null;
-  const refusal = typeof record.refusal === "string"
-    ? record.refusal
-    : null;
-  if (
-    (type === null || type === "text" || type === "input_text" || type === "output_text")
-    && text !== null
-  ) {
-    return {
-      type: role === "assistant" ? "output_text" : "input_text",
-      text,
-    };
-  }
-
-  if (role === "assistant" && type === "refusal" && refusal !== null) {
-    return {
-      type: "refusal",
-      refusal,
-    };
-  }
-
-  if (type === "input_image" && typeof record.image_url === "string") {
-    return {
-      type: "input_image",
-      image_url: record.image_url,
-    };
-  }
-
-  return null;
-}
-
-function normalizeResponseOutputMessageItem(record: Record<string, unknown>): Record<string, unknown> | null {
-  const role = typeof record.role === "string" ? record.role : "assistant";
-  const content = Array.isArray(record.content)
-    ? record.content
-      .map((part) => normalizeResponseOutputContentPart(part, role))
-      .filter((part): part is Record<string, unknown> => part !== null)
-    : [];
-  if (content.length === 0) {
-    return null;
-  }
-
-  return {
-    role,
-    content,
-  };
-}
-
-function normalizeResponseOutputItem(item: unknown): unknown | null {
-  if (typeof item !== "object" || item === null || Array.isArray(item)) {
-    return null;
-  }
-
-  const record = item as Record<string, unknown>;
-  const type = record.type;
-  if (typeof type !== "string" || type.trim() === "") {
-    return null;
-  }
-
-  if (type === "message") {
-    return normalizeResponseOutputMessageItem(record);
-  }
-
-  if (type === "function_call") {
-    if (
-      typeof record.call_id !== "string"
-      || typeof record.name !== "string"
-      || typeof record.arguments !== "string"
-    ) {
-      return null;
-    }
-    return {
-      type,
-      call_id: record.call_id,
-      name: record.name,
-      arguments: record.arguments,
-    };
-  }
-
-  if (type === "function_call_output" || type === "mcp_tool_call_output") {
-    if (typeof record.call_id !== "string" || record.output === undefined) {
-      return null;
-    }
-    return {
-      type,
-      call_id: record.call_id,
-      output: cloneJsonValue(record.output),
-    };
-  }
-
-  if (type === "custom_tool_call_output") {
-    if (typeof record.call_id !== "string" || record.output === undefined) {
-      return null;
-    }
-    return {
-      type,
-      call_id: record.call_id,
-      ...(typeof record.name === "string" ? { name: record.name } : {}),
-      output: cloneJsonValue(record.output),
-    };
-  }
-
-  if (type === "tool_search_output") {
-    if (
-      typeof record.call_id !== "string"
-      || typeof record.status !== "string"
-      || typeof record.execution !== "string"
-      || !Array.isArray(record.tools)
-    ) {
-      return null;
-    }
-    return {
-      type,
-      call_id: record.call_id,
-      status: record.status,
-      execution: record.execution,
-      tools: cloneJsonValue(record.tools),
-    };
-  }
-
-  return null;
-}
-
-function responseOutputItemsToConversationItems(items: unknown): unknown[] {
-  if (!Array.isArray(items)) {
-    return [];
-  }
-
-  return items
-    .map((item) => normalizeResponseOutputItem(item))
-    .filter((item): item is NonNullable<typeof item> => item !== null);
-}
-
-function extractChatInstructions(messages: unknown): string {
-  if (!Array.isArray(messages)) {
-    return DEFAULT_CODEX_INSTRUCTIONS;
-  }
-
-  const parts = messages.flatMap((message) => {
-    if (typeof message !== "object" || message === null || Array.isArray(message)) {
-      return [];
-    }
-    const record = message as Record<string, unknown>;
-    if (record.role !== "system") {
-      return [];
-    }
-    const normalized = normalizeInputContent(record.content ?? "");
-    if (typeof normalized === "string") {
-      return normalized.trim() === "" ? [] : [normalized];
-    }
-    if (!Array.isArray(normalized)) {
-      return [];
-    }
-    return normalized
-      .map((part) => {
-        if (typeof part !== "object" || part === null || Array.isArray(part)) {
-          return null;
-        }
-        return typeof (part as Record<string, unknown>).text === "string"
-          ? String((part as Record<string, unknown>).text).trim()
-          : null;
-      })
-      .filter((value): value is string => value !== null && value !== "");
-  });
-
-  return parts.length > 0 ? parts.join("\n\n") : DEFAULT_CODEX_INSTRUCTIONS;
-}
-
-function chatMessagesToResponsesInput(messages: unknown): unknown[] {
-  if (!Array.isArray(messages)) {
-    return normalizeResponsesInput(messages);
-  }
-
-  return messages
-    .filter((message) => {
-      if (typeof message !== "object" || message === null || Array.isArray(message)) {
-        return true;
-      }
-      return (message as Record<string, unknown>).role !== "system";
-    })
-    .map((message) => normalizeResponsesInputItem(message));
-}
-
-function normalizeResponsesRequestBody(body: Record<string, unknown>): Record<string, unknown> {
-  const next: Record<string, unknown> = {
-    model: body.model,
-    instructions: resolveInstructions(body.instructions),
-    store: false,
-    stream: true,
-    input: normalizeResponsesInput(body.input),
-  };
-  for (const key of ["temperature", "top_p", "tools", "tool_choice", "response_format", "metadata", "service_tier"]) {
-    if (body[key] !== undefined) {
-      next[key] = body[key];
-    }
-  }
-  if (body.max_output_tokens !== undefined) {
-    next.max_output_tokens = body.max_output_tokens;
-  }
-  return next;
-}
-
-function chatCompletionToResponsesBody(body: Record<string, unknown>): Record<string, unknown> {
-  const next: Record<string, unknown> = {
-    model: body.model,
-    instructions: extractChatInstructions(body.messages),
-    store: false,
-    stream: true,
-    input: chatMessagesToResponsesInput(body.messages),
-  };
-  for (const key of ["temperature", "top_p", "tools", "tool_choice", "response_format", "service_tier"]) {
-    if (body[key] !== undefined) {
-      next[key] = body[key];
-    }
-  }
-  if (body.max_completion_tokens !== undefined) {
-    next.max_output_tokens = body.max_completion_tokens;
-  } else if (body.max_tokens !== undefined) {
-    next.max_output_tokens = body.max_tokens;
-  }
-  return next;
-}
-
-function completionToResponsesBody(body: Record<string, unknown>): Record<string, unknown> {
-  const next: Record<string, unknown> = {
-    model: body.model,
-    instructions: resolveInstructions(body.instructions),
-    store: false,
-    stream: true,
-    input: normalizeResponsesInput(body.prompt ?? ""),
-  };
-  for (const key of ["temperature", "top_p", "service_tier"]) {
-    if (body[key] !== undefined) {
-      next[key] = body[key];
-    }
-  }
-  if (body.max_tokens !== undefined) {
-    next.max_output_tokens = body.max_tokens;
-  }
-  return next;
-}
-
-function parseResponsePayloadFromSse(text: string): unknown {
-  const lines = text.split(/\r?\n/u);
-  let currentData: string[] = [];
-  let lastPayload: unknown = null;
-  let lastResponse: unknown = null;
-  let accumulatedOutputText = "";
-  const outputItems = new Map<number, unknown>();
-
-  const flush = () => {
-    if (currentData.length === 0) {
-      return;
-    }
-    const payloadText = currentData.join("\n").trim();
-    currentData = [];
-    if (payloadText === "") {
-      return;
-    }
-    try {
-      const payload = parseMaybeJson(payloadText);
-      lastPayload = payload;
-      if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
-        const record = payload as Record<string, unknown>;
-        const response = record.response;
-        if (response !== undefined) {
-          lastResponse = response;
-        }
-        if (record.type === "response.output_text.delta" && typeof record.delta === "string") {
-          accumulatedOutputText += record.delta;
-        }
-        if (record.type === "response.output_text.done" && typeof record.text === "string") {
-          accumulatedOutputText = record.text;
-        }
-        if (record.type === "response.output_item.done" && record.item !== undefined) {
-          const outputIndex = typeof record.output_index === "number"
-            ? record.output_index
-            : outputItems.size;
-          outputItems.set(outputIndex, record.item);
-        }
-      }
-    } catch {
-      lastPayload = { detail: payloadText };
-    }
-  };
-
-  for (const line of lines) {
-    if (line.startsWith("data:")) {
-      currentData.push(line.slice(5).trimStart());
-      continue;
-    }
-    if (line.trim() === "") {
-      flush();
-    }
-  }
-  flush();
-  if (typeof lastResponse === "object" && lastResponse !== null && !Array.isArray(lastResponse)) {
-    const response = { ...(lastResponse as Record<string, unknown>) };
-    const currentOutput = Array.isArray(response.output) ? response.output : [];
-    if (currentOutput.length === 0 && outputItems.size > 0) {
-      response.output = [...outputItems.entries()]
-        .sort((left, right) => left[0] - right[0])
-        .map(([, item]) => item);
-    }
-    const extractedText = extractResponseText(response);
-    if (extractedText !== "") {
-      response.output_text = extractedText;
-    } else if (accumulatedOutputText !== "") {
-      response.output_text = accumulatedOutputText;
-    }
-    return response;
-  }
-  return lastPayload ?? {};
-}
-
-async function readResponsesPayload(upstream: Response): Promise<unknown> {
-  const text = await upstream.text();
-  if (text.trim() === "") {
-    return {};
-  }
-
-  const contentType = upstream.headers.get("content-type")?.toLowerCase() ?? "";
-  if (contentType.includes("text/event-stream") || text.startsWith("event:") || text.startsWith("data:")) {
-    return parseResponsePayloadFromSse(text);
-  }
-
-  try {
-    return parseMaybeJson(text);
-  } catch {
-    return { detail: text };
-  }
-}
-
 async function readBufferedJsonPayload(upstream: Response): Promise<{
   bodyText: string;
   payload: unknown;
@@ -1395,6 +1119,7 @@ async function readBufferedJsonPayload(upstream: Response): Promise<{
   }
 
   const contentType = upstream.headers.get("content-type")?.toLowerCase() ?? "";
+  const contentEncoding = upstream.headers.get("content-encoding")?.toLowerCase() ?? "";
   if (contentType.includes("text/event-stream") || bodyText.startsWith("event:") || bodyText.startsWith("data:")) {
     return {
       bodyText,
@@ -1412,110 +1137,14 @@ async function readBufferedJsonPayload(upstream: Response): Promise<{
   } catch {
     return {
       bodyText,
-      payload: { detail: bodyText },
+      payload: {
+        detail: contentEncoding
+          ? `Upstream response could not be decoded as JSON (content-encoding: ${contentEncoding}).`
+          : bodyText,
+      },
       responseHeaders,
     };
   }
-}
-
-function extractResponseText(payload: unknown): string {
-  if (typeof payload !== "object" || payload === null) {
-    return "";
-  }
-  const record = payload as Record<string, unknown>;
-  if (typeof record.output_text === "string") {
-    return record.output_text;
-  }
-  const output = record.output;
-  if (!Array.isArray(output)) {
-    return "";
-  }
-
-  const texts: string[] = [];
-  for (const item of output) {
-    if (typeof item !== "object" || item === null) {
-      continue;
-    }
-    const content = (item as Record<string, unknown>).content;
-    if (!Array.isArray(content)) {
-      continue;
-    }
-    for (const part of content) {
-      if (typeof part !== "object" || part === null) {
-        continue;
-      }
-      const partRecord = part as Record<string, unknown>;
-      const text = partRecord.text ?? partRecord.output_text;
-      if (typeof text === "string") {
-        texts.push(text);
-      }
-    }
-  }
-  return texts.join("");
-}
-
-function responsesPayloadToChatCompletion(payload: unknown, fallbackModel: unknown): Record<string, unknown> {
-  const record = typeof payload === "object" && payload !== null
-    ? payload as Record<string, unknown>
-    : {};
-  return {
-    id: typeof record.id === "string" ? record.id.replace(/^resp_/u, "chatcmpl_") : `chatcmpl_${Date.now()}`,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: typeof record.model === "string" ? record.model : fallbackModel,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: extractResponseText(payload),
-        },
-        finish_reason: "stop",
-      },
-    ],
-    ...(record.usage ? { usage: record.usage } : {}),
-  };
-}
-
-function responsesPayloadToCompletion(payload: unknown, fallbackModel: unknown): Record<string, unknown> {
-  const record = typeof payload === "object" && payload !== null
-    ? payload as Record<string, unknown>
-    : {};
-  return {
-    id: typeof record.id === "string" ? record.id.replace(/^resp_/u, "cmpl_") : `cmpl_${Date.now()}`,
-    object: "text_completion",
-    created: Math.floor(Date.now() / 1000),
-    model: typeof record.model === "string" ? record.model : fallbackModel,
-    choices: [
-      {
-        index: 0,
-        text: extractResponseText(payload),
-        finish_reason: "stop",
-      },
-    ],
-    ...(record.usage ? { usage: record.usage } : {}),
-  };
-}
-
-function rawWebSocketDataToText(data: RawData): string {
-  if (typeof data === "string") {
-    return data;
-  }
-  if (data instanceof ArrayBuffer) {
-    return Buffer.from(data).toString("utf8");
-  }
-  if (Array.isArray(data)) {
-    return Buffer.concat(data.map((chunk) => Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))).toString("utf8");
-  }
-  return Buffer.isBuffer(data) ? data.toString("utf8") : Buffer.from(data).toString("utf8");
-}
-
-function parseWebSocketPayload(data: RawData): Record<string, unknown> {
-  const parsed = JSON.parse(rawWebSocketDataToText(data)) as unknown;
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("WebSocket payload must be a JSON object.");
-  }
-  return parsed as Record<string, unknown>;
 }
 
 async function openChatGPTUpstreamWebSocket(options: {
@@ -1583,63 +1212,6 @@ async function closeProxyWebSocket(socket: WebSocket | null): Promise<void> {
     socket.close();
     setTimeout(finish, 250);
   });
-}
-
-function rewriteWebSocketCreateRequest(options: {
-  requestBody: Record<string, unknown>;
-  selectedAccountName: string;
-  historyByResponseId: Map<string, ProxyStoredConversation>;
-}): {
-  requestBody: Record<string, unknown>;
-  fullInput: unknown[];
-  reconstructed: boolean;
-} {
-  const previousResponseId = typeof options.requestBody.previous_response_id === "string"
-    ? options.requestBody.previous_response_id
-    : null;
-  const deltaInput = normalizeWebSocketInput(options.requestBody.input);
-
-  if (!previousResponseId) {
-    return {
-      requestBody: options.requestBody,
-      fullInput: deltaInput,
-      reconstructed: false,
-    };
-  }
-
-  const priorConversation = options.historyByResponseId.get(previousResponseId);
-  if (!priorConversation) {
-    return {
-      requestBody: options.requestBody,
-      fullInput: deltaInput,
-      reconstructed: false,
-    };
-  }
-
-  const fullInput = [
-    ...cloneJsonValue(priorConversation.conversationItems),
-    ...deltaInput,
-  ];
-
-  if (priorConversation.accountName === options.selectedAccountName) {
-    return {
-      requestBody: options.requestBody,
-      fullInput,
-      reconstructed: false,
-    };
-  }
-
-  const rewrittenBody = {
-    ...options.requestBody,
-    input: fullInput,
-  };
-  delete (rewrittenBody as Record<string, unknown>).previous_response_id;
-
-  return {
-    requestBody: rewrittenBody,
-    fullInput,
-    reconstructed: true,
-  };
 }
 
 function hasChatGPTAccountHeader(request: IncomingMessage): boolean {
@@ -2147,6 +1719,288 @@ async function fetchSyntheticChatGPTRawJsonPayloadWithReplay(options: {
   }
 }
 
+interface PreparedSyntheticResponsesTurn {
+  chainId: string;
+  fullInput: unknown[];
+  parentProxyResponseId: string | null;
+  proxyResponseId: string;
+  requestBody: Record<string, unknown>;
+  requestShapeWithoutInput: Record<string, unknown>;
+}
+
+async function prepareSyntheticResponsesTurn(options: {
+  body: Record<string, unknown>;
+  selected: ProxyUpstreamAccount;
+  store: AccountStore;
+}): Promise<PreparedSyntheticResponsesTurn> {
+  const baseRequestBody = maybeInjectFastServiceTier(normalizeResponsesRequestBody(options.body), options.selected);
+  const rewritten = await rewriteProxyCreateRequest({
+    store: options.store,
+    requestBody: baseRequestBody,
+    selectedAccountName: options.selected.account.name,
+    normalizeInput: normalizeResponsesInput,
+  });
+  return {
+    chainId: rewritten.chainId,
+    fullInput: rewritten.fullInput,
+    parentProxyResponseId: rewritten.parentProxyResponseId,
+    proxyResponseId: createProxyResponseId(),
+    requestBody: rewritten.requestBody,
+    requestShapeWithoutInput: rewritten.requestShapeWithoutInput,
+  };
+}
+
+interface ProxySyntheticResponsesReplayResult {
+  payload: unknown;
+  replay: ProxyReplayDiagnostic;
+  selected: ProxyUpstreamAccount;
+  turn: PreparedSyntheticResponsesTurn;
+  upstreamStatus: number;
+  responseHeaders: Record<string, string>;
+  responseBodyText: string;
+}
+
+async function fetchSyntheticResponsesPayloadWithReplay(options: {
+  body: Record<string, unknown>;
+  fetchImpl: typeof fetch;
+  request: IncomingMessage;
+  selected: ProxyUpstreamAccount;
+  store: AccountStore;
+}): Promise<ProxySyntheticResponsesReplayResult> {
+  let selected = options.selected;
+  const replayedFromAccountNames: string[] = [];
+  const attemptedAccountNames = new Set<string>();
+
+  while (true) {
+    attemptedAccountNames.add(selected.account.name);
+    const turn = await prepareSyntheticResponsesTurn({
+      body: options.body,
+      selected,
+      store: options.store,
+    });
+    const upstream = await options.fetchImpl(
+      `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`,
+      {
+        method: options.request.method ?? "POST",
+        headers: buildChatGPTAuthHeaders(options.request, selected),
+        body: JSON.stringify(turn.requestBody),
+      },
+    );
+    const buffered = await readBufferedJsonPayload(upstream);
+    const payload = buffered.payload;
+    if (!isRetryableQuotaFailure(upstream.status, payload) || replayedFromAccountNames.length >= 1) {
+      return {
+        payload,
+        replay: buildProxyReplayDiagnostic({
+          replayAttempted: replayedFromAccountNames.length > 0 || isRetryableQuotaFailure(upstream.status, payload),
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: isRetryableQuotaFailure(upstream.status, payload) && replayedFromAccountNames.length >= 1
+            ? "already_replayed"
+            : null,
+          replayedFromAccountNames,
+        }),
+        selected,
+        turn,
+        upstreamStatus: upstream.status,
+        responseHeaders: buffered.responseHeaders,
+        responseBodyText: buffered.bodyText,
+      };
+    }
+
+    const replaySelected = await selectProxyReplayAccount(options.store, "chatgpt", attemptedAccountNames);
+    if (!replaySelected || replaySelected.account.name === selected.account.name) {
+      return {
+        payload,
+        replay: buildProxyReplayDiagnostic({
+          replayAttempted: true,
+          replayCount: replayedFromAccountNames.length,
+          replaySkipReason: replaySelected ? "same_account_only" : "no_replay_candidate",
+          replayedFromAccountNames,
+        }),
+        selected,
+        turn,
+        upstreamStatus: upstream.status,
+        responseHeaders: buffered.responseHeaders,
+        responseBodyText: buffered.bodyText,
+      };
+    }
+
+    replayedFromAccountNames.push(selected.account.name);
+    await persistProxyUpstreamAccountSelection(options.store, replaySelected.account);
+    selected = replaySelected;
+  }
+}
+
+function findSseFrameBoundary(buffer: string): number {
+  const lf = buffer.indexOf("\n\n");
+  const crlf = buffer.indexOf("\r\n\r\n");
+  if (lf === -1) {
+    return crlf;
+  }
+  if (crlf === -1) {
+    return lf;
+  }
+  return Math.min(lf, crlf);
+}
+
+function rewriteSseFramePayload(frame: string, proxyResponseId: string): {
+  originalPayload: Record<string, unknown> | null;
+  rawFrame: string;
+  payload: Record<string, unknown> | null;
+} {
+  const lines = frame.split(/\r?\n/u);
+  const dataLines = lines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart());
+  if (dataLines.length === 0) {
+    return { originalPayload: null, rawFrame: `${frame}\n\n`, payload: null };
+  }
+  const payloadText = dataLines.join("\n").trim();
+  if (payloadText === "" || payloadText === "[DONE]") {
+    return { originalPayload: null, rawFrame: `${frame}\n\n`, payload: null };
+  }
+  try {
+    const payload = parseMaybeJson(payloadText);
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+      return { originalPayload: null, rawFrame: `${frame}\n\n`, payload: null };
+    }
+    const rewritten = rewriteEventResponseId(payload as Record<string, unknown>, proxyResponseId);
+    return {
+      originalPayload: payload as Record<string, unknown>,
+      rawFrame: `data: ${JSON.stringify(rewritten)}\n\n`,
+      payload: rewritten,
+    };
+  } catch {
+    return { originalPayload: null, rawFrame: `${frame}\n\n`, payload: null };
+  }
+}
+
+async function writeSyntheticResponsesEventStream(options: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  store: AccountStore;
+  turn: PreparedSyntheticResponsesTurn;
+  accountName: string;
+  upstream: Response;
+}): Promise<number> {
+  const headers = upstreamResponseHeadersToRecord(options.upstream);
+  options.response.writeHead(options.upstream.status, headers);
+  if (!options.upstream.body) {
+    options.response.end();
+    return 0;
+  }
+
+  const decoder = new TextDecoder();
+  const reader = options.upstream.body.getReader();
+  let buffer = "";
+  let totalBytes = 0;
+  let upstreamResponseId: string | null = null;
+  const outputItems: unknown[] = [];
+  let terminalResponse: Record<string, unknown> | null = null;
+  let sawCompleted = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const boundary = findSseFrameBoundary(buffer);
+        if (boundary === -1) {
+          break;
+        }
+        const separatorLength = buffer.slice(boundary, boundary + 4) === "\r\n\r\n" ? 4 : 2;
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + separatorLength);
+        const rewritten = rewriteSseFramePayload(frame, options.turn.proxyResponseId);
+        if (rewritten.payload) {
+          const payloadType = typeof rewritten.payload.type === "string" ? rewritten.payload.type : null;
+          const payloadResponse = rewritten.payload.response;
+          const originalPayloadResponse = rewritten.originalPayload?.response;
+          if (
+            payloadType === "response.created"
+            && typeof originalPayloadResponse === "object"
+            && originalPayloadResponse !== null
+            && !Array.isArray(originalPayloadResponse)
+            && typeof (originalPayloadResponse as Record<string, unknown>).id === "string"
+          ) {
+            upstreamResponseId = (originalPayloadResponse as Record<string, unknown>).id as string;
+          }
+          if (payloadType === "response.output_item.done" && rewritten.payload.item !== undefined) {
+            const conversationItem = normalizeResponseOutputItem(rewritten.payload.item);
+            if (conversationItem !== null) {
+              outputItems.push(conversationItem);
+            }
+          }
+          if (
+            (payloadType === "response.completed" || payloadType === "response.done")
+            && typeof payloadResponse === "object"
+            && payloadResponse !== null
+            && !Array.isArray(payloadResponse)
+          ) {
+            sawCompleted = true;
+            terminalResponse = payloadResponse as Record<string, unknown>;
+          }
+        }
+        totalBytes += Buffer.byteLength(rewritten.rawFrame);
+        options.response.write(rewritten.rawFrame);
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer !== "") {
+      const rewritten = rewriteSseFramePayload(buffer, options.turn.proxyResponseId);
+      if (rewritten.payload) {
+        const payloadType = typeof rewritten.payload.type === "string" ? rewritten.payload.type : null;
+        const payloadResponse = rewritten.payload.response;
+        const originalPayloadResponse = rewritten.originalPayload?.response;
+        if (
+          payloadType === "response.created"
+          && typeof originalPayloadResponse === "object"
+          && originalPayloadResponse !== null
+          && !Array.isArray(originalPayloadResponse)
+          && typeof (originalPayloadResponse as Record<string, unknown>).id === "string"
+        ) {
+          upstreamResponseId = (originalPayloadResponse as Record<string, unknown>).id as string;
+        }
+        if (
+          (payloadType === "response.completed" || payloadType === "response.done")
+          && typeof payloadResponse === "object"
+          && payloadResponse !== null
+          && !Array.isArray(payloadResponse)
+        ) {
+          sawCompleted = true;
+          terminalResponse = payloadResponse as Record<string, unknown>;
+        }
+      }
+      totalBytes += Buffer.byteLength(rewritten.rawFrame);
+      options.response.write(rewritten.rawFrame);
+    }
+
+    options.response.end();
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (sawCompleted) {
+    await persistProxyResponseCheckpointFromTurn({
+      store: options.store,
+      chainId: options.turn.chainId,
+      accountName: options.accountName,
+      fullInput: options.turn.fullInput,
+      outputItems: outputItems.length > 0 ? outputItems : canonicalOutputItemsFromResponsePayload(terminalResponse),
+      parentProxyResponseId: options.turn.parentProxyResponseId,
+      proxyResponseId: options.turn.proxyResponseId,
+      requestShapeWithoutInput: options.turn.requestShapeWithoutInput,
+      upstreamResponseId,
+    });
+  }
+
+  return totalBytes;
+}
+
 async function forwardOpenAIWithApiKey(options: {
   request: IncomingMessage;
   response: ServerResponse;
@@ -2299,7 +2153,11 @@ async function forwardOpenAIViaChatGPT(options: {
     const body = parseJsonBody(options.bodyText);
     const shouldStream = body.stream === true;
     if (shouldStream) {
-      const requestBody = maybeInjectFastServiceTier(normalizeResponsesRequestBody(body), options.selected);
+      const turn = await prepareSyntheticResponsesTurn({
+        body,
+        selected: options.selected,
+        store: options.store,
+      });
       const upstreamUrl = `${CHATGPT_UPSTREAM_BASE_URL}/backend-api/codex/responses`;
       const outgoingHeaders = buildChatGPTAuthHeaders(options.request, options.selected);
       const upstream = await options.fetchImpl(
@@ -2307,40 +2165,72 @@ async function forwardOpenAIViaChatGPT(options: {
         {
           method: options.request.method ?? "POST",
           headers: outgoingHeaders,
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify(turn.requestBody),
         },
       );
-      const logged = await writeUpstreamResponseWithLogging({
-        request: options.request,
-        response: options.response,
-        bodyText: options.bodyText,
-        upstream,
-        upstreamUrl,
-        upstreamRequestHeaders: outgoingHeaders,
-      });
+      const logged = upstream.ok
+        ? null
+        : await writeUpstreamResponseWithLogging({
+            request: options.request,
+            response: options.response,
+            bodyText: options.bodyText,
+            upstream,
+            upstreamUrl,
+            upstreamRequestHeaders: outgoingHeaders,
+          });
+      const responseBytes = upstream.ok
+        ? await writeSyntheticResponsesEventStream({
+            request: options.request,
+            response: options.response,
+            store: options.store,
+            turn,
+            accountName: options.selected.account.name,
+            upstream,
+          })
+        : (logged?.responseBytes ?? 0);
       return {
         statusCode: upstream.status,
-        responseBytes: logged.responseBytes,
+        responseBytes,
         authKind: "synthetic-chatgpt",
         selectedAccount: options.selected.account.name,
         selectedAuthMode: options.selected.account.auth_mode,
         upstreamKind: "chatgpt",
-        serviceTier: resolveProxyServiceTier(requestBody),
-        errorPayload: logged.errorPayload,
+        serviceTier: resolveProxyServiceTier(turn.requestBody),
+        errorPayload: logged?.errorPayload,
       };
     }
 
-    const replayed = await fetchSyntheticChatGPTBufferedPayloadWithReplay({
+    const replayed = await fetchSyntheticResponsesPayloadWithReplay({
+      body,
+      fetchImpl: options.fetchImpl,
       request: options.request,
       store: options.store,
       selected: options.selected,
-      fetchImpl: options.fetchImpl,
-      buildRequestBody: (selected) => maybeInjectFastServiceTier(normalizeResponsesRequestBody(body), selected),
     });
+    const rewrittenPayload = rewriteTopLevelResponseId(replayed.payload, replayed.turn.proxyResponseId);
+    if (replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300) {
+      await persistProxyResponseCheckpointFromTurn({
+        store: options.store,
+        chainId: replayed.turn.chainId,
+        accountName: replayed.selected.account.name,
+        fullInput: replayed.turn.fullInput,
+        outputItems: canonicalOutputItemsFromResponsePayload(replayed.payload),
+        parentProxyResponseId: replayed.turn.parentProxyResponseId,
+        proxyResponseId: replayed.turn.proxyResponseId,
+        requestShapeWithoutInput: replayed.turn.requestShapeWithoutInput,
+        upstreamResponseId:
+          typeof replayed.payload === "object"
+          && replayed.payload !== null
+          && !Array.isArray(replayed.payload)
+          && typeof (replayed.payload as Record<string, unknown>).id === "string"
+            ? (replayed.payload as Record<string, unknown>).id as string
+            : null,
+      });
+    }
     const responseBytes = writeJson(
       options.response,
       replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300 ? 200 : replayed.upstreamStatus,
-      replayed.payload,
+      rewrittenPayload,
     );
     return {
       statusCode: replayed.upstreamStatus,
@@ -2349,7 +2239,7 @@ async function forwardOpenAIViaChatGPT(options: {
       selectedAccount: replayed.selected.account.name,
       selectedAuthMode: replayed.selected.account.auth_mode,
       upstreamKind: "chatgpt",
-      serviceTier: replayed.serviceTier,
+      serviceTier: resolveProxyServiceTier(replayed.turn.requestBody),
       diagnostic: toProxyReplayDiagnostic(replayed.replay),
       errorPayload: replayed.upstreamStatus >= 200 && replayed.upstreamStatus < 300
         ? undefined
@@ -2596,15 +2486,16 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
 
   const server = createServer((request, response) => {
     let requestBodyText = "";
+    let requestBytes = 0;
     void (async () => {
       const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? `${host}:${port}`}`);
       const pathname = normalizePathname(requestUrl.pathname);
-      const bodyText = await readRequestBody(request);
+      const { bodyText, rawBytes } = await readRequestBody(request);
       requestBodyText = bodyText;
+      requestBytes = rawBytes;
       const startedAt = Date.now();
       const requestId = createRequestId();
       options.debugLog?.(`proxy: ${request.method ?? "GET"} ${pathname}`);
-      const requestBytes = Buffer.byteLength(bodyText);
 
       if ((pathname === "/healthz" || pathname === "/backend-api/healthz") && request.method === "GET") {
         const responseBytes = writeJson(response, 200, { ok: true });
@@ -2856,7 +2747,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         service_tier: resolveProxyServiceTierFromBodyText(requestBodyText),
         status_code: response.headersSent ? response.statusCode : 500,
         duration_ms: 0,
-        request_bytes: 0,
+        request_bytes: requestBytes,
         response_bytes: responseBytes,
         error_class: (error as Error).name,
         error_message_short: errorMessage,
@@ -2904,25 +2795,19 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       : responseOutputItemsToConversationItems(payloadResponseRecord?.output);
     const normalizedOutputItems = outputItems.length > 0
       ? outputItems
-      : (() => {
-          const fallbackText = payloadResponseRecord ? extractResponseText(payloadResponseRecord) : "";
-          return fallbackText === ""
-            ? []
-            : [{
-                role: "assistant",
-                content: [{ type: "output_text", text: fallbackText }],
-              }];
-        })();
+      : canonicalOutputItemsFromResponsePayload(payloadResponseRecord);
 
-    if (responseId) {
-      context.historyByResponseId.set(responseId, {
-        accountName: activeTurn.accountName,
-        conversationItems: [
-          ...cloneJsonValue(activeTurn.fullInput),
-          ...cloneJsonValue(normalizedOutputItems),
-        ],
-      });
-    }
+    await persistProxyResponseCheckpointFromTurn({
+      store: options.store,
+      chainId: activeTurn.chainId,
+      accountName: activeTurn.accountName,
+      fullInput: activeTurn.fullInput,
+      outputItems: normalizedOutputItems,
+      parentProxyResponseId: activeTurn.parentProxyResponseId,
+      proxyResponseId: activeTurn.proxyResponseId,
+      requestShapeWithoutInput: activeTurn.requestShapeWithoutInput,
+      upstreamResponseId: responseId,
+    });
 
     await options.requestLogger?.({
       ts: new Date().toISOString(),
@@ -2939,7 +2824,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       status_code: terminalStatusCode,
       duration_ms: Date.now() - activeTurn.startedAt,
       request_bytes: Buffer.byteLength(JSON.stringify(activeTurn.requestBody)),
-      response_bytes: payload ? Buffer.byteLength(JSON.stringify(payload)) : 0,
+      response_bytes: payload ? Buffer.byteLength(JSON.stringify(rewriteEventResponseId(payload, activeTurn.proxyResponseId))) : 0,
       synthetic_usage: false,
       ...toProxyReplayDiagnostic({
         replayAttempted: activeTurn.replayAttempted,
@@ -3079,10 +2964,11 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     }
 
     try {
-      const rewrittenRequest = rewriteWebSocketCreateRequest({
+      const rewrittenRequest = await rewriteProxyCreateRequest({
+        store: options.store,
         requestBody: cloneJsonValue(activeTurn.requestBody),
         selectedAccountName: replaySelected.account.name,
-        historyByResponseId: context.historyByResponseId,
+        normalizeInput: normalizeWebSocketInput,
       });
       const finalRequestBody = maybeInjectFastServiceTier(rewrittenRequest.requestBody, replaySelected);
       const previousAccountName = activeTurn.accountName;
@@ -3091,8 +2977,10 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       await persistProxyUpstreamAccountSelection(options.store, replaySelected.account);
       activeTurn.accountName = replaySelected.account.name;
       activeTurn.bufferedMessages = [];
+      activeTurn.chainId = rewrittenRequest.chainId;
       activeTurn.fullInput = rewrittenRequest.fullInput;
       activeTurn.outputItems = [];
+      activeTurn.parentProxyResponseId = rewrittenRequest.parentProxyResponseId;
       activeTurn.replayLocked = false;
       activeTurn.replayLockedByItemType = null;
       activeTurn.replayLockedByType = null;
@@ -3100,6 +2988,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       activeTurn.replaySkipReason = null;
       activeTurn.replayedFromAccountNames = [...activeTurn.replayedFromAccountNames, previousAccountName];
       activeTurn.requestBody = cloneJsonValue(finalRequestBody);
+      activeTurn.requestShapeWithoutInput = buildRequestShapeWithoutInput(finalRequestBody);
       activeTurn.serviceTier = resolveProxyServiceTier(finalRequestBody);
       activeTurn.responseId = null;
       context.upstreamSocket?.send(JSON.stringify(finalRequestBody));
@@ -3160,8 +3049,13 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       }
     }
 
+    const downstreamPayloadText = payload && context.activeTurn?.proxyResponseId
+      ? JSON.stringify(rewriteEventResponseId(payload, context.activeTurn.proxyResponseId))
+      : text;
+    const isTerminalEvent = isProxyWebSocketTerminalEvent(payloadType);
+
     if (context.activeTurn && !context.activeTurn.replayLocked && shouldBufferProxyWebSocketPreludeEvent(payloadType, payload)) {
-      context.activeTurn.bufferedMessages.push(text);
+      context.activeTurn.bufferedMessages.push(downstreamPayloadText);
       return;
     }
 
@@ -3174,23 +3068,22 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
       }
       flushBufferedTurnMessages(context.activeTurn, downstream);
     }
+
+    if (isTerminalEvent) {
+      if (payloadType === "response.completed" || payloadType === "response.done") {
+        await finalizeActiveTurn(context, payload, 200);
+      } else if (payloadType === "response.failed") {
+        await finalizeActiveTurn(context, payload, resolveProxyTerminalStatusCode(502, payload));
+      } else if (payloadType === "error") {
+        await finalizeActiveTurn(context, payload, resolveProxyTerminalStatusCode(500, payload));
+      }
+    }
     if (downstream.readyState === WebSocket.OPEN) {
-      downstream.send(text);
+      downstream.send(downstreamPayloadText);
     }
 
-    if (payloadType === "response.completed" || payloadType === "response.done") {
-      await finalizeActiveTurn(context, payload, 200);
+    if (isTerminalEvent) {
       return;
-    }
-
-    if (payloadType === "response.failed") {
-      await finalizeActiveTurn(context, payload, resolveProxyTerminalStatusCode(502, payload));
-      return;
-    }
-
-    if (payloadType === "error") {
-      await finalizeActiveTurn(context, payload, resolveProxyTerminalStatusCode(500, payload));
-      context.activeTurn = null;
     }
   };
 
@@ -3256,7 +3149,6 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
         activeTurn: null,
         connectionRequestId: createRequestId(),
         downstreamAuthKind: authKind,
-        historyByResponseId: new Map(),
         upstreamAccount: null,
         upstreamSocket: null,
       };
@@ -3359,10 +3251,12 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               throw new Error("No eligible ChatGPT account is available for proxy websocket upstream.");
             }
 
-            const rewrittenRequest = rewriteWebSocketCreateRequest({
-              requestBody,
+            const normalizedCreateRequest = normalizeWebSocketResponsesCreateRequestBody(requestBody);
+            const rewrittenRequest = await rewriteProxyCreateRequest({
+              store: options.store,
+              requestBody: normalizedCreateRequest,
               selectedAccountName: selected.account.name,
-              historyByResponseId: context.historyByResponseId,
+              normalizeInput: normalizeWebSocketInput,
             });
             const finalRequestBody = maybeInjectFastServiceTier(rewrittenRequest.requestBody, selected);
             await ensureSyntheticUpstreamSocket(context, downstream, request, selected);
@@ -3370,8 +3264,11 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
             context.activeTurn = {
               accountName: selected.account.name,
               bufferedMessages: [],
+              chainId: rewrittenRequest.chainId,
               fullInput: rewrittenRequest.fullInput,
               outputItems: [],
+              parentProxyResponseId: rewrittenRequest.parentProxyResponseId,
+              proxyResponseId: createProxyResponseId(),
               replayAttempted: false,
               replayCount: 0,
               replayLocked: false,
@@ -3380,6 +3277,7 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
               replaySkipReason: null,
               replayedFromAccountNames: [],
               requestBody: cloneJsonValue(finalRequestBody),
+              requestShapeWithoutInput: buildRequestShapeWithoutInput(finalRequestBody),
               requestId,
               serviceTier: resolveProxyServiceTier(finalRequestBody),
               responseId: null,
