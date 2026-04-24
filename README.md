@@ -39,7 +39,7 @@ Any compatible coding agent can install the same `skills/codexm-usage` path from
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
   --repo HOOLC/codex-team \
   --path skills/codexm-usage \
-  --ref v0.0.25
+  --ref v0.0.23
 ```
 
 Replace `--ref` with the release tag that matches your installed CLI version. Restart or reload your coding agent after installing the skill if it caches available skills.
