@@ -18,6 +18,10 @@ import {
   formatLocalUsageWindowLine,
   type LocalUsageWindowName,
 } from "../local-usage/format.js";
+import {
+  formatDateTime,
+  formatResetAt,
+} from "../cli/time-format.js";
 import type { LocalUsageSummary } from "../local-usage/types.js";
 import { LocalUsageService } from "../local-usage/service.js";
 import {
@@ -44,8 +48,6 @@ import {
   buildSingleAccountDetailText,
   describeCurrentStatus,
   describeDoctorReport,
-  formatDateTime,
-  formatResetAt,
   toJsonEta,
   toWatchEtaTarget,
 } from "./inspection-display.js";

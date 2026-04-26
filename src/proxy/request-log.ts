@@ -1,6 +1,10 @@
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+  formatMonthDayTime,
+  formatRelativeOffsetLabel,
+} from "../cli/time-format.js";
 import { resolveLogsDir } from "../logging.js";
 
 const PROXY_REQUEST_LOG_PREFIX = "proxy-requests-";
@@ -11,56 +15,6 @@ export interface ProxyLastUpstreamSelection {
   accountName: string;
   authMode: string;
   ts: string;
-}
-
-function formatTwoDigits(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-function formatLocalTimestamp(value: string): string | null {
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) {
-    return null;
-  }
-
-  const date = new Date(timestamp);
-  return `${formatTwoDigits(date.getMonth() + 1)}-${formatTwoDigits(date.getDate())} ${formatTwoDigits(date.getHours())}:${formatTwoDigits(date.getMinutes())}`;
-}
-
-function formatRelativeOffsetCompact(offsetMs: number): string {
-  const absMs = Math.abs(offsetMs);
-  if (absMs < 60_000) {
-    return "now";
-  }
-
-  const minutes = absMs / 60_000;
-  if (minutes < 60) {
-    return `${Math.max(1, Math.round(minutes))}m`;
-  }
-
-  const hours = absMs / 3_600_000;
-  if (hours < 24) {
-    const value = hours < 10 ? hours.toFixed(1) : String(Math.round(hours));
-    return `${value.replace(/\.0$/u, "")}h`;
-  }
-
-  const days = absMs / 86_400_000;
-  const value = days < 10 ? days.toFixed(1) : String(Math.round(days));
-  return `${value.replace(/\.0$/u, "")}d`;
-}
-
-function formatRelativeTimestamp(value: string, now: Date): string | null {
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) {
-    return null;
-  }
-
-  const compact = formatRelativeOffsetCompact(timestamp - now.getTime());
-  if (compact === "now") {
-    return "now";
-  }
-
-  return timestamp >= now.getTime() ? `in ${compact}` : `${compact} ago`;
 }
 
 function parseProxyRequestSelectionLine(rawLine: string): ProxyLastUpstreamSelection | null {
@@ -157,8 +111,8 @@ export function formatProxyUpstreamSelectionLabel(
     return null;
   }
 
-  const absolute = formatLocalTimestamp(selection.ts);
-  const relative = formatRelativeTimestamp(selection.ts, now);
+  const absolute = formatMonthDayTime(selection.ts);
+  const relative = formatRelativeOffsetLabel(selection.ts, now);
   const whenLabel = [absolute, relative].filter((part): part is string => Boolean(part)).join(", ");
 
   return whenLabel === ""
