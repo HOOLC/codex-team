@@ -1,7 +1,3 @@
-import dayjs from "dayjs";
-import timezone from "dayjs/plugin/timezone.js";
-import utc from "dayjs/plugin/utc.js";
-
 import { maskAccountId } from "../auth-snapshot.js";
 import type { AccountStore, ManagedAccount } from "../account-store/index.js";
 import {
@@ -14,6 +10,10 @@ import type { LocalUsageSummary } from "../local-usage/types.js";
 import type { ProxyQuotaAggregate } from "../proxy/quota.js";
 import { PROXY_ACCOUNT_ID, PROXY_ACCOUNT_NAME } from "../proxy/constants.js";
 import type { WatchHistoryEtaContext } from "../watch/history.js";
+import {
+  formatDateTime,
+  formatResetAt,
+} from "../cli/time-format.js";
 import type {
   CliDoctorReport,
   CurrentStatusView,
@@ -21,30 +21,6 @@ import type {
   DoctorDesktopRuntimeView,
   DoctorRuntimeView,
 } from "./inspection-runtime.js";
-
-dayjs.extend(utc);
-dayjs.extend(timezone);
-
-export function formatDateTime(value: string | null | undefined): string {
-  if (!value) {
-    return "-";
-  }
-
-  return dayjs.utc(value).tz(dayjs.tz.guess()).format("YYYY-MM-DD HH:mm");
-}
-
-export function formatResetAt(value: string | null | undefined): string {
-  if (!value) {
-    return "-";
-  }
-
-  const resetAfterSeconds = Math.round((Date.parse(value) - Date.now()) / 1_000);
-  if (!Number.isFinite(resetAfterSeconds) || resetAfterSeconds <= 0) {
-    return "-";
-  }
-
-  return dayjs.utc(value).tz(dayjs.tz.guess()).format("MM-DD HH:mm");
-}
 
 export function toWatchEtaTarget(account: Awaited<ReturnType<AccountStore["refreshAllQuotas"]>>["successes"][number]) {
   return {
@@ -239,6 +215,7 @@ export function buildSingleAccountDetailJson(options: {
       auth_mode: options.account.auth_mode,
       auto_switch_eligible: options.account.auto_switch_eligible,
       identity: options.account.identity,
+      account_path: options.account.accountPath,
       account_id: options.account.account_id,
       user_id: options.account.user_id,
       created_at: options.account.created_at,

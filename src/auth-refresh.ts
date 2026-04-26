@@ -78,10 +78,6 @@ async function needsAuthRepair(account: ManagedAccount, now: Date): Promise<bool
     return false;
   }
 
-  if (account.quota.status === "stale") {
-    return true;
-  }
-
   try {
     const snapshot = await readAuthSnapshotFile(account.authPath);
     const expiresAt = getSnapshotAccessTokenExpiresAt(snapshot) ?? getSnapshotTokenExpiresAt(snapshot);
@@ -129,8 +125,8 @@ export async function summarizeAuthRepairAdvice(
   }
 
   return affected.length === 1
-    ? `Saved auth for ${affected[0]} needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace ${affected[0]}" to refresh it.`
-    : `Saved auth for ${affected.length} accounts (${affected.join(", ")}) needs replace: refresh failed and each account is already stale or expires within 3d. Run "codexm replace <name>" for each affected account.`;
+    ? `Saved auth for ${affected[0]} needs replace: auth refresh failed and the token is expired or expires within 3d. Run "codexm replace ${affected[0]}" to refresh it.`
+    : `Saved auth for ${affected.length} accounts (${affected.join(", ")}) needs replace: auth refresh failed and each token is expired or expires within 3d. Run "codexm replace <name>" for each affected account.`;
 }
 
 export function inspectManagedAccountAuthRefreshNeed(

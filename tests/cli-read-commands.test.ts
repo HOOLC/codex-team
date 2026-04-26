@@ -41,30 +41,33 @@ function encodeTestJwt(payload: Record<string, unknown>): string {
 }
 
 async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Promise<void> {
+  const now = Date.now();
+  const iso = (offsetMinutes: number) => new Date(now + offsetMinutes * 60_000).toISOString();
+
   await mkdir(join(homeDir, ".codex-team"), { recursive: true });
   await writeFile(
     join(homeDir, ".codex-team", "watch-quota-history.jsonl"),
     [
       JSON.stringify({
-        recorded_at: "2026-04-10T10:00:00.000Z",
+        recorded_at: iso(-60),
         account_name: accountName,
         account_id: "acct-c",
         identity: "acct-c:user-c",
         plan_type: "plus",
         available: "available",
-        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: "2026-04-10T14:00:00.000Z" },
-        one_week: { used_percent: 3, window_seconds: 604_800, reset_at: "2026-04-16T10:00:00.000Z" },
+        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: iso(240) },
+        one_week: { used_percent: 3, window_seconds: 604_800, reset_at: iso(6 * 24 * 60) },
         source: "watch",
       }),
       JSON.stringify({
-        recorded_at: "2026-04-10T10:30:00.000Z",
+        recorded_at: iso(-30),
         account_name: accountName,
         account_id: "acct-c",
         identity: "acct-c:user-c",
         plan_type: "plus",
         available: "available",
-        five_hour: { used_percent: 20, window_seconds: 18_000, reset_at: "2026-04-10T14:00:00.000Z" },
-        one_week: { used_percent: 6, window_seconds: 604_800, reset_at: "2026-04-16T10:00:00.000Z" },
+        five_hour: { used_percent: 20, window_seconds: 18_000, reset_at: iso(240) },
+        one_week: { used_percent: 6, window_seconds: 604_800, reset_at: iso(6 * 24 * 60) },
         source: "watch",
       }),
     ].join("\n") + "\n",
@@ -1385,12 +1388,14 @@ wire_api = "responses"
         successes: [
           {
             name: "proxy",
+            account_path: null,
             is_current: false,
             available: "available",
             refresh_status: "ok",
           },
           {
             name: "quota-main",
+            account_path: join(homeDir, ".codex-team", "accounts", "quota-main"),
             is_current: true,
             available: "available",
             credits_balance: 11,
@@ -1878,6 +1883,21 @@ wire_api = "responses"
       expect(output).toContain("5H used/reset: 21% / -");
       expect(output).toMatch(/1W used\/reset: 34% \/ \d{2}-\d{2} \d{2}:\d{2}/u);
       expect(output).toContain("Usage 7d:");
+
+      const jsonStdout = captureWritable();
+      const jsonExitCode = await runCli(["list", "detail-alpha", "--json"], {
+        store,
+        stdout: jsonStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(jsonExitCode).toBe(0);
+      expect(JSON.parse(jsonStdout.read())).toMatchObject({
+        account: {
+          name: "detail-alpha",
+          account_path: join(homeDir, ".codex-team", "accounts", "detail-alpha"),
+        },
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1915,8 +1935,91 @@ wire_api = "responses"
 
       expect(exitCode).toBe(1);
       expect(stdout.read()).toContain(
-        'Warning: Saved auth for auth-broken needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace auth-broken" to refresh it.',
+        'Warning: Saved auth for auth-broken needs replace: auth refresh failed and the token is expired or expires within 3d. Run "codexm replace auth-broken" to refresh it.',
       );
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
+  test("list does not suggest replace when only quota refresh times out", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const seededStore = createAccountStore(homeDir, {
+        fetchImpl: async () =>
+          jsonResponse({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 12,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 300,
+                reset_at: 1_773_868_641,
+              },
+              secondary_window: {
+                used_percent: 23,
+                limit_window_seconds: 604_800,
+                reset_after_seconds: 4_000,
+                reset_at: 1_773_890_040,
+              },
+            },
+            credits: {
+              has_credits: true,
+              unlimited: false,
+              balance: "11",
+            },
+          }),
+      });
+      const store = createAccountStore(homeDir, {
+        fetchImpl: async () => {
+          throw new TypeError("Usage request failed: https://chatgpt.com/backend-api/wham/usage attempt 1/3 -> timed out after 3000ms");
+        },
+      });
+
+      await writeCurrentAuth(homeDir, "acct-quota-timeout");
+      await runCli(["save", "quota-timeout", "--json"], {
+        store: seededStore,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+      await seededStore.refreshAllQuotas();
+
+      const authPath = join(homeDir, ".codex-team", "accounts", "quota-timeout", "auth.json");
+      const auth = JSON.parse(await readFile(authPath, "utf8"));
+      const accessExpSeconds = Math.floor((Date.now() + (10 * 24 * 60 * 60 * 1_000)) / 1_000);
+      auth.tokens.access_token = encodeTestJwt({
+        iss: "https://auth.openai.com",
+        aud: "app_codexm_tests",
+        client_id: "app_codexm_tests",
+        exp: accessExpSeconds,
+        "https://api.openai.com/auth": {
+          chatgpt_account_id: "acct-quota-timeout",
+          chatgpt_plan_type: "plus",
+        },
+      });
+      await writeFile(authPath, `${JSON.stringify(auth, null, 2)}\n`);
+
+      const metaPath = join(homeDir, ".codex-team", "accounts", "quota-timeout", "meta.json");
+      const meta = JSON.parse(await readFile(metaPath, "utf8"));
+      meta.last_auth_refresh_status = "error";
+      meta.last_auth_refresh_error =
+        "Token refresh failed: 401: Your refresh token has already been used to generate a new access token. Please try signing in again.";
+      await writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+      const stdout = captureWritable();
+      const exitCode = await runCli(["list"], {
+        store,
+        stdout: stdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      const output = stdout.read();
+      expect(exitCode).toBe(0);
+      expect(output).toContain("Warning: quota-timeout using cached quota from");
+      expect(output).toContain("timed out after 3000ms");
+      expect(output).not.toContain("needs replace");
+      expect(output).not.toContain("codexm replace quota-timeout");
     } finally {
       await cleanupTempHome(homeDir);
     }
@@ -1974,7 +2077,7 @@ wire_api = "responses"
 
       expect(exitCode).toBe(1);
       expect(stdout.read()).toContain(
-        'Warning: Saved auth for auth-expiring needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace auth-expiring" to refresh it.',
+        'Warning: Saved auth for auth-expiring needs replace: auth refresh failed and the token is expired or expires within 3d. Run "codexm replace auth-expiring" to refresh it.',
       );
     } finally {
       await cleanupTempHome(homeDir);

@@ -12,6 +12,35 @@ import {
   PROXY_IDENTITY,
   PROXY_PLAN_TYPE,
 } from "../proxy/constants.js";
+import {
+  normalizeRecordInput,
+  normalizeTargetSnapshot,
+  parseWatchHistoryLine,
+} from "./history-codec.js";
+import { clampPercent, roundToTwo } from "./history-math.js";
+import type {
+  WatchEtaContext,
+  WatchHistoryEtaContext,
+  WatchHistoryEtaStatus,
+  WatchHistoryObservedRatioDiagnostic,
+  WatchHistoryRecord,
+  WatchHistoryScopeKind,
+  WatchHistoryStore,
+  WatchHistoryTargetSnapshot,
+  WatchHistoryWindowSnapshot,
+} from "./history-types.js";
+export type {
+  WatchEtaContext,
+  WatchHistoryEtaContext,
+  WatchHistoryEtaStatus,
+  WatchHistoryObservedRatioDiagnostic,
+  WatchHistoryRecord,
+  WatchHistoryScopeKind,
+  WatchHistoryStore,
+  WatchHistoryTargetSnapshot,
+  WatchHistoryWindowSnapshot,
+  WatchQuotaHistoryRecord,
+} from "./history-types.js";
 
 const WATCH_HISTORY_FILE_NAME = "watch-quota-history.jsonl";
 const WATCH_HISTORY_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -22,199 +51,11 @@ const WATCH_HISTORY_RATIO_DIAGNOSTIC_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WATCH_HISTORY_RATIO_WARNING_RELATIVE_DELTA = 0.2;
 const WATCH_HISTORY_RATIO_WARNING_MIN_SAMPLES = 3;
 
-export interface WatchHistoryWindowSnapshot {
-  used_percent: number;
-  window_seconds?: number | null;
-  reset_at: string | null;
-}
-
-export interface WatchHistoryRecord {
-  recorded_at: string;
-  scope_kind: "global" | "isolated";
-  scope_id: string | null;
-  account_name: string;
-  upstream_account_name?: string | null;
-  account_id: string | null;
-  identity: string | null;
-  plan_type: string | null;
-  available: string | null;
-  five_hour: WatchHistoryWindowSnapshot | null;
-  one_week: WatchHistoryWindowSnapshot | null;
-  source: "watch";
-}
-
-export interface WatchHistoryTargetSnapshot {
-  plan_type: string | null;
-  available: string | null;
-  five_hour: WatchHistoryWindowSnapshot | null;
-  one_week: WatchHistoryWindowSnapshot | null;
-  remaining_5h?: number | null;
-  remaining_1w?: number | null;
-  remaining_5h_eq_1w?: number | null;
-}
-
-export type WatchHistoryEtaStatus =
-  | "ok"
-  | "idle"
-  | "insufficient_history"
-  | "unavailable";
-
-export interface WatchHistoryEtaContext {
-  status: WatchHistoryEtaStatus;
-  rate_1w_units_per_hour: number | null;
-  rateIn1wUnitsPerHour: number | null;
-  remaining_5h: number | null;
-  remaining5h: number | null;
-  remaining_1w: number | null;
-  remaining1w: number | null;
-  remaining_5h_eq_1w: number | null;
-  remaining5hEq1w: number | null;
-  bottleneck_remaining: number | null;
-  bottleneckRemaining: number | null;
-  bottleneck_window: "5h_eq_1w" | "1w" | null;
-  bottleneck: "five_hour" | "one_week" | null;
-  etaHours: number | null;
-}
-
-export interface WatchHistoryStore {
-  path: string;
-  read(now?: Date): Promise<WatchHistoryRecord[]>;
-  append(record: WatchHistoryRecord, now?: Date): Promise<boolean>;
-}
-
-export type WatchQuotaHistoryRecord = WatchHistoryRecord;
-export type WatchEtaContext = WatchHistoryEtaContext;
-export type WatchHistoryScopeKind = WatchHistoryRecord["scope_kind"];
-
-export interface WatchHistoryObservedRatioDiagnostic {
-  dimension: "plan";
-  key: string;
-  sample_count: number;
-  observed_mean_raw_ratio: number;
-  observed_weighted_raw_ratio: number;
-  variance: number;
-  expected_raw_ratio: number | null;
-  relative_delta: number | null;
-  warning: boolean;
-}
-
-function roundToTwo(value: number): number {
-  return Number(value.toFixed(2));
-}
-
 export function convertFiveHourPercentToWeeklyEquivalent(
   fiveHourPercent: number | null,
   planType: string | null,
 ): number | null {
   return convertFiveHourPercentToPlusWeeklyUnits(fiveHourPercent, planType);
-}
-
-function clampPercent(value: number): number {
-  return Math.min(100, Math.max(0, value));
-}
-
-function isValidDate(value: string): boolean {
-  return !Number.isNaN(Date.parse(value));
-}
-
-function parseWindow(raw: unknown): WatchHistoryWindowSnapshot | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const candidate = raw as Record<string, unknown>;
-  if (
-    typeof candidate.used_percent !== "number" ||
-    !Number.isFinite(candidate.used_percent) ||
-    (candidate.window_seconds !== undefined &&
-      candidate.window_seconds !== null &&
-      (typeof candidate.window_seconds !== "number" ||
-        !Number.isFinite(candidate.window_seconds)))
-  ) {
-    return null;
-  }
-
-  if (
-    candidate.reset_at !== null &&
-    typeof candidate.reset_at !== "string"
-  ) {
-    return null;
-  }
-
-  if (typeof candidate.reset_at === "string" && !isValidDate(candidate.reset_at)) {
-    return null;
-  }
-
-  return {
-    used_percent: candidate.used_percent,
-    ...(typeof candidate.window_seconds === "number"
-      ? { window_seconds: candidate.window_seconds }
-      : {}),
-    reset_at: candidate.reset_at ?? null,
-  };
-}
-
-function parseWatchHistoryRecord(raw: unknown): WatchHistoryRecord | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const candidate = raw as Record<string, unknown>;
-  if (
-    typeof candidate.recorded_at !== "string" ||
-    typeof candidate.account_name !== "string" ||
-    !("plan_type" in candidate) ||
-    !("available" in candidate) ||
-    candidate.source !== "watch"
-  ) {
-    return null;
-  }
-
-  if (!isValidDate(candidate.recorded_at)) {
-    return null;
-  }
-
-  return {
-    recorded_at: candidate.recorded_at,
-    scope_kind: candidate.scope_kind === "isolated" ? "isolated" : "global",
-    scope_id: typeof candidate.scope_id === "string" ? candidate.scope_id : null,
-    account_name: candidate.account_name,
-    upstream_account_name:
-      candidate.upstream_account_name === null || typeof candidate.upstream_account_name === "string"
-        ? candidate.upstream_account_name
-        : null,
-    account_id:
-      candidate.account_id === null || typeof candidate.account_id === "string"
-        ? candidate.account_id
-        : null,
-    identity:
-      candidate.identity === null || typeof candidate.identity === "string"
-        ? candidate.identity
-        : null,
-    plan_type:
-      candidate.plan_type === null || typeof candidate.plan_type === "string"
-        ? candidate.plan_type
-        : null,
-    available:
-      candidate.available === null || typeof candidate.available === "string"
-        ? candidate.available
-        : null,
-    five_hour: parseWindow(candidate.five_hour),
-    one_week: parseWindow(candidate.one_week),
-    source: "watch",
-  };
-}
-
-function parseWatchHistoryLine(line: string): WatchHistoryRecord | null {
-  if (line.trim() === "") {
-    return null;
-  }
-
-  try {
-    return parseWatchHistoryRecord(JSON.parse(line));
-  } catch {
-    return null;
-  }
 }
 
 function isRecent(recordedAt: string, now: Date): boolean {
@@ -236,139 +77,6 @@ function formatRecord(record: WatchHistoryRecord): string {
   return `${JSON.stringify(record)}\n`;
 }
 
-function normalizeWindowInput(raw: unknown): WatchHistoryWindowSnapshot | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const candidate = raw as Record<string, unknown>;
-  const usedPercent =
-    typeof candidate.used_percent === "number"
-      ? candidate.used_percent
-      : typeof candidate.usedPercent === "number"
-        ? candidate.usedPercent
-        : null;
-
-  if (usedPercent === null || !Number.isFinite(usedPercent)) {
-    return null;
-  }
-
-  const resetAt =
-    typeof candidate.reset_at === "string"
-      ? candidate.reset_at
-      : typeof candidate.resetAt === "string"
-        ? candidate.resetAt
-        : null;
-
-  if (resetAt !== null && !isValidDate(resetAt)) {
-    return null;
-  }
-
-  const windowSeconds =
-    typeof candidate.window_seconds === "number"
-      ? candidate.window_seconds
-      : typeof candidate.windowSeconds === "number"
-        ? candidate.windowSeconds
-        : undefined;
-
-  return {
-    used_percent: usedPercent,
-    ...(typeof windowSeconds === "number" ? { window_seconds: windowSeconds } : {}),
-    reset_at: resetAt,
-  };
-}
-
-function normalizeRecordInput(raw: unknown): WatchHistoryRecord {
-  if (!raw || typeof raw !== "object") {
-    throw new Error("Watch history record must be an object.");
-  }
-
-  const candidate = raw as Record<string, unknown>;
-  const recordedAt =
-    typeof candidate.recorded_at === "string"
-      ? candidate.recorded_at
-      : typeof candidate.recordedAt === "string"
-        ? candidate.recordedAt
-        : null;
-
-  if (recordedAt === null || !isValidDate(recordedAt)) {
-    throw new Error("Watch history record requires a valid recorded_at/recordedAt value.");
-  }
-
-  const accountName =
-    typeof candidate.account_name === "string"
-      ? candidate.account_name
-      : typeof candidate.accountName === "string"
-        ? candidate.accountName
-        : null;
-  if (accountName === null) {
-    throw new Error("Watch history record requires account_name/accountName.");
-  }
-
-  const scopeKind =
-    candidate.scope_kind === "isolated" || candidate.scopeKind === "isolated"
-      ? "isolated"
-      : "global";
-  const scopeId =
-    typeof candidate.scope_id === "string"
-      ? candidate.scope_id
-      : typeof candidate.scopeId === "string"
-        ? candidate.scopeId
-        : null;
-
-  const accountId =
-    candidate.account_id === null || typeof candidate.account_id === "string"
-      ? candidate.account_id
-      : candidate.accountId === null || typeof candidate.accountId === "string"
-        ? candidate.accountId
-        : null;
-  const upstreamAccountName =
-    candidate.upstream_account_name === null || typeof candidate.upstream_account_name === "string"
-      ? candidate.upstream_account_name
-      : candidate.upstreamAccountName === null || typeof candidate.upstreamAccountName === "string"
-        ? candidate.upstreamAccountName
-        : null;
-
-  const identity =
-    candidate.identity === null || typeof candidate.identity === "string"
-      ? candidate.identity
-      : typeof candidate.user_id === "string"
-        ? candidate.user_id
-        : typeof candidate.userId === "string"
-          ? candidate.userId
-          : null;
-
-  const planType =
-    candidate.plan_type === null || typeof candidate.plan_type === "string"
-      ? candidate.plan_type
-      : typeof candidate.planType === "string"
-        ? candidate.planType
-        : null;
-
-  const available =
-    candidate.available === null || typeof candidate.available === "string"
-      ? candidate.available
-      : null;
-
-  const fiveHour = normalizeWindowInput(candidate.five_hour ?? candidate.fiveHour);
-  const oneWeek = normalizeWindowInput(candidate.one_week ?? candidate.oneWeek);
-
-  return {
-    recorded_at: recordedAt,
-    scope_kind: scopeKind,
-    scope_id: scopeId,
-    account_name: accountName,
-    ...(upstreamAccountName !== null ? { upstream_account_name: upstreamAccountName } : {}),
-    account_id: accountId,
-    identity,
-    plan_type: planType,
-    available,
-    five_hour: fiveHour,
-    one_week: oneWeek,
-    source: "watch",
-  };
-}
-
 export function filterWatchHistoryByScope(
   history: WatchHistoryRecord[],
   scope: {
@@ -387,59 +95,6 @@ export function filterWatchHistoryByScope(
 
     return true;
   });
-}
-
-function normalizeTargetSnapshot(raw: unknown): WatchHistoryTargetSnapshot {
-  if (!raw || typeof raw !== "object") {
-    throw new Error("Watch ETA target snapshot must be an object.");
-  }
-
-  const candidate = raw as Record<string, unknown>;
-  const planType =
-    typeof candidate.plan_type === "string" || candidate.plan_type === null
-      ? candidate.plan_type
-      : typeof candidate.planType === "string" || candidate.planType === null
-        ? candidate.planType
-        : null;
-
-  const available =
-    typeof candidate.available === "string" || candidate.available === null
-      ? candidate.available
-      : null;
-  const remaining5h =
-    typeof candidate.remaining_5h === "number"
-      ? candidate.remaining_5h
-      : typeof candidate.remaining5h === "number"
-        ? candidate.remaining5h
-        : undefined;
-  const remaining1w =
-    typeof candidate.remaining_1w === "number"
-      ? candidate.remaining_1w
-      : typeof candidate.remaining1w === "number"
-        ? candidate.remaining1w
-        : undefined;
-  const remaining5hEq1w =
-    typeof candidate.remaining_5h_eq_1w === "number"
-      ? candidate.remaining_5h_eq_1w
-      : typeof candidate.remaining5hEq1w === "number"
-        ? candidate.remaining5hEq1w
-        : undefined;
-
-  return {
-    plan_type: planType,
-    available,
-    five_hour: normalizeWindowInput(candidate.five_hour ?? candidate.fiveHour),
-    one_week: normalizeWindowInput(candidate.one_week ?? candidate.oneWeek),
-    ...(typeof remaining5h === "number" && Number.isFinite(remaining5h)
-      ? { remaining_5h: roundToTwo(clampPercent(remaining5h)) }
-      : {}),
-    ...(typeof remaining1w === "number" && Number.isFinite(remaining1w)
-      ? { remaining_1w: roundToTwo(Math.max(0, remaining1w)) }
-      : {}),
-    ...(typeof remaining5hEq1w === "number" && Number.isFinite(remaining5hEq1w)
-      ? { remaining_5h_eq_1w: roundToTwo(Math.max(0, remaining5hEq1w)) }
-      : {}),
-  };
 }
 
 function deltaForContinuousWindow(

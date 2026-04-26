@@ -18,6 +18,10 @@ import {
   formatLocalUsageWindowLine,
   type LocalUsageWindowName,
 } from "../local-usage/format.js";
+import {
+  formatDateTime,
+  formatResetAt,
+} from "../cli/time-format.js";
 import type { LocalUsageSummary } from "../local-usage/types.js";
 import { LocalUsageService } from "../local-usage/service.js";
 import {
@@ -44,8 +48,6 @@ import {
   buildSingleAccountDetailText,
   describeCurrentStatus,
   describeDoctorReport,
-  formatDateTime,
-  formatResetAt,
   toJsonEta,
   toWatchEtaTarget,
 } from "./inspection-display.js";
@@ -224,6 +226,9 @@ export async function handleListCommand(options: {
   if (current.account_id === PROXY_ACCOUNT_ID) {
     currentAccounts.add(PROXY_ACCOUNT_NAME);
   }
+  const accountPathByName = new Map(
+    managedAccounts.map((account) => [account.name, account.accountPath] as const),
+  );
   const watchHistoryStore = createWatchHistoryStore(options.store.paths.codexTeamDir);
   const watchHistory = filterWatchHistoryByScope(
     await watchHistoryStore.read(now),
@@ -353,6 +358,7 @@ export async function handleListCommand(options: {
       warnings: combinedWarnings,
       successes: displayResult.successes.map((account) => ({
         ...toCliQuotaSummary(account),
+        account_path: accountPathByName.get(account.name) ?? null,
         is_current: currentAccounts.has(account.name),
         eta: toJsonEta(
           etaByName.get(account.name)

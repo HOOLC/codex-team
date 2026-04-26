@@ -135,6 +135,7 @@ export class AccountStoreRepository {
   }
 
   async readManagedAccount(name: string): Promise<ManagedAccount> {
+    const accountPath = this.accountDirectory(name);
     const metaPath = this.accountMetaPath(name);
     const authPath = this.accountAuthPath(name);
     const [rawMeta, snapshot] = await Promise.all([
@@ -169,6 +170,7 @@ export class AccountStoreRepository {
       ...meta,
       identity: getMetaIdentity(meta),
       email: getSnapshotEmail(snapshot) ?? null,
+      accountPath,
       authPath,
       metaPath,
       configPath: (await pathExists(this.accountConfigPath(name))) ? this.accountConfigPath(name) : null,

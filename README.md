@@ -161,7 +161,7 @@ This is the main command to use when deciding which account to switch to next.
 - `codexm doctor`: diagnose local auth, runtime probes, and managed Desktop consistency
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: show saved accounts plus an embedded local usage summary
 - `codexm list <name>`: show one saved account in detail, including email, identity, quota, and the selected local usage window
-- `codexm list --json`: machine-readable output, including proxy current-upstream metadata and last-upstream metadata when available
+- `codexm list --json`: machine-readable output for list and list <name>, including saved account paths, proxy current-upstream metadata, and last-upstream metadata when available
 - `codexm list --debug`: include diagnostic details about quota normalization and observed ratios
 - `codexm proxy status`: inspect the local proxy daemon and synthetic auth mode
 - `codexm daemon status`: inspect the shared background daemon, enabled features, and log path

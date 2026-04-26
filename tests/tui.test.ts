@@ -2933,6 +2933,7 @@ describe("Account Dashboard TUI", () => {
             quota: {
               status: "ok",
             },
+            accountPath: overlayDir,
             authPath: `${overlayDir}/auth.json`,
             metaPath: `${overlayDir}/meta.json`,
             configPath: null,
@@ -3576,9 +3577,7 @@ describe("Account Dashboard TUI", () => {
         emailLabel: "beta@example.com",
         refreshStatusLabel: "stale",
       });
-      expect(snapshot.warnings).toContain(
-        'Saved auth for beta needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace beta" to refresh it.',
-      );
+      expect(snapshot.warnings).toEqual([]);
       expect(snapshot.accounts[1]?.detailLines).toEqual(
         expect.arrayContaining([
           "Identity: acct-beta:user-beta",
