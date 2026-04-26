@@ -1700,6 +1700,88 @@ describe("Account Dashboard TUI", () => {
     }
   });
 
+  test("updates proxy upstream from the dashboard without refreshing managed Desktop", async () => {
+    const homeDir = await createTempHome();
+    const stdin = createInteractiveStdin();
+    const stdout = createInteractiveStdout();
+    const stderr = captureWritable();
+    const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+    let actionResult: {
+      statusMessage?: string;
+      currentName?: string | null;
+      proxyUpstreamName?: string | null;
+    } | null = null;
+
+    try {
+      const { writeSyntheticProxyRuntime } = await import("../src/proxy/config.js");
+      const { writeProxyState } = await import("../src/proxy/state.js");
+
+      await writeCurrentAuth(homeDir, "acct-dashboard-upstream", "chatgpt", "plus", "user-dashboard-upstream");
+      const store = createAccountStore(homeDir);
+      await runCli(["save", "dashboard-upstream", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const proxyState = await writeSyntheticProxyRuntime({
+        store,
+        state: {
+          pid: 23456,
+          host: "127.0.0.1",
+          port: 14555,
+          started_at: "2026-04-21T10:00:00.000Z",
+          log_path: `${homeDir}/.codex-team/logs/proxy.log`,
+          base_url: "http://127.0.0.1:14555/backend-api",
+          openai_base_url: "http://127.0.0.1:14555/v1",
+          debug: false,
+        },
+      });
+      await writeProxyState(store.paths.codexTeamDir, proxyState);
+
+      const result = await handleTuiCommand({
+        positionals: [],
+        store,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
+        }),
+        watchProcessManager: createWatchProcessManagerStub(),
+        streams: {
+          stdin,
+          stdout,
+          stderr: stderr.stream,
+        },
+        runCodexCli: async () => ({
+          exitCode: 0,
+          restartCount: 0,
+        }),
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 1,
+        runDashboardTuiImpl: async (options) => {
+          actionResult = await options.switchAccount("dashboard-upstream", { force: false });
+          return {
+            code: 0,
+            action: "quit",
+          };
+        },
+      });
+
+      expect(result).toBe(0);
+      expect(actionResult).toMatchObject({
+        statusMessage: 'Updated proxy upstream to "dashboard-upstream" while proxy remains enabled.',
+        currentName: "proxy",
+        proxyUpstreamName: "dashboard-upstream",
+      });
+      expect(applyManagedSwitchCalls).toEqual([]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("force-reloads the current account instead of short-circuiting", async () => {
     const stdin = createInteractiveStdin();
     const stdout = createInteractiveStdout();

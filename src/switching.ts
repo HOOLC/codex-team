@@ -422,8 +422,9 @@ export async function performAutoSwitch(
   }
 
   let result: Awaited<ReturnType<AccountStore["switchAccount"]>>;
+  let proxyRetained = false;
   try {
-    ({ result } = await switchAccountPreservingProxyRuntime({
+    ({ result, proxyRetained } = await switchAccountPreservingProxyRuntime({
       store,
       name: selected.name,
       restoreFailureMessage:
@@ -448,14 +449,18 @@ export async function performAutoSwitch(
   }
   result.warnings = stripManagedDesktopWarning(result.warnings);
 
-  await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
-    force: options.force,
-    signal: options.signal,
-    statusStream: options.statusStream,
-    statusDelayMs: options.statusDelayMs,
-    statusIntervalMs: options.statusIntervalMs,
-    timeoutMs: options.timeoutMs,
-  });
+  if (proxyRetained) {
+    options.debugLog?.("switch: skipping managed Desktop refresh because proxy runtime remains active");
+  } else {
+    await refreshManagedDesktopAfterSwitch(result.warnings, desktopLauncher, {
+      force: options.force,
+      signal: options.signal,
+      statusStream: options.statusStream,
+      statusDelayMs: options.statusDelayMs,
+      statusIntervalMs: options.statusIntervalMs,
+      timeoutMs: options.timeoutMs,
+    });
+  }
   options.debugLog?.(
     `switch: completed mode=auto target=${result.account.name} candidates=${candidates.length} warnings=${result.warnings.length}`,
   );

@@ -65,6 +65,11 @@ export async function performManualSwitch(
       const switched = switchedResult.result;
       proxyRetained = switchedResult.proxyRetained;
       switched.warnings = stripManagedDesktopWarning(switched.warnings);
+      if (proxyRetained) {
+        options.debugLog?.("switch: skipping managed Desktop refresh because proxy runtime remains active");
+        return switched;
+      }
+
       const skipDesktopRefresh = await shouldSkipManagedDesktopRefresh(
         options.store,
         options.desktopLauncher,

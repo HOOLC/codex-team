@@ -1688,6 +1688,64 @@ describe("CLI", () => {
     }
   });
 
+  test("switch only updates proxy upstream without refreshing managed Desktop when proxy is active", async () => {
+    const homeDir = await createTempHome();
+
+    try {
+      const { writeSyntheticProxyRuntime } = await import("../src/proxy/config.js");
+      const { writeProxyState } = await import("../src/proxy/state.js");
+
+      await writeCurrentAuth(homeDir, "acct-proxy-upstream", "chatgpt", "plus", "user-proxy-upstream");
+      const store = createAccountStore(homeDir);
+      await runCli(["save", "proxy-upstream", "--json"], {
+        store,
+        stdout: captureWritable().stream,
+        stderr: captureWritable().stream,
+      });
+
+      const proxyState = await writeSyntheticProxyRuntime({
+        store,
+        state: {
+          pid: 23456,
+          host: "127.0.0.1",
+          port: 14555,
+          started_at: "2026-04-21T10:00:00.000Z",
+          log_path: `${homeDir}/.codex-team/logs/proxy.log`,
+          base_url: "http://127.0.0.1:14555/backend-api",
+          openai_base_url: "http://127.0.0.1:14555/v1",
+          debug: false,
+        },
+      });
+      await writeProxyState(store.paths.codexTeamDir, proxyState);
+
+      const applyManagedSwitchCalls: Array<{ force?: boolean; timeoutMs?: number }> = [];
+      const stdout = captureWritable();
+      const stderr = captureWritable();
+
+      const exitCode = await runCli(["switch", "proxy-upstream"], {
+        store,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        managedDesktopWaitStatusDelayMs: 1,
+        managedDesktopWaitStatusIntervalMs: 5,
+        desktopLauncher: createDesktopLauncherStub({
+          isManagedDesktopRunning: async () => true,
+          applyManagedSwitch: async (options) => {
+            applyManagedSwitchCalls.push({ ...options });
+            return true;
+          },
+        }),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdout.read()).toContain('Updated proxy upstream to "proxy-upstream"');
+      expect(stderr.read()).toBe("");
+      expect(applyManagedSwitchCalls).toEqual([]);
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("switch warns when refreshing the running codexm-managed Desktop session fails", async () => {
     const homeDir = await createTempHome();
 
