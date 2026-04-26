@@ -17,6 +17,7 @@
 - Show one saved account in detail, including email and local usage: `codexm list <name>`
 - List saved accounts and also enqueue a daemon auth refresh: `codexm list --refresh`
 - Show auto-switch score details and normalized 1-hour breakdowns: `codexm list --verbose`
+- Use `codexm list --json` or `codexm list <name> --json` when machine-readable output is needed; saved direct accounts include their local account path.
 - Switch local auth to a saved account; when proxy is enabled, update the proxy's current upstream instead of disabling proxy: `codexm switch <name>`
 - Let `codexm` choose the best account from quota data: `codexm switch --auto`
 - Preview the `switch --auto` decision without changing auth: `codexm switch --auto --dry-run`
@@ -48,6 +49,7 @@
 - Use `codexm doctor` when the user is debugging mismatches between local auth, direct runtime reads, and managed Desktop state.
 - Use `codexm list` when the user wants to compare saved accounts or inspect quota state.
 - Use `codexm list --verbose` when the user wants score details behind auto-switch ranking.
+- Use `codexm list --json` when callers need stable fields such as saved account paths, proxy current-upstream metadata, and proxy last-upstream metadata.
 - Use `codexm add <name>` when the user wants to create a managed account without changing current auth.
 - Use `codexm add <name> --device-auth` on remote/headless machines where browser callback login is inconvenient.
 - Use `codexm replace <name>` when a saved account exists but its auth or refresh token is no longer usable and the user wants to overwrite that snapshot in place.
