@@ -41,30 +41,33 @@ function encodeTestJwt(payload: Record<string, unknown>): string {
 }
 
 async function seedWatchHistory(homeDir: string, accountName = "quota-main"): Promise<void> {
+  const now = Date.now();
+  const iso = (offsetMinutes: number) => new Date(now + offsetMinutes * 60_000).toISOString();
+
   await mkdir(join(homeDir, ".codex-team"), { recursive: true });
   await writeFile(
     join(homeDir, ".codex-team", "watch-quota-history.jsonl"),
     [
       JSON.stringify({
-        recorded_at: "2026-04-10T10:00:00.000Z",
+        recorded_at: iso(-60),
         account_name: accountName,
         account_id: "acct-c",
         identity: "acct-c:user-c",
         plan_type: "plus",
         available: "available",
-        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: "2026-04-10T14:00:00.000Z" },
-        one_week: { used_percent: 3, window_seconds: 604_800, reset_at: "2026-04-16T10:00:00.000Z" },
+        five_hour: { used_percent: 10, window_seconds: 18_000, reset_at: iso(240) },
+        one_week: { used_percent: 3, window_seconds: 604_800, reset_at: iso(6 * 24 * 60) },
         source: "watch",
       }),
       JSON.stringify({
-        recorded_at: "2026-04-10T10:30:00.000Z",
+        recorded_at: iso(-30),
         account_name: accountName,
         account_id: "acct-c",
         identity: "acct-c:user-c",
         plan_type: "plus",
         available: "available",
-        five_hour: { used_percent: 20, window_seconds: 18_000, reset_at: "2026-04-10T14:00:00.000Z" },
-        one_week: { used_percent: 6, window_seconds: 604_800, reset_at: "2026-04-16T10:00:00.000Z" },
+        five_hour: { used_percent: 20, window_seconds: 18_000, reset_at: iso(240) },
+        one_week: { used_percent: 6, window_seconds: 604_800, reset_at: iso(6 * 24 * 60) },
         source: "watch",
       }),
     ].join("\n") + "\n",
@@ -1880,6 +1883,21 @@ wire_api = "responses"
       expect(output).toContain("5H used/reset: 21% / -");
       expect(output).toMatch(/1W used\/reset: 34% \/ \d{2}-\d{2} \d{2}:\d{2}/u);
       expect(output).toContain("Usage 7d:");
+
+      const jsonStdout = captureWritable();
+      const jsonExitCode = await runCli(["list", "detail-alpha", "--json"], {
+        store,
+        stdout: jsonStdout.stream,
+        stderr: captureWritable().stream,
+      });
+
+      expect(jsonExitCode).toBe(0);
+      expect(JSON.parse(jsonStdout.read())).toMatchObject({
+        account: {
+          name: "detail-alpha",
+          account_path: join(homeDir, ".codex-team", "accounts", "detail-alpha"),
+        },
+      });
     } finally {
       await cleanupTempHome(homeDir);
     }

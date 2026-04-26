@@ -20,6 +20,7 @@ export interface StoreState {
 export interface ManagedAccount extends SnapshotMeta {
   identity: string;
   email: string | null;
+  accountPath: string;
   authPath: string;
   metaPath: string;
   configPath: string | null;

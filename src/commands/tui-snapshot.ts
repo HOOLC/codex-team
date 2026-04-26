@@ -425,6 +425,7 @@ function buildDashboardSnapshot(options: {
             quota: {
               status: account.status,
             },
+            accountPath: "",
             authPath: "",
             metaPath: "",
             configPath: null,

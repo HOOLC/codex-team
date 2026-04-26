@@ -161,7 +161,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 - `codexm doctor`: 诊断本地 auth、runtime 探测和托管 Desktop 一致性
 - `codexm list [--refresh] [--usage-window <today|7d|30d|all-time>] [--verbose]`: 查看所有保存账号，并附带一行本地 usage 摘要
 - `codexm list <name>`: 查看单个已保存账号的详情，包括邮箱、identity、quota 和所选本地 usage 窗口
-- `codexm list --json`: 输出机器可读 JSON；包含已保存账号路径、proxy 当前上游信息，以及有数据时最近一次上游命中信息
+- `codexm list --json`: 为 list 和 list <name> 输出机器可读 JSON；包含已保存账号路径、proxy 当前上游信息，以及有数据时最近一次上游命中信息
 - `codexm list --debug`: 输出 quota 归一化和观测比例相关诊断信息
 - `codexm proxy status`: 查看本地 proxy daemon 和 synthetic auth 状态
 - `codexm daemon status`: 查看共享后台 daemon、已启用能力和日志路径

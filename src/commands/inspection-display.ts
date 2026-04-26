@@ -239,6 +239,7 @@ export function buildSingleAccountDetailJson(options: {
       auth_mode: options.account.auth_mode,
       auto_switch_eligible: options.account.auto_switch_eligible,
       identity: options.account.identity,
+      account_path: options.account.accountPath,
       account_id: options.account.account_id,
       user_id: options.account.user_id,
       created_at: options.account.created_at,

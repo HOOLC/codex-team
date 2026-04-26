@@ -391,8 +391,8 @@
           {
             "usage": "codexm list --json",
             "description": {
-              "en": "machine-readable output, including saved account paths, proxy current-upstream metadata, and last-upstream metadata when available",
-              "zh-CN": "输出机器可读 JSON；包含已保存账号路径、proxy 当前上游信息，以及有数据时最近一次上游命中信息"
+              "en": "machine-readable output for list and list <name>, including saved account paths, proxy current-upstream metadata, and last-upstream metadata when available",
+              "zh-CN": "为 list 和 list <name> 输出机器可读 JSON；包含已保存账号路径、proxy 当前上游信息，以及有数据时最近一次上游命中信息"
             }
           },
           {

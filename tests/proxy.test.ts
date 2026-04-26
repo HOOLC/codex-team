@@ -226,21 +226,23 @@ async function writeQuotaMeta(
     one_week_used: number;
   },
 ): Promise<void> {
+  const now = Date.now();
+  const iso = (offsetMinutes: number) => new Date(now + offsetMinutes * 60_000).toISOString();
   const meta = JSON.parse(await readFile(accountMetaPath, "utf8")) as Record<string, unknown>;
   meta.quota = {
     status: quota.status,
     plan_type: quota.plan_type,
-    fetched_at: "2026-04-18T00:00:00.000Z",
+    fetched_at: iso(-5),
     unlimited: true,
     five_hour: {
       used_percent: quota.five_hour_used,
       window_seconds: 18_000,
-      reset_at: "2026-04-18T05:00:00.000Z",
+      reset_at: iso(5 * 60),
     },
     one_week: {
       used_percent: quota.one_week_used,
       window_seconds: 604_800,
-      reset_at: "2026-04-25T00:00:00.000Z",
+      reset_at: iso(7 * 24 * 60),
     },
   };
   await writeFile(accountMetaPath, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
