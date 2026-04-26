@@ -3577,7 +3577,7 @@ describe("Account Dashboard TUI", () => {
         refreshStatusLabel: "stale",
       });
       expect(snapshot.warnings).toContain(
-        'Saved auth for beta needs replace: refresh failed and it is already stale or expires within 3d. Run "codexm replace beta" to refresh it.',
+        'Saved auth for beta needs replace: auth refresh failed and the token is expired or expires within 3d. Run "codexm replace beta" to refresh it.',
       );
       expect(snapshot.accounts[1]?.detailLines).toEqual(
         expect.arrayContaining([
