@@ -3442,6 +3442,199 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy websocket replays checkpoint continuations across accounts without upstream previous_response_id", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    const upstreamHttp = createServer();
+    const upstreamWs = new WebSocketServer({ server: upstreamHttp });
+    const upstreamConnections: Array<{
+      accountId: string | null;
+      bodies: Record<string, unknown>[];
+    }> = [];
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        upstreamHttp.once("error", reject);
+        upstreamHttp.listen(0, "127.0.0.1", () => {
+          upstreamHttp.off("error", reject);
+          resolve();
+        });
+      });
+      const upstreamAddress = upstreamHttp.address();
+      const upstreamPort = typeof upstreamAddress === "object" && upstreamAddress ? upstreamAddress.port : 0;
+      const upstreamUrl = `ws://127.0.0.1:${upstreamPort}/backend-api/codex/responses`;
+
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot("alpha", createAuthPayload("acct-alpha", "chatgpt", "plus", "user-alpha"));
+      await store.addAccountSnapshot("beta", createAuthPayload("acct-beta", "chatgpt", "plus", "user-beta"));
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("alpha")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      upstreamWs.on("connection", (socket, request) => {
+        const connection = {
+          accountId: typeof request.headers["chatgpt-account-id"] === "string"
+            ? request.headers["chatgpt-account-id"]
+            : null,
+          bodies: [] as Record<string, unknown>[],
+        };
+        upstreamConnections.push(connection);
+        socket.on("message", (raw) => {
+          const body = JSON.parse(raw.toString()) as Record<string, unknown>;
+          connection.bodies.push(body);
+
+          if (connection.accountId === "acct-alpha" && connection.bodies.length === 1) {
+            socket.send(JSON.stringify({
+              type: "response.created",
+              response: { id: "resp_alpha_parent" },
+            }));
+            socket.send(JSON.stringify({
+              type: "response.output_item.done",
+              output_index: 0,
+              item: {
+                id: "msg_alpha_parent",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "parent" }],
+              },
+            }));
+            socket.send(JSON.stringify({
+              type: "response.completed",
+              response: {
+                id: "resp_alpha_parent",
+                output: [],
+              },
+            }));
+            return;
+          }
+
+          if (connection.accountId === "acct-alpha") {
+            socket.send(JSON.stringify({
+              type: "response.created",
+              response: { id: "resp_alpha_failed" },
+            }));
+            socket.send(JSON.stringify({
+              type: "response.failed",
+              error: {
+                codex_error_info: "usage_limit_exceeded",
+                message: "You've hit your usage limit.",
+              },
+              response: {
+                id: "resp_alpha_failed",
+                output: [],
+              },
+            }));
+            return;
+          }
+
+          socket.send(JSON.stringify({
+            type: "response.created",
+            response: { id: "resp_beta_retry" },
+          }));
+          socket.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: "resp_beta_retry",
+              output: [],
+            },
+          }));
+        });
+      });
+
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        connectWebSocketImpl: async (options) => await new Promise<WebSocket>((resolve, reject) => {
+          const socket = new WebSocket(upstreamUrl, {
+            headers: options.headers,
+            perMessageDeflate: false,
+          });
+          socket.once("open", () => resolve(socket));
+          socket.once("error", reject);
+        }),
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const downstream = new WebSocket(`${server.openaiBaseUrl.replace(/^http/u, "ws")}/responses`, {
+          headers: {
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          perMessageDeflate: false,
+        });
+        await waitForWebSocketOpen(downstream);
+
+        const firstEvents = await sendWebSocketTurnAndCollectTerminal(downstream, {
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        });
+        const firstCreatedId = typeof (firstEvents.find((event) => event.type === "response.created") as {
+          response?: { id?: unknown };
+        } | undefined)?.response?.id === "string"
+          ? String((firstEvents.find((event) => event.type === "response.created") as {
+              response?: { id?: unknown };
+            }).response?.id)
+          : null;
+        expect(firstCreatedId).toMatch(/^resp_pxy_/u);
+
+        const secondEvents = await sendWebSocketTurnAndCollectTerminal(downstream, {
+          type: "response.create",
+          model: "gpt-5.4",
+          previous_response_id: firstCreatedId,
+          input: [{ role: "user", content: [{ type: "input_text", text: "next" }] }],
+        });
+        expect(secondEvents.map((event) => event.type)).toContain("response.completed");
+
+        expect(upstreamConnections.map((connection) => connection.accountId)).toEqual(["acct-alpha", "acct-beta"]);
+        expect(upstreamConnections[0]?.bodies).toHaveLength(2);
+        expect(upstreamConnections[0]?.bodies[1]?.previous_response_id).toBe("resp_alpha_parent");
+        expect(upstreamConnections[1]?.bodies[0]?.previous_response_id).toBeUndefined();
+        expect(upstreamConnections[1]?.bodies[0]?.input).toEqual([
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "hello" }],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "output_text", text: "parent" }],
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "next" }],
+          },
+        ]);
+
+        downstream.close();
+        await waitForWebSocketClose(downstream);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      for (const client of upstreamWs.clients) {
+        client.terminate();
+      }
+      upstreamWs.close();
+      await new Promise<void>((resolve) => upstreamHttp.close(() => resolve()));
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("proxy websocket normalizes minimal response.create payloads before forwarding upstream", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");

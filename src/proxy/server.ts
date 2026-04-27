@@ -2543,23 +2543,19 @@ export async function startProxyServer(options: StartProxyServerOptions): Promis
     }
 
     try {
-      const rewrittenRequest = await rewriteProxyCreateRequest({
-        store: options.store,
-        requestBody: cloneJsonValue(activeTurn.requestBody),
-        selectedAccountName: replaySelected.account.name,
-        normalizeInput: normalizeWebSocketInput,
-      });
-      const finalRequestBody = maybeInjectFastServiceTier(rewrittenRequest.requestBody, replaySelected);
+      const replayRequestBody = {
+        ...cloneJsonValue(activeTurn.requestBody),
+        input: cloneJsonValue(activeTurn.fullInput),
+      } as Record<string, unknown>;
+      delete replayRequestBody.previous_response_id;
+      const finalRequestBody = maybeInjectFastServiceTier(replayRequestBody, replaySelected);
       const previousAccountName = activeTurn.accountName;
 
       await ensureSyntheticUpstreamSocket(context, downstream, request, replaySelected);
       await persistProxyUpstreamAccountSelection(options.store, replaySelected.account);
       activeTurn.accountName = replaySelected.account.name;
       activeTurn.bufferedMessages = [];
-      activeTurn.chainId = rewrittenRequest.chainId;
-      activeTurn.fullInput = rewrittenRequest.fullInput;
       activeTurn.outputItems = [];
-      activeTurn.parentProxyResponseId = rewrittenRequest.parentProxyResponseId;
       activeTurn.replayLocked = false;
       activeTurn.replayLockedByItemType = null;
       activeTurn.replayLockedByType = null;
