@@ -112,7 +112,7 @@ codexm proxy disable
 
 `codexm proxy enable` starts or reuses the shared local daemon, installs a synthetic `proxy` account (`proxy@codexm.local`), and rewrites the default runtime's transport URLs to that proxy. Live proxy and non-proxy sessions keep the same provider identity, so they continue sharing one live thread history. The synthetic `proxy` row always stays visible in `codexm list` and the dashboard; while proxy mode is enabled, `@` marks the configured real upstream row.
 
-While proxy stays enabled, `codexm switch <name>` changes the current real upstream and daemon autoswitch can move it later after quota exhaustion. Before any downstream output starts, the proxy can replay one retryable quota-exhausted websocket turn or buffered REST request. The same daemon also exposes an OpenAI-compatible `/v1` surface for common tools.
+While proxy stays enabled, `codexm switch <name>` changes the current real upstream without replacing the default runtime's synthetic `proxy` auth or creating a `last-active-auth.json` backup; daemon autoswitch can move that upstream later after quota exhaustion. Before any downstream output starts, the proxy can replay one retryable quota-exhausted websocket turn or buffered REST request. The same daemon also exposes an OpenAI-compatible `/v1` surface for common tools.
 
 Use `codexm proxy enable` for the default runtime and `codexm run --proxy` for an isolated overlay that should not touch the live `CODEX_HOME`. Use `codexm daemon status` to inspect daemon state. For quota aggregation, replay rules, Desktop behavior, ports, and logs, see [proxy.md](./skills/codexm-usage/references/proxy.md) and [managed-desktop.md](./skills/codexm-usage/references/managed-desktop.md).
 
@@ -171,7 +171,7 @@ This is the main command to use when deciding which account to switch to next.
 
 ### Switch and launch
 
-- `codexm switch <name>`: switch to a saved direct account; with proxy enabled, this immediately becomes the proxy's current upstream until a later autoswitch event changes it
+- `codexm switch <name>`: switch to a saved direct account; with proxy enabled, update only the proxy's current upstream without replacing the synthetic proxy auth
 - `codexm switch --auto --dry-run`: preview the best auto-switch candidate
 - `codexm launch [name] [--auto]`: launch Codex Desktop on macOS and ensure the shared daemon is running
 

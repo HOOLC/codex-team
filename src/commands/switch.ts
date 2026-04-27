@@ -59,8 +59,6 @@ export async function performManualSwitch(
       const switchedResult = await switchAccountPreservingProxyRuntime({
         store: options.store,
         name: options.name,
-        restoreFailureMessage:
-          `Proxy was active, but codexm could not restore the proxy runtime after switching "${options.name}". Direct auth is active locally.`,
       });
       const switched = switchedResult.result;
       proxyRetained = switchedResult.proxyRetained;

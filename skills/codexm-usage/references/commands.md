@@ -18,7 +18,7 @@
 - List saved accounts and also enqueue a daemon auth refresh: `codexm list --refresh`
 - Show auto-switch score details and normalized 1-hour breakdowns: `codexm list --verbose`
 - Use `codexm list --json` or `codexm list <name> --json` when machine-readable output is needed; saved direct accounts include their local account path.
-- Switch local auth to a saved account; when proxy is enabled, update the proxy's current upstream instead of disabling proxy: `codexm switch <name>`
+- Switch local auth to a saved account; when proxy is enabled, update only the proxy's current upstream without replacing the synthetic proxy auth: `codexm switch <name>`
 - Let `codexm` choose the best account from quota data: `codexm switch --auto`
 - Preview the `switch --auto` decision without changing auth: `codexm switch --auto --dry-run`
 - Start Codex Desktop with the current auth, switch first, or auto-pick the best account: `codexm launch [name]`, `codexm launch --auto`

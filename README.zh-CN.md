@@ -112,7 +112,7 @@ codexm proxy disable
 
 `codexm proxy enable` 会启动或复用共享本地 daemon，写入一个 synthetic `proxy` 账号（`proxy@codexm.local`），并把默认 runtime 的 transport URL 指到本地 proxy。live proxy 和非 proxy 会继续保留同一个 provider 身份，因此仍然共用同一份 live thread 历史。`codexm list` 和 dashboard 总会显示 synthetic `proxy` 行；proxy 开启时，`@` 表示当前配置的真实 upstream。
 
-proxy 保持启用时，`codexm switch <name>` 会切换当前真实 upstream；如果后续 daemon 因 quota 耗尽触发 autoswitch，proxy 才会再跟着切走。在真正向下游输出内容之前，proxy 还可以自动重放一次可重试的 quota exhausted websocket turn 或缓冲型 REST 请求。这个共享 daemon 同时也暴露常用的 OpenAI-compatible `/v1` 接口。
+proxy 保持启用时，`codexm switch <name>` 只会切换当前真实 upstream，不会替换默认 runtime 里的 synthetic `proxy` auth，也不会生成 `last-active-auth.json` backup；如果后续 daemon 因 quota 耗尽触发 autoswitch，proxy 才会再跟着切走。在真正向下游输出内容之前，proxy 还可以自动重放一次可重试的 quota exhausted websocket turn 或缓冲型 REST 请求。这个共享 daemon 同时也暴露常用的 OpenAI-compatible `/v1` 接口。
 
 `codexm proxy enable` 作用于默认 runtime，`codexm run --proxy` 则用于不想写入 live `CODEX_HOME` 的隔离 overlay。共享 daemon 状态可以通过 `codexm daemon status` 查看。更详细的 quota 聚合、重放规则、Desktop 行为、端口和日志说明见 [proxy.md](./skills/codexm-usage/references/proxy.md) 和 [managed-desktop.md](./skills/codexm-usage/references/managed-desktop.md)。
 
@@ -171,7 +171,7 @@ Usage 7d: in 182k/$0.42 | out 96k/$0.71 | total 278k/$1.13
 
 ### 切换与启动
 
-- `codexm switch <name>`: 切换到指定保存的 direct 账号；若 proxy 已启用，这会立刻成为 proxy 的当前上游，直到后续 autoswitch 事件再把它切走
+- `codexm switch <name>`: 切换到指定保存的 direct 账号；若 proxy 已启用，只更新 proxy 的当前上游，不替换 synthetic proxy auth
 - `codexm switch --auto --dry-run`: 预览自动切号会选中的账号
 - `codexm launch [name] [--auto]`: 在 macOS 上启动 Codex Desktop，并确保共享 daemon 已启动
 

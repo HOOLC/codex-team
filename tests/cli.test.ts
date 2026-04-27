@@ -1739,7 +1739,9 @@ describe("CLI", () => {
 
       expect(exitCode).toBe(0);
       expect(stdout.read()).toContain('Updated proxy upstream to "proxy-upstream"');
+      expect(stdout.read()).not.toContain("Backup:");
       expect(stderr.read()).toBe("");
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("codexm-proxy-account");
       expect(applyManagedSwitchCalls).toEqual([]);
     } finally {
       await cleanupTempHome(homeDir);

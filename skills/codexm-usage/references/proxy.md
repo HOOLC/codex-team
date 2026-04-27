@@ -20,7 +20,7 @@ For `codexm`-managed entrypoints, both Responses websocket turns and REST `/v1` 
 
 ## Upstream selection
 
-- While proxy mode is enabled, `codexm switch <name>` updates the proxy's current real upstream instead of disabling proxy.
+- While proxy mode is enabled, `codexm switch <name>` updates the proxy's current real upstream instead of disabling proxy, replacing the default runtime's synthetic `proxy` auth, or creating a `last-active-auth.json` backup.
 - Daemon autoswitch can move that upstream later, but only after quota-exhaustion signals.
 - `@` marks the configured current real upstream in `codexm list` and the dashboard while proxy mode is enabled.
 - `Proxy last upstream: ...` in `codexm list` and `Last upstream: ...` in the dashboard only appear when a recent real proxy hit is known.

@@ -449,8 +449,8 @@
           {
             "usage": "codexm switch <name>",
             "description": {
-              "en": "switch to a saved direct account; with proxy enabled, this immediately becomes the proxy's current upstream until a later autoswitch event changes it",
-              "zh-CN": "切换到指定保存的 direct 账号；若 proxy 已启用，这会立刻成为 proxy 的当前上游，直到后续 autoswitch 事件再把它切走"
+              "en": "switch to a saved direct account; with proxy enabled, update only the proxy's current upstream without replacing the synthetic proxy auth",
+              "zh-CN": "切换到指定保存的 direct 账号；若 proxy 已启用，只更新 proxy 的当前上游，不替换 synthetic proxy auth"
             }
           },
           {

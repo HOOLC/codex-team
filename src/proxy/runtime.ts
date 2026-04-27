@@ -161,23 +161,6 @@ export async function persistProxyUpstreamAccountSelection(
   }
 }
 
-export async function restoreSyntheticProxyRuntime(store: AccountStore): Promise<boolean> {
-  const state = await readProxyState(store.paths.codexTeamDir);
-  if (!state) {
-    return false;
-  }
-
-  const restoredState = await writeSyntheticProxyRuntime({
-    store,
-    state,
-  });
-  await writeProxyState(store.paths.codexTeamDir, {
-    ...restoredState,
-    enabled: true,
-  });
-  return true;
-}
-
 export async function ensureSyntheticProxyRuntimeActive(store: AccountStore): Promise<{
   restored: boolean;
   state: ProxyProcessState | null;

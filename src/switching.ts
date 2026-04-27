@@ -9,7 +9,10 @@ import type {
   CodexDesktopLauncher,
   RuntimeQuotaSnapshot,
 } from "./desktop/launcher.js";
-import { isSyntheticProxyRuntimeActive, restoreSyntheticProxyRuntime } from "./proxy/runtime.js";
+import {
+  isSyntheticProxyRuntimeActive,
+  persistProxyUpstreamAccountSelection,
+} from "./proxy/runtime.js";
 import {
   DEFAULT_MANAGED_DESKTOP_SWITCH_TIMEOUT_MS,
 } from "./desktop/launcher.js";
@@ -78,22 +81,24 @@ export function stripManagedDesktopWarning(warnings: string[]): string[] {
 export async function switchAccountPreservingProxyRuntime(options: {
   store: AccountStore;
   name: string;
-  restoreFailureMessage: string;
 }): Promise<ProxyPreservedSwitchResult> {
   const proxyModeWasActive = await isSyntheticProxyRuntimeActive(options.store);
-  const result = await options.store.switchAccount(options.name);
-  let proxyRetained = false;
-
   if (proxyModeWasActive) {
-    proxyRetained = await restoreSyntheticProxyRuntime(options.store);
-    if (!proxyRetained) {
-      result.warnings.push(options.restoreFailureMessage);
-    }
+    const account = await options.store.getManagedAccount(options.name);
+    await persistProxyUpstreamAccountSelection(options.store, account);
+    return {
+      result: {
+        account,
+        warnings: [],
+        backup_path: null,
+      },
+      proxyRetained: true,
+    };
   }
 
   return {
-    result,
-    proxyRetained,
+    result: await options.store.switchAccount(options.name),
+    proxyRetained: false,
   };
 }
 
@@ -427,8 +432,6 @@ export async function performAutoSwitch(
     ({ result, proxyRetained } = await switchAccountPreservingProxyRuntime({
       store,
       name: selected.name,
-      restoreFailureMessage:
-        `Proxy was active, but codexm could not restore the proxy runtime after auto-switching to "${selected.name}". Direct auth is active locally.`,
     }));
   } catch (error) {
     await appendEventLog(store.paths.codexTeamDir, buildEventPayload({

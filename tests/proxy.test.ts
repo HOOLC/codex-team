@@ -838,16 +838,23 @@ describe("codexm proxy", () => {
       } as never);
       expect(enableCode).toBe(0);
 
+      const stdout = captureWritable();
       const switchCode = await runCli(["switch", "real-main", "--json"], {
         store,
-        stdout: captureWritable().stream,
+        stdout: stdout.stream,
         stderr: captureWritable().stream,
         desktopLauncher: createDesktopLauncherStub(),
         proxyProcessManager: proxyProcess.manager,
       } as never);
       expect(switchCode).toBe(0);
+      expect(JSON.parse(stdout.read())).toMatchObject({
+        backup_path: null,
+        effective_current_account_name: "proxy",
+        proxy_retained: true,
+      });
 
       const currentConfig = await readCurrentConfig(homeDir);
+      expect((await readCurrentAuth(homeDir)).tokens?.account_id).toBe("codexm-proxy-account");
       expect(currentConfig).toContain('model = "gpt-5.4"');
       expect(currentConfig).toContain("[projects.main]");
       expect(currentConfig).toContain('preferred_auth_method = "chatgpt"');

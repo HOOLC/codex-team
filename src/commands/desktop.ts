@@ -146,8 +146,6 @@ export async function handleLaunchCommand(options: {
         const switchResult = (await switchAccountPreservingProxyRuntime({
           store,
           name: targetName,
-          restoreFailureMessage:
-            `Proxy was active, but codexm could not restore the proxy runtime after switching "${targetName}". Direct auth is active locally.`,
         })).result;
         warnings.push(...stripManagedDesktopWarning(switchResult.warnings));
         switchedAccount = switchResult.account;
