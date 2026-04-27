@@ -1,5 +1,5 @@
 import { createServer, request as httpRequest } from "node:http";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
@@ -837,6 +837,8 @@ describe("codexm proxy", () => {
         proxyProcessManager: proxyProcess.manager,
       } as never);
       expect(enableCode).toBe(0);
+
+      await rm(join(store.paths.codexTeamDir, "proxy"), { recursive: true, force: true });
 
       const stdout = captureWritable();
       const switchCode = await runCli(["switch", "real-main", "--json"], {
