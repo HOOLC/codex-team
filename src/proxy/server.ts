@@ -160,6 +160,7 @@ type ProxyReplaySkipReason =
   | "already_replayed"
   | "no_replay_candidate"
   | "not_retryable_quota_failure"
+  | "previous_response_id"
   | "replay_locked"
   | "replay_upstream_error"
   | "same_account_only";
@@ -1151,6 +1152,10 @@ function isBufferedProxyReplayRoute(pathname: string, body: Record<string, unkno
   return false;
 }
 
+function hasUpstreamPreviousResponseId(pathname: string, body: Record<string, unknown>): boolean {
+  return pathname === "/v1/responses" && typeof body.previous_response_id === "string";
+}
+
 interface ProxyBufferedReplayResult {
   payload: unknown;
   replay: ProxyReplayDiagnostic;
@@ -1685,6 +1690,41 @@ async function forwardOpenAIWithApiKey(options: {
                 replayedFromAccountNames,
               }),
             },
+      };
+    }
+
+    if (hasUpstreamPreviousResponseId(options.pathname, parsedBody)) {
+      const diagnostic = toProxyReplayDiagnostic({
+        replayAttempted: true,
+        replayCount: replayedFromAccountNames.length,
+        replaySkipReason: "previous_response_id",
+        replayedFromAccountNames,
+      });
+      return {
+        statusCode: upstream.status,
+        responseBytes: writeBufferedResponse(
+          options.response,
+          upstream.status,
+          buffered.responseHeaders,
+          buffered.bodyText,
+        ),
+        authKind: "apikey",
+        selectedAccount: selected.account.name,
+        selectedAuthMode: selected.account.auth_mode,
+        upstreamKind: "openai",
+        serviceTier: resolveProxyServiceTier(parsedBody),
+        diagnostic,
+        errorPayload: {
+          ...buildRequestResponseLogPayload({
+            request: options.request,
+            bodyText: options.bodyText,
+            upstreamUrl,
+            upstreamRequestHeaders: outgoingHeaders,
+            responseHeaders: buffered.responseHeaders,
+            responseBodyText: buffered.bodyText,
+          }),
+          ...diagnostic,
+        },
       };
     }
 

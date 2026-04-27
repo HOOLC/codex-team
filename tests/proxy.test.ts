@@ -4544,6 +4544,104 @@ describe("codexm proxy", () => {
     }
   });
 
+  test("proxy skips API-key replay when responses request is pinned to upstream previous_response_id", async () => {
+    const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
+    const { startProxyServer } = await import("../src/proxy/server.js");
+    const homeDir = await createTempHome();
+
+    try {
+      const store = createAccountStore(homeDir);
+      await store.addAccountSnapshot(
+        "api-one",
+        {
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "sk-one",
+        },
+        {
+          rawConfig: 'base_url = "https://api.example.test/v1"\nmodel_provider = "openai"\n',
+        },
+      );
+      await store.addAccountSnapshot(
+        "api-two",
+        {
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "sk-two",
+        },
+        {
+          rawConfig: 'base_url = "https://api.example.test/v1"\nmodel_provider = "openai"\n',
+        },
+      );
+      await writeProxyManualUpstreamAuth(homeDir, (await store.getManagedAccount("api-one")).authPath);
+      await writeDaemonState(store.paths.codexTeamDir, {
+        pid: 54321,
+        started_at: "2026-04-18T00:00:00.000Z",
+        log_path: "/tmp/daemon.log",
+        stayalive: true,
+        watch: false,
+        auto_switch: true,
+        proxy: true,
+        host: "127.0.0.1",
+        port: 14555,
+        base_url: "http://127.0.0.1:14555/backend-api",
+        openai_base_url: "http://127.0.0.1:14555/v1",
+        debug: false,
+      });
+
+      const authorizations: string[] = [];
+      const requestLogs: Array<Record<string, unknown>> = [];
+      const server = await startProxyServer({
+        store,
+        host: "127.0.0.1",
+        port: 0,
+        requestLogger: async (payload) => {
+          requestLogs.push(payload);
+        },
+        fetchImpl: async (_url, init) => {
+          const authorization = new Headers(init?.headers).get("authorization") ?? "";
+          authorizations.push(authorization);
+          return jsonResponse({
+            error: {
+              code: "insufficient_quota",
+              message: "Insufficient quota.",
+            },
+          }, 429);
+        },
+      });
+
+      try {
+        const syntheticAuth = createSyntheticProxyAuthSnapshot(new Date("2026-04-18T00:00:00.000Z"));
+        const response = await fetch(`${server.baseUrl}/v1/responses`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${String(syntheticAuth.tokens?.access_token)}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-4.1",
+            previous_response_id: "resp_openai_parent",
+            input: "continue",
+            stream: false,
+          }),
+        });
+
+        expect(response.status).toBe(429);
+        expect(authorizations).toEqual(["Bearer sk-one"]);
+        expect((await response.json() as { error?: { code?: string } }).error?.code).toBe("insufficient_quota");
+        expect((await readAuthSnapshotFile(join(homeDir, ".codex-team", "proxy", "last-direct-auth.json"))).OPENAI_API_KEY)
+          .toBe("sk-one");
+        expect(requestLogs.at(-1)).toMatchObject({
+          replay_attempted: true,
+          replay_count: 0,
+          replay_skip_reason: "previous_response_id",
+        });
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await cleanupTempHome(homeDir);
+    }
+  });
+
   test("proxy server preserves text from SSE output_item events for non-stream responses", async () => {
     const { createSyntheticProxyAuthSnapshot } = await import("../src/proxy/synthetic-auth.js");
     const { startProxyServer } = await import("../src/proxy/server.js");
