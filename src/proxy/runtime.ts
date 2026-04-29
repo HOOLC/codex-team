@@ -4,9 +4,11 @@ import { copyFile, readFile } from "node:fs/promises";
 import type { AccountStore, ManagedAccount } from "../account-store/index.js";
 import { getSnapshotIdentity, readAuthSnapshotFile } from "../auth-snapshot.js";
 import {
+  DIRECTORY_MODE,
   FILE_MODE,
   atomicWriteFile,
   chmodIfPossible,
+  ensureDirectory,
   pathExists,
 } from "../account-store/storage.js";
 import { sanitizeConfigForAccountAuth } from "../account-store/config.js";
@@ -138,6 +140,8 @@ export async function persistProxyUpstreamAccountSelection(
   account: ManagedAccount,
 ): Promise<void> {
   const proxyDataDir = resolveProxyDataDir(store.paths.codexTeamDir);
+  await ensureDirectory(proxyDataDir, DIRECTORY_MODE);
+
   const state = await readProxyState(store.paths.codexTeamDir);
   const authBackupPath = state?.direct_auth_backup_path ?? join(proxyDataDir, "last-direct-auth.json");
   const configBackupPath = state?.direct_config_backup_path ?? join(proxyDataDir, "last-direct-config.toml");

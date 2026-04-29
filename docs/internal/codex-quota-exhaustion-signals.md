@@ -44,6 +44,7 @@ Buffered REST replay remains simple:
 
 - replay is allowed before any response body is written
 - replay stops after one retry or when no alternate upstream exists
+- API-key `/v1/responses` replay stops when the request carries an upstream `previous_response_id`; these ids are scoped to the original upstream account/project, and the API-key transparent path does not own enough checkpoint state to rebuild the full conversation safely
 
 Websocket `/v1/responses` replay uses a narrower boundary:
 
@@ -74,3 +75,5 @@ Terminal proxy request logs should keep recording:
 - `service_tier` (`default` or `priority`)
 
 For websocket turns, these fields belong on the terminal `/v1/responses` record, not on the initial `101` upgrade record.
+
+When replay is intentionally skipped, `replay_skip_reason` should describe the boundary that stopped it. For example, `previous_response_id` means a transparent API-key request is pinned to an upstream-owned response id and cannot be safely replayed across accounts.

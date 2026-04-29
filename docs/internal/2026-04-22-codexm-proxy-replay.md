@@ -55,6 +55,7 @@ Buffered REST routes already hold the full upstream response before writing to t
   - select a new upstream with autoswitch ranking
   - persist it as the proxy current upstream
   - resend the same request once
+- For transparent API-key `/v1/responses`, do not replay across accounts when the request carries an upstream `previous_response_id`; return the original failure with `replay_skip_reason = previous_response_id` because the proxy cannot safely translate that upstream-owned parent id
 - On the second failure, or if no alternate upstream exists:
   - return the original failure
 
