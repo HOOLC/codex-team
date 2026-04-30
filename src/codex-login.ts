@@ -47,6 +47,19 @@ interface BrowserCallbackResult {
   state: string;
 }
 
+type BrowserCallbackWaiter = (
+  state: string,
+  stderr: NodeJS.WriteStream,
+) => Promise<{ result: BrowserCallbackResult; redirectUri: string }>;
+
+type BrowserOpenErrorHandler = (error: Error) => void;
+type SpawnLike = typeof spawn;
+
+interface CodexLoginProviderOptions {
+  spawnImpl?: SpawnLike;
+  waitForBrowserCallback?: BrowserCallbackWaiter;
+}
+
 interface PkceCodes {
   codeVerifier: string;
   codeChallenge: string;
@@ -83,7 +96,11 @@ function buildAuthorizeUrl(state: string, redirectUri: string, pkce: PkceCodes):
   return `${CODEX_AUTH_BASE_URL}/oauth/authorize?${params.toString()}`;
 }
 
-function openBrowser(url: string): void {
+function openBrowser(
+  url: string,
+  onError: BrowserOpenErrorHandler = () => undefined,
+  spawnImpl: SpawnLike = spawn,
+): void {
   const command =
     process.platform === "darwin"
       ? "open"
@@ -91,11 +108,12 @@ function openBrowser(url: string): void {
         ? "cmd"
         : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  const child = spawn(command, args, {
+  const child = spawnImpl(command, args, {
     detached: true,
     stdio: "ignore",
   });
 
+  child.on("error", onError);
   child.unref();
 }
 
@@ -261,7 +279,13 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function createCodexLoginProvider(fetchImpl: typeof fetch = globalThis.fetch): CodexLoginProvider {
+export function createCodexLoginProvider(
+  fetchImpl: typeof fetch = globalThis.fetch,
+  options: CodexLoginProviderOptions = {},
+): CodexLoginProvider {
+  const spawnImpl = options.spawnImpl ?? spawn;
+  const waitForBrowserCallbackImpl = options.waitForBrowserCallback ?? waitForBrowserCallback;
+
   return {
     async login(request: CodexLoginRequest): Promise<AuthSnapshot> {
       if (request.mode === "browser") {
@@ -272,12 +296,14 @@ export function createCodexLoginProvider(fetchImpl: typeof fetch = globalThis.fe
 
         request.stderr.write(`Open this URL to authenticate Codex:\n${authUrl}\n`);
         try {
-          openBrowser(authUrl);
+          openBrowser(authUrl, (error) => {
+            request.stderr.write(`Failed to open browser automatically: ${error.message}\n`);
+          }, spawnImpl);
         } catch (error) {
           request.stderr.write(`Failed to open browser automatically: ${(error as Error).message}\n`);
         }
 
-        const { result } = await waitForBrowserCallback(state, request.stderr);
+        const { result } = await waitForBrowserCallbackImpl(state, request.stderr);
         const tokens = await exchangeCodeForTokens(fetchImpl, result.code, redirectUri, pkce.codeVerifier);
         return authSnapshotFromTokens(tokens);
       }
