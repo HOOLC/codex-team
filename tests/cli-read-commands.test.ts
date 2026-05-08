@@ -2778,7 +2778,7 @@ wire_api = "responses"
 
       const listStdout = captureWritable();
       listStdout.stream.isTTY = true;
-      listStdout.stream.columns = 72;
+      listStdout.stream.columns = 76;
       const listCode = await runCli(["list"], {
         store,
         stdout: listStdout.stream,
@@ -2795,7 +2795,7 @@ wire_api = "responses"
       const segments = separatorSegments(separatorLine);
 
       expect(tableStartIndex).toBeGreaterThanOrEqual(0);
-      expect(tableLines.every((line) => line.length <= 72)).toBe(true);
+      expect(tableLines.every((line) => line.length <= 76)).toBe(true);
       expect(primaryRow).toBeDefined();
       expect(primaryRow).toContain("very-long");
       expect(primaryRow).not.toContain("very-long-primary-account-name");

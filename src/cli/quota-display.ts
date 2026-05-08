@@ -23,6 +23,20 @@ const ANSI_CYAN = "\u001b[36m";
 const ANSI_BLACK = "\u001b[30m";
 const ANSI_BG_RED = "\u001b[41m";
 
+export const QUOTA_DISPLAY_COLUMN_WIDTHS = {
+  nameMin: 10,
+  namePreferred: 22,
+  identityMin: 8,
+  planMin: 4,
+  planMax: 7,
+  scoreMin: 5,
+  scoreMax: 6,
+  etaWidth: 6,
+  usedWidth: 6,
+  resetMin: 11,
+  resetMax: 18,
+} as const;
+
 function styleText(
   value: string,
   ...codes: Array<
@@ -44,6 +58,40 @@ export function stripAnsi(value: string): string {
 
 export function visibleWidth(value: string): number {
   return stripAnsi(value).length;
+}
+
+export function padVisibleEnd(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  return `${value}${" ".repeat(padding)}`;
+}
+
+export function padVisibleStart(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  return `${" ".repeat(padding)}${value}`;
+}
+
+export function padVisibleCenter(value: string, width: number): string {
+  const padding = Math.max(0, width - visibleWidth(value));
+  const left = Math.floor(padding / 2);
+  const right = padding - left;
+  return `${" ".repeat(left)}${value}${" ".repeat(right)}`;
+}
+
+export function truncateVisible(value: string, width: number): string {
+  if (width <= 0) {
+    return "";
+  }
+
+  if (visibleWidth(value) <= width) {
+    return value;
+  }
+
+  const plain = stripAnsi(value);
+  if (width <= 2) {
+    return plain.slice(0, width);
+  }
+
+  return `${plain.slice(0, width - 2)}..`;
 }
 
 export function colorizeBlockedRow(value: string): string {

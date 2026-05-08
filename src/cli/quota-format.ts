@@ -16,8 +16,12 @@ import {
   isAccountFullyUnavailable,
   normalizeAccountScore,
   normalizePlusScore,
-  stripAnsi,
+  padVisibleCenter,
+  padVisibleEnd,
+  padVisibleStart,
+  QUOTA_DISPLAY_COLUMN_WIDTHS,
   toQuotaEtaSummary,
+  truncateVisible,
   visibleWidth,
 } from "./quota-display.js";
 import { buildListSummary } from "./quota-summary.js";
@@ -28,23 +32,6 @@ import type {
   CurrentListStatusLike,
   QuotaEtaSummary,
 } from "./quota-types.js";
-
-function padVisibleEnd(value: string, width: number): string {
-  const padding = Math.max(0, width - visibleWidth(value));
-  return `${value}${" ".repeat(padding)}`;
-}
-
-function padVisibleStart(value: string, width: number): string {
-  const padding = Math.max(0, width - visibleWidth(value));
-  return `${" ".repeat(padding)}${value}`;
-}
-
-function padVisibleCenter(value: string, width: number): string {
-  const padding = Math.max(0, width - visibleWidth(value));
-  const left = Math.floor(padding / 2);
-  const right = padding - left;
-  return `${" ".repeat(left)}${value}${" ".repeat(right)}`;
-}
 
 interface TableColumn {
   key: string;
@@ -165,23 +152,6 @@ function compactTableIdentity(value: string, width: number): string {
   return compactIdentity(value, width);
 }
 
-function truncateVisible(value: string, width: number): string {
-  if (width <= 0) {
-    return "";
-  }
-
-  if (visibleWidth(value) <= width) {
-    return value;
-  }
-
-  const plain = stripAnsi(value);
-  if (width <= 2) {
-    return plain.slice(0, width);
-  }
-
-  return `${plain.slice(0, width - 2)}..`;
-}
-
 interface QuotaDisplayRow {
   rowStyle?: "red-bg";
   markers: string;
@@ -245,48 +215,56 @@ function computeBudgetedQuotaTableWidths(
   terminalWidth: number,
   showEtaColumn: boolean,
 ): BudgetedQuotaTableWidths | null {
+  const markersWidth = visibleWidth(formatAccountListMarkers({}));
   const nameWidths = resolveQuotaDisplayWidth({
     header: `${formatAccountListMarkers({})}NAME`,
     values: rows.map((row) => `${row.markers}${row.displayName}`),
-    minWidth: 10,
+    minWidth: markersWidth + QUOTA_DISPLAY_COLUMN_WIDTHS.nameMin,
   });
   const accountIdWidths = resolveQuotaDisplayWidth({
     header: "IDENTITY",
     values: rows.map(() => "IDENTITY"),
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.identityMin,
   });
   const planWidths = resolveQuotaDisplayWidth({
     header: "PLAN",
     values: rows.map((row) => row.planType),
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.planMin,
   });
   const scoreWidths = resolveQuotaDisplayWidth({
     header: "SCORE",
     values: rows.map((row) => row.score),
-    minWidth: 5,
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.scoreMin,
   });
   const etaWidths = resolveQuotaDisplayWidth({
     header: "ETA",
     values: rows.map((row) => row.eta),
-    minWidth: 3,
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.etaWidth,
   });
   const fiveHourWidths = resolveQuotaDisplayWidth({
     header: "5H",
     values: rows.map((row) => row.fiveHour),
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.usedWidth,
   });
   const oneWeekWidths = resolveQuotaDisplayWidth({
     header: "1W",
     values: rows.map((row) => row.oneWeek),
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.usedWidth,
   });
   const fiveHourResetWidths = resolveQuotaDisplayWidth({
     header: "RESET",
     values: rows.map((row) => row.fiveHourReset),
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.resetMin,
   });
   const oneWeekResetWidths = resolveQuotaDisplayWidth({
     header: "RESET",
     values: rows.map((row) => row.oneWeekReset),
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.resetMin,
   });
   const nextResetWidths = resolveQuotaDisplayWidth({
     header: "NEXT RESET",
     values: rows.map((row) => row.nextReset),
+    minWidth: QUOTA_DISPLAY_COLUMN_WIDTHS.resetMin,
   });
 
   const collapsedColumnCount = showEtaColumn ? 8 : 7;
@@ -389,7 +367,7 @@ function renderCompactQuotaRows(
     const scoreWidth = visibleWidth(row.score);
     const etaBlockWidth = showEtaColumn ? 1 + visibleWidth(row.eta) : 0;
     const planWidth = row.planType !== "" ? 1 + visibleWidth(row.planType) : 0;
-    const minimumNameWidth = 10;
+    const minimumNameWidth = QUOTA_DISPLAY_COLUMN_WIDTHS.nameMin;
     const reservedCoreWidth =
       visibleWidth(row.markers) + 1 + scoreWidth + etaBlockWidth + minimumNameWidth;
     const includePlan = row.planType !== ""

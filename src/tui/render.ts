@@ -3,6 +3,17 @@ import {
   formatTuiUsageSummaryLine,
   formatTuiUsageTrendLine,
 } from "../local-usage/format.js";
+import {
+  colorizeBlockedRow,
+  compactIdentity,
+  padVisibleCenter,
+  padVisibleEnd,
+  padVisibleStart,
+  QUOTA_DISPLAY_COLUMN_WIDTHS,
+  stripAnsi,
+  truncateVisible,
+  visibleWidth,
+} from "../cli/quota-display.js";
 import type {
   AccountDashboardAccount,
   AccountDashboardDetailOverride,
@@ -15,8 +26,6 @@ import type {
 const ANSI = {
   altOn: "\u001B[?1049h",
   altOff: "\u001B[?1049l",
-  bgRed: "\u001B[41m",
-  black: "\u001B[30m",
   bold: "\u001B[1m",
   clear: "\u001B[2J",
   cyan: "\u001B[36m",
@@ -42,18 +51,18 @@ const WIDE_LIST_MIN_WIDTH = 72;
 const WIDE_LIST_MAX_WIDTH = 88;
 const WIDE_DETAIL_MIN_WIDTH = 28;
 const WIDE_DETAIL_PREFERRED_WIDTH = 40;
-const WIDE_NAME_MIN_WIDTH = 10;
-const WIDE_NAME_PREFERRED_WIDTH = 22;
-const WIDE_IDENTITY_MIN_WIDTH = 8;
-const WIDE_PLAN_MIN_WIDTH = 4;
-const WIDE_PLAN_MAX_WIDTH = 7;
-const WIDE_SCORE_MIN_WIDTH = 5;
-const WIDE_SCORE_MAX_WIDTH = 6;
-const WIDE_ETA_WIDTH = 6;
-const WIDE_USED_MIN_WIDTH = 4;
-const WIDE_USED_MAX_WIDTH = 6;
-const WIDE_RESET_MIN_WIDTH = 11;
-const WIDE_RESET_MAX_WIDTH = 18;
+const WIDE_NAME_MIN_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.nameMin;
+const WIDE_NAME_PREFERRED_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.namePreferred;
+const WIDE_IDENTITY_MIN_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.identityMin;
+const WIDE_PLAN_MIN_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.planMin;
+const WIDE_PLAN_MAX_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.planMax;
+const WIDE_SCORE_MIN_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.scoreMin;
+const WIDE_SCORE_MAX_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.scoreMax;
+const WIDE_ETA_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.etaWidth;
+const WIDE_USED_MIN_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.usedWidth;
+const WIDE_USED_MAX_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.usedWidth;
+const WIDE_RESET_MIN_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.resetMin;
+const WIDE_RESET_MAX_WIDTH = QUOTA_DISPLAY_COLUMN_WIDTHS.resetMax;
 
 type LayoutMode = "wide" | "stacked" | "list";
 
@@ -94,14 +103,6 @@ interface FilteredAccounts {
   selected: AccountDashboardAccount | null;
 }
 
-function stripAnsi(value: string): string {
-  return value.replace(/\u001B\[[0-9;?]*[A-Za-z]/g, "");
-}
-
-function visibleWidth(value: string): number {
-  return stripAnsi(value).length;
-}
-
 function repeat(char: string, width: number): string {
   return Array.from({ length: Math.max(0, width) }, () => char).join("");
 }
@@ -112,33 +113,6 @@ function isTerminalTooSmall(width: number, height: number): boolean {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-function truncate(value: string, width: number): string {
-  if (width <= 0) {
-    return "";
-  }
-  if (visibleWidth(value) <= width) {
-    return value;
-  }
-  if (width <= 2) {
-    return value.slice(0, width);
-  }
-  return `${value.slice(0, width - 2)}..`;
-}
-
-function compactIdentity(value: string, width: number): string {
-  if (visibleWidth(value) <= width) {
-    return value;
-  }
-  if (width <= 4) {
-    return value.slice(0, width);
-  }
-
-  const marker = "..";
-  const suffixWidth = Math.min(3, Math.max(1, Math.floor((width - marker.length) / 2)));
-  const prefixWidth = Math.max(1, width - marker.length - suffixWidth);
-  return `${value.slice(0, prefixWidth)}${marker}${value.slice(-suffixWidth)}`;
 }
 
 function displayAccountName(account: AccountDashboardAccount): string {
@@ -161,7 +135,7 @@ function compactDetailLine(line: string, width: number): string {
     return `${prefix}${compactIdentity(value, availableWidth)}`;
   }
 
-  return truncate(line, width);
+  return truncateVisible(line, width);
 }
 
 function resolveDynamicColumnWidth(options: {
@@ -341,21 +315,6 @@ function getWideColumnWidths(
   };
 }
 
-function padEndVisible(value: string, width: number): string {
-  return `${value}${repeat(" ", Math.max(0, width - visibleWidth(value)))}`;
-}
-
-function padStartVisible(value: string, width: number): string {
-  return `${repeat(" ", Math.max(0, width - visibleWidth(value)))}${value}`;
-}
-
-function padVisibleCenter(value: string, width: number): string {
-  const padding = Math.max(0, width - visibleWidth(value));
-  const left = Math.floor(padding / 2);
-  const right = padding - left;
-  return `${repeat(" ", left)}${value}${repeat(" ", right)}`;
-}
-
 function color(value: string, tone: "green" | "yellow" | "red" | "cyan" | "dim"): string {
   const code =
     tone === "green"
@@ -379,7 +338,7 @@ function invert(value: string): string {
 }
 
 function blockRow(value: string): string {
-  return `${ANSI.black}${ANSI.bgRed}${stripAnsi(value)}${ANSI.reset}`;
+  return colorizeBlockedRow(value);
 }
 
 function fitLines(lines: string[], height: number): string[] {
@@ -427,7 +386,7 @@ function getLayout(
     const availableWidth = Math.max(1, innerWidth - PANE_GAP.length);
     const wideColumns = getWideColumnWidths(WIDE_LIST_MAX_WIDTH, showEtaColumn, filteredAccounts);
     const minListWidth = Math.max(WIDE_LIST_MIN_WIDTH, wideColumns.minListWidth);
-    if (availableWidth >= minListWidth + WIDE_DETAIL_MIN_WIDTH) {
+    if (availableWidth >= minListWidth + WIDE_DETAIL_PREFERRED_WIDTH) {
       const preferredDetailWidth = Math.min(
         Math.max(WIDE_DETAIL_MIN_WIDTH, WIDE_DETAIL_PREFERRED_WIDTH),
         Math.max(WIDE_DETAIL_MIN_WIDTH, availableWidth - minListWidth),
@@ -456,7 +415,11 @@ function getLayout(
   }
 
   if (innerWidth >= STACKED_LAYOUT_MIN_WIDTH && bodyHeight >= 8) {
-    const listRows = Math.max(5, Math.min(Math.max(5, accountCount + 1), Math.floor(bodyHeight * 0.45)));
+    const desiredListRows = accountCount === 0 ? 1 : Math.min(accountCount, 4) * 2;
+    const listRows = Math.max(
+      4,
+      Math.min(Math.max(4, desiredListRows), Math.floor(bodyHeight * 0.35)),
+    );
     return {
       frame,
       innerWidth,
@@ -487,7 +450,7 @@ function renderFramedScreen(width: number, height: number, layout: DashboardLayo
   const topBorder = `+${repeat("-", layout.innerWidth)}+`;
   const framed = [
     topBorder,
-    ...fitLines(lines, layout.innerHeight).map((line) => `|${padEndVisible(truncate(line, layout.innerWidth), layout.innerWidth)}|`),
+    ...fitLines(lines, layout.innerHeight).map((line) => `|${padVisibleEnd(truncateVisible(line, layout.innerWidth), layout.innerWidth)}|`),
     topBorder,
   ];
 
@@ -706,22 +669,22 @@ function renderWideListRow(
   });
   const line = [
     markers,
-    padEndVisible(truncate(displayName, nameWidth), nameWidth),
+    padVisibleEnd(truncateVisible(displayName, nameWidth), nameWidth),
     " ",
-    padEndVisible(compactIdentity(account.identityLabel, identityWidth), identityWidth),
+    padVisibleEnd(compactIdentity(account.identityLabel, identityWidth), identityWidth),
     " ",
-    padEndVisible(truncate(account.planLabel, planWidth), planWidth),
+    padVisibleEnd(truncateVisible(account.planLabel, planWidth), planWidth),
     " ",
-    padStartVisible(account.scoreLabel, scoreWidth),
-    showEtaColumn ? ` ${padStartVisible(account.etaLabel, WIDE_ETA_WIDTH)}` : "",
+    padVisibleStart(account.scoreLabel, scoreWidth),
+    showEtaColumn ? ` ${padVisibleStart(account.etaLabel, WIDE_ETA_WIDTH)}` : "",
     " ",
-    padStartVisible(account.fiveHourLabel, fiveHourWidth),
+    padVisibleStart(account.fiveHourLabel, fiveHourWidth),
     " ",
-    padEndVisible(truncate(account.fiveHourResetLabel, fiveHourResetWidth), fiveHourResetWidth),
+    padVisibleEnd(truncateVisible(account.fiveHourResetLabel, fiveHourResetWidth), fiveHourResetWidth),
     " ",
-    padStartVisible(account.oneWeekLabel, oneWeekWidth),
+    padVisibleStart(account.oneWeekLabel, oneWeekWidth),
     " ",
-    padEndVisible(truncate(account.oneWeekResetLabel, oneWeekResetWidth), oneWeekResetWidth),
+    padVisibleEnd(truncateVisible(account.oneWeekResetLabel, oneWeekResetWidth), oneWeekResetWidth),
   ].join("");
 
   return styleListLine(line, account, selected);
@@ -739,7 +702,7 @@ function renderCompactListRow(
   const planWidth = account.planLabel === ""
     ? 0
     : Math.min(WIDE_PLAN_MAX_WIDTH, visibleWidth(account.planLabel));
-  const minimumNameWidth = 10;
+  const minimumNameWidth = WIDE_NAME_MIN_WIDTH;
   const reservedCoreWidth = markersWidth + 1 + scoreWidth + (showEtaColumn ? 1 + etaWidth : 0) + minimumNameWidth;
   const includePlan = account.planLabel !== "" && width - reservedCoreWidth >= 1 + planWidth;
   const nameWidth = Math.max(
@@ -754,11 +717,11 @@ function renderCompactListRow(
   });
   const firstLine = [
     markers,
-    padEndVisible(truncate(displayName, nameWidth), nameWidth),
-    includePlan ? ` ${padEndVisible(truncate(account.planLabel, planWidth), planWidth)}` : "",
+    padVisibleEnd(truncateVisible(displayName, nameWidth), nameWidth),
+    includePlan ? ` ${padVisibleEnd(truncateVisible(account.planLabel, planWidth), planWidth)}` : "",
     " ",
-    padStartVisible(account.scoreLabel, scoreWidth),
-    showEtaColumn ? ` ${padStartVisible(account.etaLabel, etaWidth)}` : "",
+    padVisibleStart(account.scoreLabel, scoreWidth),
+    showEtaColumn ? ` ${padVisibleStart(account.etaLabel, etaWidth)}` : "",
   ].join("");
 
   const secondLineIndent = " ".repeat(markersWidth);
@@ -777,7 +740,7 @@ function renderCompactListRow(
   if (account.identityLabel !== "" && identityWidth >= 8) {
     secondSegments.push(compactIdentity(account.identityLabel, identityWidth));
   }
-  const secondLine = `${secondLineIndent}${truncate(secondSegments.join(" | "), secondLineWidth)}`;
+  const secondLine = `${secondLineIndent}${truncateVisible(secondSegments.join(" | "), secondLineWidth)}`;
 
   return [
     styleListLine(firstLine, account, selected),
@@ -838,7 +801,7 @@ function renderDetailLines(
 ): string[] {
   if (detailOverride) {
     return fitLines(
-      [emphasize(detailOverride.title), ...detailOverride.lines].map((line) => truncate(line, width)),
+      [emphasize(detailOverride.title), ...detailOverride.lines].map((line) => truncateVisible(line, width)),
       height,
     );
   }
@@ -913,7 +876,7 @@ function renderBodyLines(
     );
     return fitLines(
       Array.from({ length: layout.bodyHeight }, (_, index) =>
-        `${padEndVisible(listLines[index] ?? "", layout.listWidth)}${PANE_GAP}${padEndVisible(detailLines[index] ?? "", layout.detailWidth)}`,
+        `${padVisibleEnd(listLines[index] ?? "", layout.listWidth)}${PANE_GAP}${padVisibleEnd(detailLines[index] ?? "", layout.detailWidth)}`,
       ),
       height,
     );
@@ -1015,7 +978,7 @@ function renderFilterLine(
   const query = state.query === "" && !state.filterActive
     ? "(press / to filter)"
     : formatInteractiveQuery(state.query, state.cursor, state.filterActive);
-  return truncate(`filter: ${query} | showing ${filteredCount}/${snapshot.accounts.length}`, width);
+  return truncateVisible(`filter: ${query} | showing ${filteredCount}/${snapshot.accounts.length}`, width);
 }
 
 function renderHintBar(width: number, selectedAccount: AccountDashboardAccount | null): string {
@@ -1033,7 +996,7 @@ function renderHintBar(width: number, selectedAccount: AccountDashboardAccount |
       : width < 176
         ? `/ filter | Enter | a auto | ${forceLabel} | p prot | o run | O iso | d desk | D rel | e exp | i imp | x del | u undo | q quit`
         : `j/k move | / filter | Enter switch | a autoswitch | ${wideForceLabel} | p protect | o codex | O isolated | d desktop | D relaunch | e export | i import | x delete | u undo | r refresh | q quit`;
-  return truncate(color(hint, "dim"), width);
+  return truncateVisible(color(hint, "dim"), width);
 }
 
 export function createInitialAccountDashboardState(initialQuery = ""): AccountDashboardState {
@@ -1058,7 +1021,7 @@ export function renderAccountDashboardScreen(
       'Resize the terminal, or use "codexm list".',
     ]
       .slice(0, Math.max(1, options.height))
-      .map((line) => truncate(line, Math.max(1, options.width)))
+      .map((line) => truncateVisible(line, Math.max(1, options.width)))
       .join("\n");
   }
 
@@ -1089,11 +1052,11 @@ export function renderAccountDashboardScreen(
     ? emphasize(color(options.bannerMessage, "yellow"))
     : "";
   const lines = [
-    truncate(options.snapshot.headerLine, layout.innerWidth),
-    truncate(options.snapshot.currentStatusLine, layout.innerWidth),
-    truncate(options.snapshot.summaryLine, layout.innerWidth),
-    truncate(options.snapshot.poolLine, layout.innerWidth),
-    ...usageHeaderLines.map((line) => truncate(line, layout.innerWidth)),
+    truncateVisible(options.snapshot.headerLine, layout.innerWidth),
+    truncateVisible(options.snapshot.currentStatusLine, layout.innerWidth),
+    truncateVisible(options.snapshot.summaryLine, layout.innerWidth),
+    truncateVisible(options.snapshot.poolLine, layout.innerWidth),
+    ...usageHeaderLines.map((line) => truncateVisible(line, layout.innerWidth)),
     renderDivider(layout.innerWidth),
     ...renderBodyLines(
       options.snapshot,
@@ -1106,13 +1069,13 @@ export function renderAccountDashboardScreen(
       showEtaColumn,
     ),
     renderDivider(layout.innerWidth),
-    truncate(
+    truncateVisible(
       options.footerOverride
         ?? renderFilterLine(options.snapshot, normalized.state, filteredCount, layout.innerWidth),
       layout.innerWidth,
     ),
-    ...(bannerLine ? [truncate(bannerLine, layout.innerWidth)] : []),
-    truncate(
+    ...(bannerLine ? [truncateVisible(bannerLine, layout.innerWidth)] : []),
+    truncateVisible(
       options.statusOverride
         ?? formatStatusLine({
           snapshot: options.snapshot,
@@ -1125,7 +1088,7 @@ export function renderAccountDashboardScreen(
         }),
       layout.innerWidth,
     ),
-    truncate(
+    truncateVisible(
       options.hintOverride ?? renderHintBar(layout.innerWidth, normalized.filtered.selected),
       layout.innerWidth,
     ),

@@ -23,7 +23,7 @@ const PLAN_QUOTA_PROFILES: Record<PlanQuotaTier, PlanQuotaProfile> = {
   },
   pro: {
     fiveHourToOneWeekRawRatio: PRO_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
-    oneWeekCapacityInPlusUnits: 25 / 3,
+    oneWeekCapacityInPlusUnits: 50 / 3,
   },
   team: {
     fiveHourToOneWeekRawRatio: DIRECT_FIVE_HOUR_TO_ONE_WEEK_RAW_RATIO,
