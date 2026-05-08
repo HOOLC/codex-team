@@ -307,7 +307,7 @@ function flushLoop(): Promise<void> {
 }
 
 describe("Account Dashboard TUI", () => {
-  test("renders a split account dashboard with summary, list, and detail panes", () => {
+  test("uses stacked layout when side-by-side panes would crowd detail", () => {
     const screen = stripAnsi(
       renderAccountDashboardScreen({
         snapshot: createSnapshot("beta"),
@@ -323,23 +323,21 @@ describe("Account Dashboard TUI", () => {
     expect(screen).toContain("codexm | current beta | 2/3 usable | updated 13:24");
     expect(screen).toContain("Usage: today");
     expect(screen).toContain("Trend 30d:");
-    expect(screen).toContain("NAME");
-    expect(screen).toContain("IDENTITY");
     expect(screen).toContain("5H");
     expect(screen).toContain("1W");
-    expect(screen).toContain("USED");
-    expect(screen).toContain("RESET");
-    expect(screen).toContain("beta [st");
+    expect(screen).toContain("5H 36% | 1W 27% | 04-16 18:10 (4.7h)");
     expect(screen).toContain("alpha");
     expect(screen).toContain("Email: beta@example.com");
     expect(screen).toContain("beta [current] [protected]");
     expect(screen).toContain("Fetched: 2026-04-16 13:20");
-    expect(screen).toContain("Bottleneck: 5H");
+    expect(screen).toContain("Reason: cached quota after refresh failure");
     expect(screen).toContain("filter:");
     expect(screen).toContain("Enter");
     expect(screen).toContain("o run");
     expect(screen).toContain("D rel");
     expect(screen).toContain("e exp");
+    expect(screen).not.toContain("NAME");
+    expect(screen).not.toContain("IDENTITY");
   });
 
   test("keeps wide header columns aligned with account rows", () => {
@@ -347,7 +345,7 @@ describe("Account Dashboard TUI", () => {
       renderAccountDashboardScreen({
         snapshot: createSnapshot("alpha"),
         state: createInitialAccountDashboardState(),
-        width: 120,
+        width: 136,
         height: 28,
       }),
     );
@@ -382,7 +380,7 @@ describe("Account Dashboard TUI", () => {
       renderAccountDashboardScreen({
         snapshot,
         state: createInitialAccountDashboardState(),
-        width: 120,
+        width: 136,
         height: 28,
       }),
     );
@@ -395,7 +393,7 @@ describe("Account Dashboard TUI", () => {
       renderAccountDashboardScreen({
         snapshot: createSnapshot("alpha"),
         state: createInitialAccountDashboardState(),
-        width: 120,
+        width: 136,
         height: 28,
       }),
     );
@@ -452,7 +450,7 @@ describe("Account Dashboard TUI", () => {
         ...createInitialAccountDashboardState(),
         selected: 0,
       },
-      width: 120,
+      width: 136,
       height: 28,
     });
 
@@ -523,15 +521,11 @@ describe("Account Dashboard TUI", () => {
         snapshot,
         state: createInitialAccountDashboardState(),
         width: 120,
-        height: 28,
+        height: 32,
       }),
     );
-    const proxyRow = screen.split("\n").find((line) => (
-      line.includes(" proxy") && line.includes("64.6%")
-    ));
-    const upstreamRow = screen.split("\n").find((line) => (
-      line.includes("alpha") && line.includes("18%")
-    ));
+    const proxyRow = screen.split("\n").find((line) => line.includes(" proxy"));
+    const upstreamRow = screen.split("\n").find((line) => line.includes("@ alpha"));
 
     expect(proxyRow).toBeDefined();
     expect(proxyRow ?? "").not.toContain("@ proxy");
@@ -540,10 +534,47 @@ describe("Account Dashboard TUI", () => {
     expect(proxyRow).not.toContain(" pro ");
     expect(screen).toContain("64.6%");
     expect(screen).toContain("100.0%");
-    expect(screen).toContain("Pool: auto-switch eligible");
-    expect(screen).toContain("Last upstream: alpha (chatgpt");
     expect(screen).not.toContain("Identity: proxy");
     expect(screen).not.toContain("p prot");
+  });
+
+  test("keeps decimal used labels inside their columns in tight wide layout", () => {
+    const snapshot = createSnapshot("alpha");
+    snapshot.accounts[0] = {
+      ...snapshot.accounts[0]!,
+      fiveHourLabel: "62.5%",
+      oneWeekLabel: "27.4%",
+    };
+
+    const screen = stripAnsi(
+      renderAccountDashboardScreen({
+        snapshot,
+        state: createInitialAccountDashboardState(),
+        width: 136,
+        height: 28,
+      }),
+    );
+    const lines = screen.split("\n");
+    const headerLine = lines.find((line) => line.includes("NAME") && line.includes("USED"));
+    const separatorLine = headerLine ? lines[lines.indexOf(headerLine) + 1] : undefined;
+    const segments = separatorSegments(separatorLine ?? "");
+    const usedStarts = [
+      headerLine?.indexOf("USED") ?? -1,
+      headerLine?.indexOf("USED", Math.max(0, (headerLine?.indexOf("RESET") ?? -1) + 1)) ?? -1,
+    ];
+    const usedSegments = usedStarts.map((start) => (
+      segments.find((segment) => segment.start <= start && segment.end >= start)
+    ));
+
+    expect(headerLine).toBeDefined();
+    expect(separatorLine).toBeDefined();
+    expect(screen).toContain("62.5%");
+    expect(screen).toContain("27.4%");
+    expect(usedSegments).toHaveLength(2);
+    for (const segment of usedSegments) {
+      expect(segment).toBeDefined();
+      expect(((segment?.end ?? 0) - (segment?.start ?? 0)) + 1).toBeGreaterThanOrEqual("62.5%".length);
+    }
   });
 
   test("keeps selected row highlighting uniform when usage labels are colorized", () => {
@@ -558,7 +589,7 @@ describe("Account Dashboard TUI", () => {
     const screen = renderAccountDashboardScreen({
       snapshot,
       state: createInitialAccountDashboardState(),
-      width: 120,
+      width: 136,
       height: 28,
     });
     const lines = screen.split("\n");
@@ -613,7 +644,7 @@ describe("Account Dashboard TUI", () => {
       }),
     );
 
-    expect(screen).toContain("very-long-account-na..");
+    expect(screen).toContain("very-long-account..");
     expect(screen).toContain("Identity: acct-very-long-user-name:user-very-long-user-name");
   });
 
@@ -968,7 +999,7 @@ describe("Account Dashboard TUI", () => {
       renderAccountDashboardScreen({
         snapshot,
         state: createInitialAccountDashboardState(),
-        width: 120,
+        width: 136,
         height: 28,
       }),
     );
@@ -1884,7 +1915,7 @@ describe("Account Dashboard TUI", () => {
 
   test("keeps proxy current and moves the upstream marker immediately after a proxy-backed manual switch", async () => {
     const stdin = createInteractiveStdin();
-    const stdout = createInteractiveStdout();
+    const stdout = createInteractiveStdout(136, 32);
     let loadCount = 0;
     let resolveRefresh: ((snapshot: AccountDashboardSnapshot) => void) | null = null;
     const proxySnapshot = createSnapshot("proxy");
